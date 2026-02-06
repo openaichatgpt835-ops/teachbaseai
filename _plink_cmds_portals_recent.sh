@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select id, domain, member_id, install_type, updated_at, (local_client_id is not null) as has_local_client_id, (local_client_secret_encrypted is not null) as has_local_client_secret from portals order by updated_at desc limit 5;"

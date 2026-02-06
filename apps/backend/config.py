@@ -1,0 +1,43 @@
+"""Конфигурация приложения."""
+from functools import lru_cache
+from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    app_env: str = "development"
+    secret_key: str = "dev-secret-change-in-production"
+    debug: bool = True
+    public_base_url: str | None = None
+
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_db: str = "teachbaseai"
+    postgres_user: str = "teachbaseai"
+    postgres_password: str = "changeme"
+
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+
+    bitrix_client_id: str = ""
+    bitrix_client_secret: str = ""
+    bitrix_app_client_id: str = ""
+    bitrix_app_client_secret: str = ""
+
+    token_encryption_key: str = ""  # min 32 chars для шифрования токенов порталов
+
+    admin_default_email: str = "admin@localhost"
+    admin_default_password: str = "changeme"
+
+    jwt_secret: str = "your-jwt-secret-min-32-chars"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 60
+
+    debug_endpoints_enabled: bool = False
+    kb_storage_path: str = "/app/storage/kb"
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

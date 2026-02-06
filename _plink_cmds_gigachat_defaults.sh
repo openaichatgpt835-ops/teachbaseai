@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "update app_settings set value_json = jsonb_set(jsonb_set(jsonb_set(value_json,'{embedding_model}', '"'"'EmbeddingsGigaR'"'"'::jsonb),'{chat_model}','"'"'GigaChat-2-Pro'"'"'::jsonb),'{model}','"'"'EmbeddingsGigaR'"'"'::jsonb) where key='gigachat';"

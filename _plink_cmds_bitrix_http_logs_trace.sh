@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select created_at, portal_id, direction, kind, method, path, status_code, latency_ms, summary_json from bitrix_http_logs where trace_id in ('db799578-7983-4c','3db44e55-d82f-44','57268f12-a5e9-40') order by created_at;"

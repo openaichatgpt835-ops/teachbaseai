@@ -1,0 +1,9 @@
+**/node_modules
+.git
+__pycache__
+*.pyc
+.env
+dist
+.cursor
+*.md
+!.env.example

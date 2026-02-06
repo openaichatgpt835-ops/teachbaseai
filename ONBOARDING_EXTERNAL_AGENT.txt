@@ -1,0 +1,136 @@
+================================================================================
+ONBOARDING: Teachbase AI — контекст для внешнего агента (ChatGPT и др.)
+================================================================================
+Этот файл предназначен для загрузки в контекст внешнего ИИ-агента, который
+помогает по проекту. Не ссылаться на него из других файлов проекта.
+
+--------------------------------------------------------------------------------
+1. ЧТО ЭТО ЗА ПРОЕКТ
+--------------------------------------------------------------------------------
+Teachbase AI — мультипортальное приложение для Bitrix24 Cloud Marketplace.
+- Тысячи порталов Bitrix24, у каждого свой admin, токены, настройки.
+- Portal admin выбирает пользователей, кому доступен чат, и загружает базу знаний.
+- Глобальный admin (отдельная админка) видит все порталы, диалоги, сообщения,
+  события, очередь, воркеры, логи.
+- Входящие сообщения из Bitrix → дедуп → запись в БД → очередь → воркер
+  формирует ответ → outbox → отправка в Bitrix.
+
+--------------------------------------------------------------------------------
+2. ТЕХСТЕК
+--------------------------------------------------------------------------------
+- Backend: Python 3.12, FastAPI, Uvicorn. REST API, OAuth Bitrix24, event handlers.
+- Frontend: React SPA (Vite), админка + UI внутри Bitrix (placement iframe).
+- Worker: RQ (Redis Queue), задачи respond и др.
+- БД: PostgreSQL 16.
+- Кэш/очередь: Redis.
+- Миграции: Alembic (alembic/, alembic.ini).
+- Общие типы/DTO: TypeScript в packages/shared (api.ts и др.).
+
+--------------------------------------------------------------------------------
+3. СТРУКТУРА РЕПОЗИТОРИЯ
+--------------------------------------------------------------------------------
+apps/
+  backend/          — FastAPI приложение
+    main.py         — точка входа
+    config.py       — настройки из env
+    database.py     — подключение к Postgres
+    auth.py         — JWT для админки
+    routers/        — эндпоинты (health, admin_*, bitrix, portal, debug)
+    services/       — бизнес-логика (bitrix_events, bot_provisioning, finalize_install и др.)
+    clients/        — внешние API (bitrix.py — единый клиент Bitrix REST)
+    models/         — SQLAlchemy ORM (portal, dialog, event, outbox и др.)
+    templates/      — handler.html, install.html (Bitrix iframe)
+    middleware/     — bitrix_log и др.
+    utils/          — bitrix_request и др.
+  frontend/         — React SPA
+    src/
+      pages/admin/  — страницы админки (Portals, Dialogs, System, Traces, Login)
+      pages/b24/    — страница внутри Bitrix (B24AppPage)
+      api/client.ts — HTTP-клиент к backend
+  worker/           — RQ worker
+    jobs.py         — задачи (respond и др.)
+
+packages/shared/    — общие TS типы, DTO (api.ts)
+
+docs/
+  ARCHITECTURE.md   — модули, таблицы, потоки, эндпоинты
+  ONBOARDING.md     — dev/prod, env, как смотреть логи
+  OPERATIONS.md     — runbook: не отвечаем, 429, токен умер, очередь растёт
+  BITRIX_DOCS_INDEX.md — канонические ссылки на документацию Bitrix24
+  BITRIX_INSTALL.md — инструкция пользователю по установке в Bitrix24
+
+alembic/            — миграции БД (versions/*.py)
+tests/              — pytest (backend), тесты health, install, finalize, симулятор
+infra/docker/       — Dockerfile.backend, frontend, worker
+infra/nginx/        — конфиги nginx (dev, prod, spa)
+scripts/            — деплой, миграции, SSH-проверки
+
+--------------------------------------------------------------------------------
+4. КЛЮЧЕВЫЕ ТАБЛИЦЫ БД
+--------------------------------------------------------------------------------
+portals, portal_tokens, portal_users_access, dialogs, messages, events, outbox,
+billing_plans, portal_billing, usage_counters, admin_users.
+Идентификаторы Bitrix: храним raw и canonical; дедуп по (portal_id, provider_message_id/event_id).
+Outbox pattern: запись → отправка → статус; retries ограничены; при ошибке видно в админке.
+
+--------------------------------------------------------------------------------
+5. КЛЮЧЕВЫЕ ЭНДПОИНТЫ
+--------------------------------------------------------------------------------
+Система:     GET /health, /ready
+Админка:     /v1/admin/auth/* (login, refresh, me), /v1/admin/portals/*, dialogs, messages, events, outbox, system (health, queue, workers), logs (backend, worker)
+Bitrix:      GET /v1/bitrix/install, /handler (HTML); POST /v1/bitrix/install/complete, install/finalize (XHR); GET oauth/callback; POST /v1/bitrix/events, placement
+Portal:      /v1/portal/status, settings, allowed-users, kb/upload, chats/provision, setup
+Debug:       POST /v1/debug/simulate/bitrix/incoming (только при DEBUG_ENDPOINTS_ENABLED, admin JWT)
+
+Админка и admin API по умолчанию слушают localhost; доступ к админке — через SSH-туннель.
+Публично — только нужные Bitrix endpoints (callback, events) через nginx/HTTPS.
+
+--------------------------------------------------------------------------------
+6. ПОТОК ВХОДЯЩЕГО СООБЩЕНИЯ
+--------------------------------------------------------------------------------
+Bitrix event → POST /v1/bitrix/events → дедуп по (portal_id, provider_message_id) →
+запись events(rx), dialogs upsert, messages(rx) → enqueue respond_job →
+Worker: respond_job → ответ (rule-based/LLM) → message(tx), outbox(created) →
+Bitrix client отправляет → outbox(sent/error), events(send_ok/send_err).
+Политика: 1 входящее → макс 1 исходящий ответ (multi-reply — отдельная стратегия).
+
+--------------------------------------------------------------------------------
+7. BITRIX24 ИНТЕГРАЦИЯ
+--------------------------------------------------------------------------------
+OAuth + placement + event.bind. Источник истины по Bitrix24: docs/BITRIX_DOCS_INDEX.md.
+Scopes: imbot, im, placement, user. Единый клиент Bitrix — apps/backend/clients/bitrix.py.
+При установке приложения: install/complete сохраняет токены и регистрирует бота (ensure_bot);
+install/finalize — allowlist пользователей и provision (welcome сообщения).
+Allowlist: если непустой — отвечаем только разрешённым; иначе событие blocked_by_acl.
+
+--------------------------------------------------------------------------------
+8. РАЗРАБОТКА И ЗАПУСК
+--------------------------------------------------------------------------------
+Dev:  cp .env.example .env; docker compose -f docker-compose.dev.yml up -d
+      Гейт: http://localhost:3000. Логин админки: admin@localhost / changeme.
+Prod: Сервер 109.73.193.61. docker compose -f docker-compose.prod.yml up -d.
+      Админка только через SSH-туннель (напр. ssh -L 3000:127.0.0.1:3000 user@109.73.193.61).
+Env:  .env.example — полный список переменных; секреты не в коде; токены порталов только в БД (шифрованно).
+
+--------------------------------------------------------------------------------
+9. ТЕСТЫ И ПРОВЕРКИ
+--------------------------------------------------------------------------------
+Backend: pytest в tests/. Есть e2e-sanity через симулятор: входящее → rx → dialog → tx → send_ok → видно в админке.
+Симулятор: POST /v1/debug/simulate/bitrix/incoming с Bearer и телом {"portal_id": 1, "body": "ping"}.
+
+--------------------------------------------------------------------------------
+10. ЧТО УЧИТЫВАТЬ ПРИ ОТВЕТАХ
+--------------------------------------------------------------------------------
+- Файлы кода держать <300–500 строк; разделение: routers, services, clients, repos, models.
+- Изменения схемы БД — только миграциями Alembic.
+- API версионирование /v1/; контракты типизированы; единый формат ошибок.
+- Безопасность: /v1/admin/* — только admin JWT; /v1/bitrix/* — подпись/OAuth; debug — только при флаге и admin.
+- Не выводить секреты в UI/логи/ответах; логи структурированные (json), маскировать чувствительное.
+
+--------------------------------------------------------------------------------
+11. ДОПОЛНИТЕЛЬНО
+--------------------------------------------------------------------------------
+Подробности: docs/ARCHITECTURE.md, docs/ONBOARDING.md, docs/OPERATIONS.md, docs/BITRIX_INSTALL.md.
+Правила внутреннего агента (Cursor) — .cursor/rules/agent-plan-exec.mdc (не обязательно для внешнего агента).
+
+================================================================================

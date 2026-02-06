@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select created_at, portal_id, kind, status_code, (summary_json::jsonb)->>'bitrix_error_code' as error_code, (summary_json::jsonb)->>'bitrix_error_desc' as error_desc from bitrix_http_logs where trace_id='bed2f8a6-d346-4d' order by created_at;"

@@ -1,0 +1,163 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Teachbase AI — Статус</title>
+  <script src="https://unpkg.com/@bitrix24/b24jssdk@latest/dist/umd/index.min.js"></script>
+  <style>
+    body { font-family: system-ui; max-width: 560px; margin: 2rem auto; padding: 0 1rem; }
+    .status { padding: 0.5rem; margin: 0.5rem 0; border-radius: 4px; }
+    .pending { background: #fff3cd; }
+    .err { background: #f8d7da; }
+    .ok { background: #d4edda; }
+    table { width: 100%; border-collapse: collapse; margin: 0.5rem 0; font-size: 0.9rem; }
+    th, td { padding: 0.35rem 0.5rem; text-align: left; border-bottom: 1px solid #eee; }
+    th { color: #555; }
+    button { padding: 0.5rem 1rem; cursor: pointer; margin: 0.25rem 0.25rem 0.25rem 0; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    a.app-link { display: inline-block; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>Teachbase AI — Статус</h1>
+  <div id="status" class="status pending">Загрузка...</div>
+  <div id="creds-warning" class="status info" style="display:none;">
+    Для работы диагностики и авто-refresh токенов нужно вручную ввести client_id/client_secret
+    в админке (Portal → OAuth). Bitrix не передаёт client_secret автоматически.
+  </div>
+  <div id="content" style="display:none;">
+    <dl>
+      <dt>Домен портала</dt>
+      <dd id="domain">—</dd>
+      <dt>Статус бота</dt>
+      <dd id="bot-status">—</dd>
+      <dt>bot_id</dt>
+      <dd id="bot-id">—</dd>
+      <dt>CODE</dt>
+      <dd id="bot-code">—</dd>
+    </dl>
+    <h2>Allowlist</h2>
+    <table id="allowlist-table">
+      <thead><tr><th>Имя</th><th>user_id</th></tr></thead>
+      <tbody id="allowlist-body"></tbody>
+    </table>
+    <h2>Статистика (MVP)</h2>
+    <div id="stats">—</div>
+    <p>
+      <button id="btn-allowlist">Изменить allowlist</button>
+      <button id="btn-provision">Повторить provision</button>
+      <button id="btn-bot-check">Проверить бота</button>
+    </p>
+  </div>
+  <script>
+(function() {
+  const base = window.location.origin;
+  const status = document.getElementById('status');
+  const content = document.getElementById('content');
+
+  function setStatus(cls, text) {
+    status.className = 'status ' + cls;
+    status.textContent = text;
+  }
+
+  function apiPost(path, body) {
+    return fetch(base + '/api/v1/bitrix' + path.replace(/^\/v1\/bitrix/, ''), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify(body || {})
+    });
+  }
+
+  function loadStatus(auth) {
+    return apiPost('/app/status', { auth: auth }).then(function(r) {
+      if (r.status === 404 || r.status === 403) return null;
+      if (!r.ok) return null;
+      return r.json();
+    });
+  }
+
+  function render(data) {
+    if (!data || data.installed === false) {
+      window.location.href = base + '/api/v1/bitrix/install';
+      return;
+    }
+    document.getElementById('domain').textContent = data.domain || '—';
+    document.getElementById('bot-status').textContent = data.bot_status || '—';
+    document.getElementById('bot-id').textContent = data.bot_id != null ? data.bot_id : '—';
+    document.getElementById('bot-code').textContent = data.bot_code || '—';
+    if (data.local_creds_present === false) {
+      const warn = document.getElementById('creds-warning');
+      if (warn) warn.style.display = 'block';
+    }
+    const tbody = document.getElementById('allowlist-body');
+    tbody.innerHTML = '';
+    (data.allowlist || []).forEach(function(row) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + (row.name || '—') + '</td><td>' + (row.user_id ?? '—') + '</td>';
+      tbody.appendChild(tr);
+    });
+    const stats = data.stats || {};
+    document.getElementById('stats').textContent = [
+      stats.in_24h != null ? 'Входящих (24ч): ' + stats.in_24h : '',
+      stats.out_24h != null ? 'Исходящих (24ч): ' + stats.out_24h : '',
+      stats.blocked_24h != null ? 'Заблокировано (24ч): ' + stats.blocked_24h : ''
+    ].filter(Boolean).join(' | ') || '—';
+    content.style.display = 'block';
+    setStatus('ok', 'Готово');
+  }
+
+  document.getElementById('btn-allowlist').addEventListener('click', function() {
+    window.location.href = base + '/api/v1/bitrix/install';
+  });
+
+  document.getElementById('btn-provision').addEventListener('click', function() {
+    const btn = this;
+    btn.disabled = true;
+    const auth = window._lastAuth;
+    if (!auth) { btn.disabled = false; return; }
+    apiPost('/app/provision', { auth: auth }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+      .then(function(out) {
+        btn.disabled = false;
+        if (out.ok && out.data) setStatus('ok', 'Provision: ok=' + (out.data.ok_count || 0) + ', failed=' + (out.data.failed_count || 0));
+        else setStatus('err', 'Ошибка provision: ' + (out.data && out.data.error) || 'unknown');
+      })
+      .catch(function() { btn.disabled = false; setStatus('err', 'Ошибка запроса'); });
+  });
+
+  document.getElementById('btn-bot-check').addEventListener('click', function() {
+    const btn = this;
+    btn.disabled = true;
+    const auth = window._lastAuth;
+    if (!auth) { btn.disabled = false; return; }
+    apiPost('/app/bot-check', { auth: auth }).then(function(r) { return r.json(); })
+      .then(function(d) {
+        btn.disabled = false;
+        const msg = 'Ботов: ' + (d.bots_count ?? 0) + ', найден: ' + (d.found_by ? 'да' : 'нет') + (d.bot_status ? ', статус: ' + d.bot_status : '');
+        setStatus(d.bot_found_in_bitrix ? 'ok' : 'err', msg);
+      })
+      .catch(function() { btn.disabled = false; setStatus('err', 'Ошибка запроса'); });
+  });
+
+  if (typeof B24Js !== 'undefined') {
+    B24Js.initializeB24Frame().then(function($b24) {
+      const auth = $b24.auth.getAuthData();
+      if (!auth) {
+        setStatus('err', 'Нет данных авторизации. Обновите страницу.');
+        return;
+      }
+      window._lastAuth = auth;
+      loadStatus(auth).then(render).catch(function() {
+        setStatus('err', 'Не удалось загрузить статус.');
+        setTimeout(function() { window.location.href = base + '/api/v1/bitrix/install'; }, 2000);
+      });
+    }).catch(function() {
+      setStatus('err', 'Bitrix24 недоступен. Откройте в iframe Bitrix24.');
+    });
+  } else {
+    setStatus('err', 'Bitrix24 SDK не загружен.');
+  }
+})();
+  </script>
+</body>
+</html>

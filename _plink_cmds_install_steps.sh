@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select created_at, portal_id, provider_event_id, event_type, payload_json from events where event_type='install_step' order by created_at desc limit 10;"

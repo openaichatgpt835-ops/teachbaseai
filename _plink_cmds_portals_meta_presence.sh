@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select id, domain, updated_at, (metadata_json like '%\"bot_id\"%') as has_bot_id, (metadata_json like '%bot_app_token_enc%') as has_bot_app_token from portals where id=2;"

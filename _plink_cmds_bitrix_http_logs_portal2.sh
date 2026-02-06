@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select created_at, kind, status_code, summary_json from bitrix_http_logs where portal_id=2 and kind in ('imbot_register','imbot_bot_list','imbot_update','imbot_message_add','imbot_chat_add') order by created_at desc limit 20;"

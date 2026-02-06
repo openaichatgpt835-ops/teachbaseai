@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select created_at, portal_id, domain, member_id, dialog_id, user_id, event_name from bitrix_inbound_events where created_at > now() - interval '2 hours' order by created_at desc limit 20;"

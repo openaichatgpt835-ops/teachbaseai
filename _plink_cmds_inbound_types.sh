@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select created_at, trace_id, method, path, content_type, jsonb_typeof(parsed_redacted_json) as parsed_type, hints_json from bitrix_inbound_events where created_at > now() - interval '2 hours' order by created_at desc limit 5;"

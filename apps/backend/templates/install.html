@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Teachbase AI — Установка</title>
+  <script src="https://unpkg.com/@bitrix24/b24jssdk@latest/dist/umd/index.min.js"></script>
+  <style>
+    body { font-family: system-ui; max-width: 520px; margin: 2rem auto; padding: 0 1rem; }
+    .status { padding: 0.5rem; margin: 0.5rem 0; border-radius: 4px; }
+    .ok { background: #d4edda; }
+    .err { background: #f8d7da; }
+    .pending { background: #fff3cd; }
+    .info { background: #cce5ff; }
+    button { padding: 0.5rem 1rem; cursor: pointer; margin: 0.25rem; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    #user-list { max-height: 280px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 0.5rem; margin: 0.5rem 0; }
+    .user-row { padding: 0.35rem 0; border-bottom: 1px solid #eee; }
+    .user-row:last-child { border-bottom: none; }
+    input[type="search"] { width: 100%; padding: 0.4rem; margin-bottom: 0.5rem; box-sizing: border-box; }
+    a.app-link { margin-top: 0.5rem; display: inline-block; }
+  </style>
+</head>
+<body>
+  <h1>Teachbase AI — Установка</h1>
+  <div id="status" class="status pending">Загрузка Bitrix24...</div>
+  <div id="creds-warning" class="status info" style="display:none;">
+    Для работы диагностики и автоматического обновления токенов нужно вручную ввести client_id/client_secret
+    в админке (Portal → OAuth). Bitrix не передаёт client_secret автоматически.
+  </div>
+  <div id="step-users" style="display:none;">
+    <p class="info">Выберите сотрудников, которым разрешён чат с ботом:</p>
+    <input type="search" id="user-search" placeholder="Поиск по имени..." />
+    <div id="user-list"></div>
+    <p><label><input type="checkbox" id="select-all" /> Выбрать всех</label></p>
+    <p id="count-msg">Выбрано: 0</p>
+    <button id="btn-install" disabled>Установить приложение</button>
+    <button id="btn-retry" style="display:none;">Повторить шаг 2 (создать чаты)</button>
+    <div id="install-steps" style="margin-top:1rem; display:none;">
+      <div id="step-allowlist">Шаг 1: Доступ сохранён — ожидание</div>
+      <div id="step-bot">Шаг 2: Чат создан — ожидание</div>
+      <div id="step-ping">Шаг 3: Ping/pong — ожидание</div>
+      <div id="users-status" style="margin-top:0.5rem;"></div>
+    </div>
+  </div>
+  <script>
+(function() {
+  const base = window.location.origin;
+  const status = document.getElementById('status');
+  const stepUsers = document.getElementById('step-users');
+  const userList = document.getElementById('user-list');
+  const userSearch = document.getElementById('user-search');
+  const selectAll = document.getElementById('select-all');
+  const countMsg = document.getElementById('count-msg');
+  const btnInstall = document.getElementById('btn-install');
+  const btnRetry = document.getElementById('btn-retry');
+
+  function setStatus(cls, text) {
+    status.className = 'status ' + cls;
+    status.textContent = text;
+  }
+
+  function setStepUsers(show) {
+    stepUsers.style.display = show ? 'block' : 'none';
+  }
+
+  let b24Instance = null;
+
+  function callInstallFinish() {
+    return new Promise(function(resolve, reject) {
+      if (b24Instance && typeof b24Instance.installFinish === 'function') {
+        try {
+          b24Instance.installFinish();
+          return resolve();
+        } catch (e) {
+          return reject(e);
+        }
+      }
+      if (b24Instance && b24Instance.app && typeof b24Instance.app.installFinish === 'function') {
+        try {
+          b24Instance.app.installFinish();
+          return resolve();
+        } catch (e) {
+          return reject(e);
+        }
+      }
+      if (window.BX24 && typeof window.BX24.init === 'function') {
+        try {
+          window.BX24.init(function() {
+            if (typeof window.BX24.installFinish === 'function') {
+              try {
+                window.BX24.installFinish();
+                return resolve();
+              } catch (e) {
+                return reject(e);
+              }
+            }
+            return reject(new Error('Метод BX24.installFinish недоступен. Обновите страницу в Bitrix24.'));
+          });
+          return;
+        } catch (e) {
+          return reject(e);
+        }
+      }
+      if (window.BX24 && typeof window.BX24.installFinish === 'function') {
+        try {
+          window.BX24.installFinish();
+          return resolve();
+        } catch (e) {
+          return reject(e);
+        }
+      }
+      return reject(new Error('Не удалось завершить установку: нет доступного BX24.installFinish. Обновите страницу в Bitrix24.'));
+    });
+  }
+
+  let portalToken = '';
+  let portalId = 0;
+  let authData = null;
+  let allUsers = [];
+
+  function renderUsers(filter) {
+    const q = (filter || '').toLowerCase();
+    const filtered = q
+      ? allUsers.filter(function(u) {
+          const name = ((u.name || '') + ' ' + (u.last_name || '') + ' ' + (u.email || '')).toLowerCase();
+          return name.indexOf(q) !== -1;
+        })
+      : allUsers;
+    userList.innerHTML = filtered.map(function(u) {
+      const name = (u.name || '') + ' ' + (u.last_name || '').trim() || u.email || 'ID ' + u.id;
+      return '<div class="user-row"><label><input type="checkbox" class="user-cb" data-id="' + u.id + '" /> ' + escapeHtml(name) + '</label></div>';
+    }).join('');
+    userList.querySelectorAll('.user-cb').forEach(function(cb) {
+      cb.addEventListener('change', updateCount);
+    });
+    updateCount();
+  }
+
+  function getUserIdFromAuth(authData) {
+    if (!authData) return null;
+    const v = authData.user_id || authData.USER_ID || authData.userId || authData.USERID;
+    if (v == null || v === '') return null;
+    const n = parseInt(v, 10);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function fetchCurrentUserId($b24, authData) {
+    return new Promise(function(resolve) {
+      const fromAuth = getUserIdFromAuth(authData);
+      if (fromAuth) return resolve(fromAuth);
+      const caller = ($b24 && typeof $b24.callMethod === 'function') ? $b24 : (window.BX24 && typeof window.BX24.callMethod === 'function' ? window.BX24 : null);
+      if (!caller) return resolve(null);
+      try {
+        caller.callMethod('user.current', {}, function(res) {
+          try {
+            const data = res && (typeof res.data === 'function' ? res.data() : res.data);
+            const id = data && (data.ID || data.id);
+            const n = parseInt(id, 10);
+            return resolve(Number.isFinite(n) ? n : null);
+          } catch (e) {
+            return resolve(null);
+          }
+        });
+      } catch (e) {
+        return resolve(null);
+      }
+    });
+  }
+
+  function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  function updateCount() {
+    const n = userList.querySelectorAll('.user-cb:checked').length;
+    countMsg.textContent = 'Выбрано: ' + n;
+    btnInstall.disabled = n === 0;
+    selectAll.checked = n > 0 && n === userList.querySelectorAll('.user-cb').length;
+  }
+
+  selectAll.addEventListener('change', function() {
+    userList.querySelectorAll('.user-cb').forEach(function(cb) {
+      cb.checked = selectAll.checked;
+    });
+    updateCount();
+  });
+
+  userSearch.addEventListener('input', function() {
+    renderUsers(userSearch.value);
+  });
+
+  function setStepText(id, text, ok) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    el.style.color = ok ? 'green' : (ok === false ? 'red' : 'inherit');
+  }
+
+  function renderUserStatuses(failed, baseUrl) {
+    const box = document.getElementById('users-status');
+    if (!box) return;
+    baseUrl = baseUrl || base;
+    if (!failed || failed.length === 0) {
+      box.textContent = 'Все пользователи: ok';
+      box.style.color = 'green';
+      return;
+    }
+    box.innerHTML = '';
+    box.style.color = 'red';
+    box.appendChild(document.createTextNode('Ошибки: '));
+    failed.forEach(function(f, i) {
+      if (i > 0) box.appendChild(document.createTextNode('; '));
+      const line = 'user_id ' + f.user_id + ': ' + (f.bitrix_error_code || f.code || 'error') +
+        (f.bitrix_error_desc ? ' — ' + f.bitrix_error_desc : '');
+      if (f.trace_id_child) {
+        const a = document.createElement('a');
+        a.href = baseUrl + '/admin/traces/' + f.trace_id_child;
+        a.textContent = line + ' (trace: ' + f.trace_id_child + ')';
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.className = 'app-link';
+        box.appendChild(a);
+      } else {
+        box.appendChild(document.createTextNode(line));
+      }
+    });
+  }
+
+  function getTraceIdFromResponse(r, data) {
+    if (data && data.trace_id) return data.trace_id;
+    var h = r.headers.get('X-Trace-Id');
+    if (h) return h.trim();
+    return '';
+  }
+
+  function parseJsonOrThrow(r) {
+    var ct = (r.headers.get('Content-Type') || '').toLowerCase();
+    if (ct.indexOf('application/json') !== -1) {
+      return r.json();
+    }
+    return r.text().then(function(text) {
+      throw new Error('Ожидался JSON, сервер вернул не-JSON. Обновите страницу.');
+    });
+  }
+
+  function formatStepError(stepName, errorCode, traceId, message) {
+    var parts = ['Шаг ' + stepName + ': ошибка ' + (errorCode || 'unknown')];
+    if (traceId) parts.push('Trace: ' + traceId);
+    if (message) parts.push(message);
+    return parts.join('. ');
+  }
+
+  function finalizeInstall(ids) {
+    document.getElementById('install-steps').style.display = 'block';
+    btnRetry.style.display = 'none';
+    setStatus('pending', 'Финализация установки...');
+    setStepText('step-allowlist', 'Шаг 1: Доступ сохранён — выполнение', null);
+    setStepText('step-bot', 'Шаг 2: Чат создан — ожидание', null);
+    setStepText('step-ping', 'Шаг 3: Ping/pong — ожидание', null);
+    return fetch(base + '/api/v1/bitrix/install/finalize', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Authorization': 'Bearer ' + portalToken
+      },
+      body: JSON.stringify({
+        portal_id: portalId,
+        selected_user_ids: ids,
+        auth_context: {
+          domain: authData ? authData.domain : '',
+          member_id: authData ? authData.member_id : '',
+          access_token: authData ? authData.access_token : '',
+          refresh_token: authData ? authData.refresh_token : '',
+          user_id: authData ? (authData.user_id || authData.userId || '') : ''
+        }
+      })
+    }).then(function(r) {
+      return parseJsonOrThrow(r).then(function(data) {
+        var traceId = getTraceIdFromResponse(r, data);
+        if (!r.ok) {
+          var code = (data && data.error) || 'http_' + r.status;
+          var msg = (data && (data.message || data.detail)) || '';
+          var err = new Error(formatStepError('finalize', code, traceId, msg));
+          err.traceId = traceId;
+          throw err;
+        }
+        if (!data) throw new Error(formatStepError('finalize', 'empty', traceId, ''));
+        return { data: data, traceId: traceId };
+      });
+    }).then(function(out) {
+      var data = out.data;
+      var traceId = out.traceId;
+      if (data && data.local_creds_present === false) {
+        const warn = document.getElementById('creds-warning');
+        if (warn) warn.style.display = 'block';
+      }
+      const steps = data.steps || {};
+      setStepText('step-allowlist', 'Шаг 1: Доступ сохранён — ' + (steps.allowlist || 'ok'), steps.allowlist === 'ok');
+      const botOk = steps.ensure_bot === 'ok';
+      setStepText('step-bot', 'Шаг 2: Чат создан — ' + (botOk ? 'ok' : 'ошибка'), botOk);
+      if (steps.provision) {
+        const prov = steps.provision;
+        const provOk = prov.status === 'ok';
+        setStepText('step-ping', 'Шаг 3: Ping/pong — ' + (provOk ? 'готово, напишите ping' : 'ожидание исправления'), provOk);
+        renderUserStatuses(prov.failed, base);
+        if (!provOk) {
+          btnRetry.style.display = 'inline-block';
+        }
+      }
+      if (data.status !== 'ok') {
+        var trace = traceId ? (' Trace: ' + traceId) : '';
+        var stepFailed = steps.ensure_bot !== 'ok' ? 'ensure_bot' : (steps.provision && steps.provision.status !== 'ok' ? 'provision' : 'allowlist');
+        var err = new Error(formatStepError(stepFailed, data.error || 'partial_fail', traceId, 'Не удалось подготовить чаты.' + trace));
+        err.traceId = traceId;
+        throw err;
+      }
+      return callInstallFinish().then(function() {
+        setStatus('ok', 'Установлено. Выбранные сотрудники имеют доступ к чату с ботом.');
+        stepUsers.style.display = 'none';
+        var link = document.createElement('a');
+        link.href = base + '/api/v1/bitrix/app';
+        link.textContent = 'Перейти в настройки приложения';
+        link.className = 'app-link';
+        link.target = '_blank';
+        status.parentNode.appendChild(link);
+        setTimeout(function() { window.location.href = base + '/api/v1/bitrix/app'; }, 800);
+      });
+    });
+  }
+
+  btnInstall.addEventListener('click', function() {
+    const ids = [];
+    userList.querySelectorAll('.user-cb:checked').forEach(function(cb) {
+      ids.push(parseInt(cb.dataset.id, 10));
+    });
+    if (ids.length === 0) return;
+    btnInstall.disabled = true;
+    finalizeInstall(ids).catch(function(e) {
+      setStatus('err', 'Ошибка: ' + (e.message || String(e)) + '. Обновите страницу в Bitrix24 при необходимости.');
+      if (e.traceId) {
+        status.appendChild(document.createTextNode(' '));
+        var link = document.createElement('a');
+        link.href = base + '/admin/traces/' + e.traceId;
+        link.textContent = 'Открыть детали трейса';
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.className = 'app-link';
+        status.appendChild(link);
+      }
+      btnInstall.disabled = false;
+      btnRetry.style.display = 'inline-block';
+    });
+  });
+
+  btnRetry.addEventListener('click', function() {
+    const ids = [];
+    userList.querySelectorAll('.user-cb:checked').forEach(function(cb) {
+      ids.push(parseInt(cb.dataset.id, 10));
+    });
+    if (ids.length === 0) return;
+    btnRetry.disabled = true;
+    finalizeInstall(ids).catch(function(e) {
+      setStatus('err', 'Ошибка: ' + (e.message || String(e)) + '. Обновите страницу в Bitrix24.');
+      if (e.traceId) {
+        status.appendChild(document.createTextNode(' '));
+        var link = document.createElement('a');
+        link.href = base + '/admin/traces/' + e.traceId;
+        link.textContent = 'Открыть детали трейса';
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.className = 'app-link';
+        status.appendChild(link);
+      }
+    }).finally(function() {
+      btnRetry.disabled = false;
+    });
+  });
+
+  document.addEventListener('DOMContentLoaded', async function() {
+    try {
+      const $b24 = await B24Js.initializeB24Frame();
+      b24Instance = $b24 || null;
+      authData = $b24.auth.getAuthData();
+      if (!authData) {
+        setStatus('err', 'Нет данных авторизации. Обновите страницу.');
+        return;
+      }
+      setStatus('pending', 'Отправка данных на сервер...');
+      const payload = {
+        auth: {
+          access_token: authData.access_token,
+          refresh_token: authData.refresh_token,
+          domain: authData.domain,
+          member_id: authData.member_id,
+          user_id: authData.user_id
+        },
+        app_sid: typeof $b24.getAppSid === 'function' ? $b24.getAppSid() : ''
+      };
+      const r = await fetch(base + '/api/v1/bitrix/install/complete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: JSON.stringify(payload)
+      });
+      let data = {};
+      const ctComplete = (r.headers.get('Content-Type') || '').toLowerCase();
+      if (ctComplete.indexOf('application/json') !== -1) {
+        data = await r.json().catch(function() { return {}; });
+      } else {
+        await r.text();
+        const traceId = r.headers.get('X-Trace-Id') || '';
+        setStatus('err', 'Ожидался JSON, сервер вернул не-JSON.' + (traceId ? ' Trace: ' + traceId : '') + ' Обновите страницу.');
+        return;
+      }
+      const traceIdComplete = data.trace_id || r.headers.get('X-Trace-Id') || '';
+      if (!r.ok || data.status !== 'ok') {
+        setStatus('err', (data.error || data.message || data.detail || 'Ошибка: ' + r.status) + (traceIdComplete ? '. Trace: ' + traceIdComplete : ''));
+        return;
+      }
+      if (data.local_creds_present === false) {
+        const warn = document.getElementById('creds-warning');
+        if (warn) warn.style.display = 'block';
+      }
+      const portalIdKey = 'portal' + '_id';
+      portalId = data[portalIdKey];
+      const tokenKey = 'portal' + '_token';
+      portalToken = data[tokenKey] || '';
+      if (!portalToken) {
+        setStatus('err', 'Нет токена сессии. Обновите страницу.');
+        return;
+      }
+      if (data.bot && data.bot.status !== 'ok') {
+        var botErr = (data.bot.error_detail_safe || data.bot.error_code || '') + (traceIdComplete ? '. Trace: ' + traceIdComplete : '');
+        setStatus('err', 'Бот не зарегистрирован. ' + botErr + ' Проверьте PUBLIC_BASE_URL на сервере и обновите страницу.');
+        return;
+      }
+      setStatus('pending', 'Загрузка списка сотрудников...');
+      const portalIdParam = 'portal' + '_id';
+      const ur = await fetch(base + '/api/v1/bitrix/users?' + portalIdParam + '=' + portalId, {
+        headers: { 'Authorization': 'Bearer ' + portalToken, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }
+      });
+      let ud = {};
+      const ctUsers = (ur.headers.get('Content-Type') || '').toLowerCase();
+      if (ctUsers.indexOf('application/json') !== -1) {
+        ud = await ur.json().catch(function() { return {}; });
+      } else {
+        await ur.text();
+        const traceUsers = ur.headers.get('X-Trace-Id') || '';
+        setStatus('err', 'Ожидался JSON при загрузке пользователей.' + (traceUsers ? ' Trace: ' + traceUsers : '') + ' Обновите страницу.');
+        return;
+      }
+      const traceIdUsers = ud.trace_id || ur.headers.get('X-Trace-Id') || '';
+      if (ur.status === 403 && (ud.error === 'missing_scope_user' || ud.detail)) {
+        setStatus('err', 'Не хватает права user для получения списка сотрудников. Добавьте право user в настройках приложения Bitrix24 и выполните переустановку.' + (traceIdUsers ? ' Trace: ' + traceIdUsers : ''));
+        return;
+      }
+      if (!ur.ok || !ud.users) {
+        setStatus('err', (ud.detail || ud.error || 'Не удалось загрузить пользователей: ' + ur.status) + (traceIdUsers ? '. Trace: ' + traceIdUsers : ''));
+        return;
+      }
+      allUsers = ud.users || [];
+      if (allUsers.length === 0) {
+        setStatus('err', 'Пользователи не найдены (0 из 0). Проверьте право user и наличие активных пользователей в портале.');
+        return;
+      }
+      setStatus('ok', 'Выберите сотрудников для доступа к чату с ботом.');
+      setStepUsers(true);
+      renderUsers();
+    } catch (e) {
+      setStatus('err', 'Ошибка: ' + (e.message || String(e)));
+    }
+  });
+})();
+  </script>
+</body>
+</html>
+

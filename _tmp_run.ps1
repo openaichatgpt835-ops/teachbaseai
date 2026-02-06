@@ -1,0 +1,1 @@
+plink -batch -load tgbot "docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c \"select id, portal_id, status, error_message, created_at from outbox order by id desc limit 5;\""
