@@ -139,7 +139,7 @@ def _ocr_pdf_file(path: str, lang: str = "rus+eng") -> str:
     return "\n".join(parts)
 
 
-_VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".flac"}
+_VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 
 
 @dataclass
@@ -172,7 +172,7 @@ def _get_whisper_model():
     if _WHISPER_MODEL is not None:
         return _WHISPER_MODEL
     from faster_whisper import WhisperModel  # type: ignore
-    size = (os.getenv("WHISPER_MODEL_SIZE") or "medium").strip()
+    size = (os.getenv("WHISPER_MODEL_SIZE") or "small").strip()
     _WHISPER_MODEL = WhisperModel(size, device="cpu", compute_type="int8")
     return _WHISPER_MODEL
 
@@ -377,6 +377,7 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
                 portal_id=rec.portal_id,
                 file_id=rec.id,
                 chunk_index=idx,
+                audience=rec.audience or "staff",
                 text=text_val,
                 token_count=_count_tokens_approx(text_val),
                 sha256=_sha256_text(text_val),

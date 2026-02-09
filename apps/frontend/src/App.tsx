@@ -12,12 +12,19 @@ import { InboundEventsPage } from "./pages/admin/InboundEventsPage";
 import { InboundEventDetailPage } from "./pages/admin/InboundEventDetailPage";
 import { KnowledgeBasePage } from "./pages/admin/KnowledgeBasePage";
 import { BotSettingsPage } from "./pages/admin/BotSettingsPage";
+import { RegistrationsPage } from "./pages/admin/RegistrationsPage";
 import { B24AppPage } from "./pages/b24/B24AppPage";
+import { RegisterPage } from "./pages/web/RegisterPage";
+import { WebLoginPage } from "./pages/web/WebLoginPage";
+import { WebAppPage } from "./pages/web/WebAppPage";
 
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<Navigate to="/admin/login" replace />} />
+      <Route path="/" element={<Navigate to="/register" replace />} />
+      <Route path="/register" element={<RegisterPage />} />
+      <Route path="/login" element={<WebLoginPage />} />
+      <Route path="/app" element={<WebAppPage />} />
       <Route path="/admin/login" element={<LoginPage />} />
       <Route path="/admin" element={<AdminLayout />}>
         <Route path="portals" element={<PortalsPage />} />
@@ -31,6 +38,7 @@ export default function App() {
         <Route path="inbound-events/:id" element={<InboundEventDetailPage />} />
         <Route path="knowledge-base" element={<KnowledgeBasePage />} />
         <Route path="bot-settings" element={<BotSettingsPage />} />
+        <Route path="registrations" element={<RegistrationsPage />} />
         <Route index element={<Navigate to="portals" replace />} />
       </Route>
       <Route path="/b24/app" element={<B24AppPage />} />

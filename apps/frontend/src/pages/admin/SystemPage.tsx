@@ -17,16 +17,16 @@ export function SystemPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Система</h1>
+      <h1 className="text-2xl font-bold mb-6"></h1>
       <div className="grid gap-6 md:grid-cols-2">
         <div className="bg-white shadow rounded-lg p-6">
-          <h2 className="font-semibold mb-2">Здоровье</h2>
+          <h2 className="font-semibold mb-2"></h2>
           <pre className="text-sm bg-gray-50 p-3 rounded overflow-auto">
             {JSON.stringify(health ?? {}, null, 2)}
           </pre>
         </div>
         <div className="bg-white shadow rounded-lg p-6">
-          <h2 className="font-semibold mb-2">Очередь</h2>
+          <h2 className="font-semibold mb-2"></h2>
           <pre className="text-sm bg-gray-50 p-3 rounded overflow-auto">
             {JSON.stringify(queue ?? {}, null, 2)}
           </pre>

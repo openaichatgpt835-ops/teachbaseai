@@ -1,0 +1,3 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select id, domain from portals where domain='b24-9ex49z.bitrix24.ru';"
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select portal_id, staff_bot_enabled, client_bot_enabled, staff_bot_secret, client_bot_secret from portal_telegram_settings where portal_id = (select id from portals where domain='b24-9ex49z.bitrix24.ru');"
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select user_id, telegram_username, kind, display_name from portal_users_access where portal_id = (select id from portals where domain='b24-9ex49z.bitrix24.ru') order by id desc limit 20;"

@@ -107,19 +107,19 @@ export function InboundEventsPage() {
 
       {disabled && (
         <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-2 rounded">
-          Логирование отключено (enabled=false). Включите в настройках для записи событий.
+            (enabled=false).      .
         </div>
       )}
       {overBudget && (
         <div className="bg-orange-50 border border-orange-200 text-orange-800 px-4 py-2 rounded">
-          Использовано {usage?.used_mb} MB, больше целевого бюджета {usage?.target_budget_mb} MB. Можно выполнить авто-очистку.
+           {usage?.used_mb} MB,    {usage?.target_budget_mb} MB.   -.
         </div>
       )}
 
       {/* Storage settings */}
       <section className="bg-white shadow rounded p-4">
         <h2 className="text-lg font-semibold mb-3">Storage settings</h2>
-        {settingsLoading && <p className="text-gray-500">Загрузка...</p>}
+        {settingsLoading && <p className="text-gray-500">...</p>}
         {!settingsLoading && settings && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-2xl">
             <label className="flex items-center gap-2">
@@ -189,7 +189,7 @@ export function InboundEventsPage() {
                 disabled={saveSettingsMutation.isPending || !editForm || Object.keys(editForm).length === 0}
                 onClick={() => editForm && saveSettingsMutation.mutate(editForm)}
               >
-                {saveSettingsMutation.isPending ? "Сохранение…" : "Сохранить"}
+                {saveSettingsMutation.isPending ? "" : ""}
               </button>
               {editForm && Object.keys(editForm).length > 0 && (
                 <button
@@ -197,7 +197,7 @@ export function InboundEventsPage() {
                   className="ml-2 text-gray-600 text-sm"
                   onClick={() => setEditForm(null)}
                 >
-                  Сбросить
+                  
                 </button>
               )}
             </div>
@@ -208,7 +208,7 @@ export function InboundEventsPage() {
       {/* Storage usage */}
       <section className="bg-white shadow rounded p-4">
         <h2 className="text-lg font-semibold mb-3">Storage usage</h2>
-        {usageLoading && <p className="text-gray-500">Загрузка...</p>}
+        {usageLoading && <p className="text-gray-500">...</p>}
         {!usageLoading && usage && (
           <>
             <div className="flex items-center gap-4 mb-2">
@@ -223,14 +223,14 @@ export function InboundEventsPage() {
               </span>
             </div>
             <p className="text-sm text-gray-600">
-              approx_rows: {usage.approx_rows} · oldest: {usage.oldest_at?.slice(0, 19) ?? "—"} · newest: {usage.newest_at?.slice(0, 19) ?? "—"}
+              approx_rows: {usage.approx_rows}  oldest: {usage.oldest_at?.slice(0, 19) ?? ""}  newest: {usage.newest_at?.slice(0, 19) ?? ""}
             </p>
             <button
               type="button"
               className="mt-2 text-blue-600 text-sm hover:underline"
               onClick={() => refetchUsage()}
             >
-              Обновить
+              
             </button>
           </>
         )}
@@ -238,7 +238,7 @@ export function InboundEventsPage() {
 
       {/* Prune */}
       <section className="bg-white shadow rounded p-4">
-        <h2 className="text-lg font-semibold mb-3">Очистка</h2>
+        <h2 className="text-lg font-semibold mb-3"></h2>
         <div className="flex gap-2 flex-wrap">
           <button
             type="button"
@@ -246,31 +246,31 @@ export function InboundEventsPage() {
             disabled={pruneMutation.isPending}
             onClick={() => pruneMutation.mutate({ mode: "auto" })}
           >
-            {pruneMutation.isPending ? "…" : "Применить авто-очистку сейчас"}
+            {pruneMutation.isPending ? "" : " - "}
           </button>
           <button
             type="button"
             className="bg-red-600 text-white px-3 py-1 rounded text-sm hover:bg-red-700 disabled:opacity-50"
             disabled={pruneMutation.isPending}
             onClick={() => {
-              if (window.confirm("Удалить все записи inbound events?")) {
+              if (window.confirm("   inbound events?")) {
                 pruneMutation.mutate({ mode: "all" });
               }
             }}
           >
-            Очистить всё
+             
           </button>
         </div>
         {pruneMutation.data && (
           <p className="mt-2 text-sm text-gray-600">
-            Удалено: {pruneMutation.data.deleted_rows}, осталось: {pruneMutation.data.remaining_rows}, used_mb_after: {pruneMutation.data.used_mb_after}
+            : {pruneMutation.data.deleted_rows}, : {pruneMutation.data.remaining_rows}, used_mb_after: {pruneMutation.data.used_mb_after}
           </p>
         )}
       </section>
 
       {/* Table */}
       <section className="bg-white shadow rounded overflow-hidden">
-        <h2 className="text-lg font-semibold p-4 pb-2">Последние inbound события</h2>
+        <h2 className="text-lg font-semibold p-4 pb-2"> inbound </h2>
         <div className="mb-4 px-4 flex flex-wrap gap-2 items-center">
           <input
             type="text"
@@ -294,7 +294,7 @@ export function InboundEventsPage() {
             onChange={(e) => setTraceId(e.target.value)}
           />
         </div>
-        {isLoading && <p className="px-4 text-gray-500">Загрузка...</p>}
+        {isLoading && <p className="px-4 text-gray-500">...</p>}
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
@@ -315,25 +315,25 @@ export function InboundEventsPage() {
             {items.map((r) => (
               <tr key={r.id} className="hover:bg-gray-50">
                 <td className="px-4 py-2 text-sm">{r.id}</td>
-                <td className="px-4 py-2 text-sm text-gray-500">{r.created_at?.slice(0, 19) ?? "—"}</td>
-                <td className="px-4 py-2 text-sm">{r.portal_id ?? "—"}</td>
-                <td className="px-4 py-2 text-sm truncate max-w-[140px]">{r.domain ?? "—"}</td>
-                <td className="px-4 py-2 text-sm">{r.member_id ?? "—"}</td>
-                <td className="px-4 py-2 text-sm">{r.dialog_id ?? "—"}</td>
-                <td className="px-4 py-2 text-sm">{r.user_id ?? "—"}</td>
-                <td className="px-4 py-2 text-sm">{r.event_name ?? (r.hints_json?.event_name ? String(r.hints_json.event_name) : "—")}</td>
-                <td className="px-4 py-2 text-sm font-mono">{r.trace_id ?? "—"}</td>
-                <td className="px-4 py-2 text-sm">{r.body_truncated ? "yes" : "—"}</td>
+                <td className="px-4 py-2 text-sm text-gray-500">{r.created_at?.slice(0, 19) ?? ""}</td>
+                <td className="px-4 py-2 text-sm">{r.portal_id ?? ""}</td>
+                <td className="px-4 py-2 text-sm truncate max-w-[140px]">{r.domain ?? ""}</td>
+                <td className="px-4 py-2 text-sm">{r.member_id ?? ""}</td>
+                <td className="px-4 py-2 text-sm">{r.dialog_id ?? ""}</td>
+                <td className="px-4 py-2 text-sm">{r.user_id ?? ""}</td>
+                <td className="px-4 py-2 text-sm">{r.event_name ?? (r.hints_json?.event_name ? String(r.hints_json.event_name) : "")}</td>
+                <td className="px-4 py-2 text-sm font-mono">{r.trace_id ?? ""}</td>
+                <td className="px-4 py-2 text-sm">{r.body_truncated ? "yes" : ""}</td>
                 <td className="px-4 py-2 text-sm">
                   <Link to={`/admin/inbound-events/${r.id}`} className="text-blue-600 hover:underline">
-                    детали
+                    
                   </Link>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
-        <p className="px-4 py-2 text-sm text-gray-500">Всего: {items.length}</p>
+        <p className="px-4 py-2 text-sm text-gray-500">: {items.length}</p>
       </section>
     </div>
   );

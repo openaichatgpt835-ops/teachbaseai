@@ -48,6 +48,9 @@ class PortalUsersAccess(Base):
     id = Column(Integer, primary_key=True, index=True)
     portal_id = Column(Integer, ForeignKey("portals.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(String(64), nullable=False, index=True)  # Bitrix user_id
+    display_name = Column(String(128), nullable=True)
+    telegram_username = Column(String(64), nullable=True, index=True)
+    kind = Column(String(16), nullable=False, default="bitrix")  # bitrix|web|amo
     created_by_bitrix_user_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_welcome_at = Column(DateTime, nullable=True)
@@ -55,5 +58,8 @@ class PortalUsersAccess(Base):
 
     portal = relationship("Portal", back_populates="users_access")
 
-    __table_args__ = (UniqueConstraint("portal_id", "user_id", name="uq_portal_users_access_portal_user"),)
+    __table_args__ = (
+        UniqueConstraint("portal_id", "user_id", name="uq_portal_users_access_portal_user"),
+        UniqueConstraint("portal_id", "telegram_username", name="uq_portal_users_access_telegram_username"),
+    )
 

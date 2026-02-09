@@ -3,7 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 
-const DEFAULT_WELCOME = "Привет! Я Teachbase AI. Напишите «ping» — отвечу «pong».";
+const DEFAULT_WELCOME = "!  Teachbase AI.  ping   pong.";
 
 export function PortalDetailPage() {
   const { id } = useParams();
@@ -151,7 +151,7 @@ export function PortalDetailPage() {
       setRefreshAuthResult(res as typeof refreshAuthResult);
       refetchAuthStatus();
     },
-    onError: () => setRefreshAuthResult({ ok: false, notes: "не удалось обновить токен" }),
+    onError: () => setRefreshAuthResult({ ok: false, notes: "   " }),
   });
   const saveAuth = useMutation({
     mutationFn: () => api.post(`/v1/admin/portals/${id}/auth/set-local-credentials`, {
@@ -174,8 +174,8 @@ export function PortalDetailPage() {
     },
   });
 
-  if (isLoading) return <div>Загрузка...</div>;
-  if (error) return <div className="text-red-600">Ошибка: {String(error)}</div>;
+  if (isLoading) return <div>...</div>;
+  if (error) return <div className="text-red-600">: {String(error)}</div>;
   if (!data) return null;
 
   const p = data as {
@@ -193,34 +193,34 @@ export function PortalDetailPage() {
   return (
     <div>
       <div className="mb-4">
-        <Link to="/admin/portals" className="text-blue-600 hover:underline">Назад</Link>
+        <Link to="/admin/portals" className="text-blue-600 hover:underline"></Link>
       </div>
       <h1 className="text-2xl font-bold mb-6">{p.domain}</h1>
       <div className="bg-white shadow rounded-lg p-6 mb-6">
         <dl className="grid grid-cols-2 gap-4">
           <dt className="text-gray-500">ID</dt>
           <dd>{p.id}</dd>
-          <dt className="text-gray-500">Статус</dt>
+          <dt className="text-gray-500"></dt>
           <dd>{p.status}</dd>
           <dt className="text-gray-500">Member ID</dt>
-          <dd>{p.member_id || "—"}</dd>
+          <dd>{p.member_id || ""}</dd>
         </dl>
       </div>
       <div className="bg-white shadow rounded-lg p-6 mb-6">
-        <h2 className="font-semibold mb-2">Биллинг (портал)</h2>
+        <h2 className="font-semibold mb-2"> ()</h2>
         <div className="text-sm text-gray-600 mb-3">
-          Учёт расхода по запросам и лимит на портал.
+                 .
         </div>
         {billingSummary && (
           <div className="mb-4">
             <div className="text-sm">
-              Использовано: <strong>{(billingSummary as { used_requests?: number }).used_requests ?? 0}</strong>
+              : <strong>{(billingSummary as { used_requests?: number }).used_requests ?? 0}</strong>
               {" / "}
-              <strong>{(billingSummary as { limit_requests?: number | null }).limit_requests ?? "∞"}</strong>
-              {" · "}
+              <strong>{(billingSummary as { limit_requests?: number | null }).limit_requests ?? ""}</strong>
+              {"  "}
               tokens: {(billingSummary as { tokens_total?: number }).tokens_total ?? 0}
-              {" · "}
-              cost: {((billingSummary as { cost_rub?: number }).cost_rub ?? 0).toFixed(2)} ₽
+              {"  "}
+              cost: {((billingSummary as { cost_rub?: number }).cost_rub ?? 0).toFixed(2)} 
             </div>
             <div className="mt-2 h-2 bg-gray-200 rounded">
               <div
@@ -233,7 +233,7 @@ export function PortalDetailPage() {
         <div className="flex items-center gap-2">
           <input
             className="border rounded px-3 py-2 text-sm w-40"
-            placeholder="Лимит запросов/мес"
+            placeholder=" /"
             value={monthlyLimit}
             onChange={(e) => setMonthlyLimit(e.target.value)}
           />
@@ -243,7 +243,7 @@ export function PortalDetailPage() {
             disabled={saveLimit.isPending}
             onClick={() => saveLimit.mutate()}
           >
-            Сохранить лимит
+             
           </button>
           <button
             type="button"
@@ -253,7 +253,7 @@ export function PortalDetailPage() {
               refetchBillingUsage();
             }}
           >
-            Обновить
+            
           </button>
         </div>
         {billingUsage && (
@@ -264,7 +264,7 @@ export function PortalDetailPage() {
                   <th className="px-2 py-1 text-left">created_at</th>
                   <th className="px-2 py-1 text-left">user_id</th>
                   <th className="px-2 py-1 text-left">tokens</th>
-                  <th className="px-2 py-1 text-left">cost ₽</th>
+                  <th className="px-2 py-1 text-left">cost </th>
                   <th className="px-2 py-1 text-left">status</th>
                   <th className="px-2 py-1 text-left">error</th>
                 </tr>
@@ -272,11 +272,11 @@ export function PortalDetailPage() {
               <tbody>
                 {(billingUsage as { items?: Array<{ created_at?: string; user_id?: string; tokens_total?: number; cost_rub?: number; status?: string; error_code?: string }> }).items?.map((r, i) => (
                   <tr key={i} className="border-t">
-                    <td className="px-2 py-1">{r.created_at ?? "—"}</td>
-                    <td className="px-2 py-1">{r.user_id ?? "—"}</td>
-                    <td className="px-2 py-1">{r.tokens_total ?? "—"}</td>
+                    <td className="px-2 py-1">{r.created_at ?? ""}</td>
+                    <td className="px-2 py-1">{r.user_id ?? ""}</td>
+                    <td className="px-2 py-1">{r.tokens_total ?? ""}</td>
                     <td className="px-2 py-1">{(r.cost_rub ?? 0).toFixed(2)}</td>
-                    <td className="px-2 py-1">{r.status ?? "—"}</td>
+                    <td className="px-2 py-1">{r.status ?? ""}</td>
                     <td className="px-2 py-1">{r.error_code ?? ""}</td>
                   </tr>
                 )) ?? null}
@@ -286,9 +286,9 @@ export function PortalDetailPage() {
         )}
       </div>
       <div className="bg-white shadow rounded-lg p-6 mb-6">
-        <h2 className="font-semibold mb-2">Настройки</h2>
+        <h2 className="font-semibold mb-2"></h2>
         <p className="text-sm text-gray-600 mb-2">
-          Приветственное сообщение используется при создании чатов после установки и при повторном provision.
+                     provision.
         </p>
         <textarea
           className="w-full border rounded px-3 py-2 text-sm min-h-[100px]"
@@ -305,24 +305,24 @@ export function PortalDetailPage() {
             disabled={putWelcome.isPending}
             onClick={() => putWelcome.mutate(welcomeValue.trim() || DEFAULT_WELCOME)}
           >
-            Сохранить
+            
           </button>
-          {saved && <span className="text-green-600 text-sm">Сохранено</span>}
+          {saved && <span className="text-green-600 text-sm"></span>}
           {putWelcome.isError && (
             <span className="text-red-600 text-sm">{String(putWelcome.error)}</span>
           )}
         </div>
         <div className="mt-6 pt-4 border-t">
-          <h3 className="font-semibold mb-2">Bitrix OAuth (локальное приложение)</h3>
+          <h3 className="font-semibold mb-2">Bitrix OAuth ( )</h3>
           <div className="text-sm text-gray-600 mb-2">
-            У каждого портала свой client_id/client_secret. Хранится только в БД (зашифровано).
+                client_id/client_secret.     ().
           </div>
           {authStatus && (
             <div className="mb-3 text-sm">
               creds: <strong>{(authStatus as { has_local_client_id?: boolean; has_local_client_secret?: boolean }).has_local_client_id && (authStatus as { has_local_client_secret?: boolean }).has_local_client_secret ? "ok" : "missing"}</strong>
-              {" · "}
+              {"  "}
               token: <strong>{(authStatus as { expired?: boolean }).expired ? "expired" : "valid"}</strong>
-              {" · "}
+              {"  "}
               source: <strong>{(authStatus as { using_global_env?: boolean }).using_global_env ? "env" : "local"}</strong>
               {(authStatus as { expires_at?: string }).expires_at && (
                 <span className="ml-2 text-gray-500">expires_at: {(authStatus as { expires_at?: string }).expires_at}</span>
@@ -356,7 +356,7 @@ export function PortalDetailPage() {
               disabled={saveAuth.isPending || !clientId.trim() || !clientSecret}
               onClick={() => saveAuth.mutate()}
             >
-              Сохранить
+              
             </button>
             <button
               type="button"
@@ -370,25 +370,25 @@ export function PortalDetailPage() {
           {authSaveResult && (
             <div className="mt-2 text-sm">
               {authSaveResult.ok ? (
-                <span className="text-green-600">Сохранено. client_id: {authSaveResult.client_id_masked}</span>
+                <span className="text-green-600">. client_id: {authSaveResult.client_id_masked}</span>
               ) : (
-                <span className="text-amber-600">Не удалось сохранить credentials</span>
+                <span className="text-amber-600">   credentials</span>
               )}
             </div>
           )}
           {refreshAuthResult && (
             <div className="mt-2 text-sm">
               {refreshAuthResult.ok ? (
-                <span className="text-green-600">Refresh OK (expires_in: {refreshAuthResult.expires_in ?? "—"}s)</span>
+                <span className="text-green-600">Refresh OK (expires_in: {refreshAuthResult.expires_in ?? ""}s)</span>
               ) : (
                 <span className="text-amber-600">Refresh error: {refreshAuthResult.error_code ?? "unknown"}</span>
               )}
             </div>
           )}
-          <h3 className="font-semibold mb-2">Bot provisioning (диагностика)</h3>
+          <h3 className="font-semibold mb-2">Bot provisioning ()</h3>
           {botStatus && (
             <div className="mb-3 text-sm">
-              Статус: <strong>{(botStatus as { status?: string }).status ?? "—"}</strong>
+              : <strong>{(botStatus as { status?: string }).status ?? ""}</strong>
               {(botStatus as { bot_id?: number }).bot_id != null && (
                 <span className="ml-2">bot_id: {(botStatus as { bot_id?: number }).bot_id}</span>
               )}
@@ -401,7 +401,7 @@ export function PortalDetailPage() {
               disabled={botRegister.isPending}
               onClick={() => botRegister.mutate()}
             >
-              Зарегистрировать бота (принудительно)
+                ()
             </button>
             <button
               type="button"
@@ -409,7 +409,7 @@ export function PortalDetailPage() {
               disabled={botCheck.isPending}
               onClick={() => botCheck.mutate()}
             >
-              Проверить бота
+               
             </button>
             <button
               type="button"
@@ -417,7 +417,7 @@ export function PortalDetailPage() {
               disabled={botFixHandlers.isPending}
               onClick={() => botFixHandlers.mutate()}
             >
-              Починить handler URL
+               handler URL
             </button>
             <button
               type="button"
@@ -425,7 +425,7 @@ export function PortalDetailPage() {
               disabled={provisionWelcome.isPending || allowed.length === 0}
               onClick={() => provisionWelcome.mutate()}
             >
-              Отправить welcome в allowlist
+               welcome  allowlist
             </button>
             <button
               type="button"
@@ -433,16 +433,16 @@ export function PortalDetailPage() {
               disabled={botPing.isPending || allowed.length === 0}
               onClick={() => botPing.mutate()}
             >
-              Пинг бота
+               
             </button>
           </div>
           {botRegisterResult && (
             <div className="mt-2 p-3 rounded text-sm bg-gray-50">
               {botRegisterResult.status === "ok" && botRegisterResult.bot?.status === "ok" ? (
-                <span className="text-green-600">OK. bot_id сохранён.</span>
+                <span className="text-green-600">OK. bot_id .</span>
               ) : (
                 <div className="text-red-600">
-                  Ошибка: {botRegisterResult.bot?.error_code ?? "unknown"}
+                  : {botRegisterResult.bot?.error_code ?? "unknown"}
                   {botRegisterResult.bot?.error_description_safe && (
                     <div className="mt-1 text-gray-700">{botRegisterResult.bot.error_description_safe}</div>
                   )}
@@ -461,14 +461,14 @@ export function PortalDetailPage() {
           {botCheckResult && (
             <div className="mt-2 p-3 rounded text-sm bg-gray-50">
               {botCheckResult.bot_found_in_bitrix ? (
-                <span className="text-green-600">Бот найден в Bitrix (bots: {botCheckResult.bots_count ?? 0})</span>
+                <span className="text-green-600">   Bitrix (bots: {botCheckResult.bots_count ?? 0})</span>
               ) : (
                 <span className="text-amber-600">
-                  Бот не найден в Bitrix {botCheckResult.error_code ? `(${botCheckResult.error_code})` : ""}
+                      Bitrix {botCheckResult.error_code ? `(${botCheckResult.error_code})` : ""}
                 </span>
               )}
               {botCheckResult.error_code === "bitrix_auth_invalid" && (
-                <div className="mt-1 text-amber-700">Токен Bitrix истёк — попробуйте обновить токен.</div>
+                <div className="mt-1 text-amber-700"> Bitrix     .</div>
               )}
               {botCheckResult.trace_id && (
                 <div className="mt-1 text-gray-500">
@@ -480,14 +480,14 @@ export function PortalDetailPage() {
           {fixHandlersResult && (
             <div className="mt-2 p-3 rounded text-sm bg-gray-50">
               {fixHandlersResult.ok ? (
-                <span className="text-green-600">Handler URL обновлён (imbot.update OK). bot_id: {fixHandlersResult.bot_id}</span>
+                <span className="text-green-600">Handler URL  (imbot.update OK). bot_id: {fixHandlersResult.bot_id}</span>
               ) : (
                 <span className="text-amber-600">
-                  Ошибка: {fixHandlersResult.error_code ?? "unknown"} {fixHandlersResult.notes ? `— ${fixHandlersResult.notes}` : ""}
+                  : {fixHandlersResult.error_code ?? "unknown"} {fixHandlersResult.notes ? ` ${fixHandlersResult.notes}` : ""}
                 </span>
               )}
               {fixHandlersResult.error_code === "bitrix_auth_invalid" && (
-                <div className="mt-1 text-amber-700">Токен Bitrix истёк — попробуйте обновить токен.</div>
+                <div className="mt-1 text-amber-700"> Bitrix     .</div>
               )}
               {fixHandlersResult.trace_id && (
                 <div className="mt-1 text-gray-500">
@@ -500,27 +500,27 @@ export function PortalDetailPage() {
             <div className="mt-2 p-3 rounded text-sm bg-gray-50">
               {pingResult.ok ? (
                 <>
-                  <span className="text-green-600">Ping отправлен (dialog_id: {pingResult.dialog_id})</span>
+                  <span className="text-green-600">Ping  (dialog_id: {pingResult.dialog_id})</span>
                   <div className="mt-1 text-gray-600">{pingResult.notes}</div>
                 </>
               ) : (
-                <span className="text-amber-600">Ошибка: {pingResult.error_code ?? "unknown"} {pingResult.notes ? `— ${pingResult.notes}` : ""}</span>
+                <span className="text-amber-600">: {pingResult.error_code ?? "unknown"} {pingResult.notes ? ` ${pingResult.notes}` : ""}</span>
               )}
               {pingResult.trace_id && (
                 <div className="mt-1 text-gray-500">
                   Trace: <Link to={`/admin/traces/${pingResult.trace_id}`} className="text-blue-600 hover:underline">{pingResult.trace_id}</Link>
-                  {" · "}
+                  {"  "}
                   <Link to="/admin/inbound-events" className="text-blue-600 hover:underline">Inbound events</Link>
                 </div>
               )}
               {!pingResult.ok && pingResult.error_code === "bitrix_auth_invalid" && (
-                <div className="mt-1 text-amber-700">Токен Bitrix истёк — попробуйте обновить токен.</div>
+                <div className="mt-1 text-amber-700"> Bitrix     .</div>
               )}
             </div>
           )}
           {provisionWelcomeResult && provisionWelcomeResult.status !== "error" && (
             <div className="mt-2 p-3 rounded text-sm bg-gray-50">
-              OK: {provisionWelcomeResult.ok_count ?? 0}, ошибок: {provisionWelcomeResult.fail_count ?? 0}
+              OK: {provisionWelcomeResult.ok_count ?? 0}, : {provisionWelcomeResult.fail_count ?? 0}
               {provisionWelcomeResult.trace_id && (
                 <div className="mt-1 text-gray-500">Trace: {provisionWelcomeResult.trace_id}</div>
               )}
@@ -533,7 +533,7 @@ export function PortalDetailPage() {
             <>
             {last && (
               <div className="mt-3 p-3 rounded bg-gray-50 text-sm">
-                <div className="font-medium mb-1">Последняя попытка</div>
+                <div className="font-medium mb-1"> </div>
                 {last.error_description_safe && (
                   <div className="text-amber-700">bitrix_error_desc: {last.error_description_safe}</div>
                 )}
@@ -544,13 +544,13 @@ export function PortalDetailPage() {
                 {last.api_prefix_used != null && <div className="text-gray-600">api_prefix_used: {last.api_prefix_used}</div>}
                 {last.trace_id && (
                   <Link to={`/admin/traces/${last.trace_id}`} className="text-blue-600 hover:underline mt-1 inline-block">
-                    Открыть детали трейса
+                      
                   </Link>
                 )}
               </div>
             )}
             <div className="mt-4">
-              <h4 className="font-medium mb-2">Последние попытки imbot.register</h4>
+              <h4 className="font-medium mb-2">  imbot.register</h4>
               <div className="overflow-x-auto text-xs border rounded">
                 <table className="min-w-full">
                   <thead className="bg-gray-100">
@@ -568,15 +568,15 @@ export function PortalDetailPage() {
                         <td className="px-2 py-1 font-mono">
                           {a.trace_id ? (
                             <Link to={`/admin/traces/${a.trace_id}`} className="text-blue-600 hover:underline">{a.trace_id}</Link>
-                          ) : "—"}
+                          ) : ""}
                         </td>
-                        <td className="px-2 py-1">{a.created_at ?? "—"}</td>
-                        <td className="px-2 py-1">{a.status_code ?? "—"}</td>
-                        <td className="px-2 py-1">{a.error_code ?? "—"}</td>
+                        <td className="px-2 py-1">{a.created_at ?? ""}</td>
+                        <td className="px-2 py-1">{a.status_code ?? ""}</td>
+                        <td className="px-2 py-1">{a.error_code ?? ""}</td>
                         <td className="px-2 py-1 max-w-xs truncate">
                           {a.request_shape_json != null || a.response_shape_json != null
-                            ? "✓"
-                            : "—"}
+                            ? ""
+                            : ""}
                         </td>
                       </tr>
                     ))}
@@ -595,10 +595,10 @@ export function PortalDetailPage() {
                 <h3 className="font-semibold mb-2">Prepare chats (allowlist)</h3>
                 {lastP && (
                   <div className="mb-3 p-3 rounded bg-gray-50 text-sm">
-                    <div className="font-medium mb-1">Последняя попытка</div>
-                    <div>Результат: {lastP.status ?? "—"} | всего: {lastP.total ?? 0} | ok: {lastP.ok_count ?? 0} | failed: {lastP.users_failed ?? 0}</div>
+                    <div className="font-medium mb-1"> </div>
+                    <div>: {lastP.status ?? ""} | : {lastP.total ?? 0} | ok: {lastP.ok_count ?? 0} | failed: {lastP.users_failed ?? 0}</div>
                     {lastP.trace_id && (
-                      <Link to={`/admin/traces/${lastP.trace_id}`} className="text-blue-600 hover:underline mt-1 inline-block">Открыть детали трейса</Link>
+                      <Link to={`/admin/traces/${lastP.trace_id}`} className="text-blue-600 hover:underline mt-1 inline-block">  </Link>
                     )}
                   </div>
                 )}
@@ -618,11 +618,11 @@ export function PortalDetailPage() {
                           <td className="px-2 py-1 font-mono">
                             {row.trace_id ? (
                               <Link to={`/admin/traces/${row.trace_id}`} className="text-blue-600 hover:underline">{row.trace_id}</Link>
-                            ) : "—"}
+                            ) : ""}
                           </td>
-                          <td className="px-2 py-1">{row.created_at ?? "—"}</td>
-                          <td className="px-2 py-1">{row.status ?? "—"}</td>
-                          <td className="px-2 py-1">{row.total ?? "—"} / {row.ok_count ?? "—"} / {row.users_failed ?? "—"}</td>
+                          <td className="px-2 py-1">{row.created_at ?? ""}</td>
+                          <td className="px-2 py-1">{row.status ?? ""}</td>
+                          <td className="px-2 py-1">{row.total ?? ""} / {row.ok_count ?? ""} / {row.users_failed ?? ""}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -634,19 +634,19 @@ export function PortalDetailPage() {
         </div>
       </div>
       <div className="bg-white shadow rounded-lg p-6">
-        <h2 className="font-semibold mb-2">Доступ (allowlist)</h2>
+        <h2 className="font-semibold mb-2"> (allowlist)</h2>
         <p className="text-sm text-gray-600 mb-2">
-          Разрешённые Bitrix user_id для чата с ботом: {allowed.length} пользователей.
+           Bitrix user_id    : {allowed.length} .
         </p>
         {allowed.length > 0 ? (
           <ul className="list-disc list-inside text-sm">
             {allowed.slice(0, 20).map((uid) => (
               <li key={uid}>{uid}</li>
             ))}
-            {allowed.length > 20 && <li>… и ещё {allowed.length - 20}</li>}
+            {allowed.length > 20 && <li>   {allowed.length - 20}</li>}
           </ul>
         ) : (
-          <p className="text-gray-500 text-sm">Список пуст. Настройте при установке приложения в Bitrix24.</p>
+          <p className="text-gray-500 text-sm"> .      Bitrix24.</p>
         )}
       </div>
     </div>

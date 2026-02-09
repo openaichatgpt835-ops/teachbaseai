@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from apps.backend.models.app_setting import AppSetting
 from apps.backend.models.billing import PortalUsageLimit, BillingUsage
+from apps.backend.services.activity import log_activity
 
 PRICING_KEY = "gigachat_pricing"
 
@@ -122,6 +123,10 @@ def record_usage(
     db.add(row)
     db.commit()
     db.refresh(row)
+    try:
+        log_activity(db, kind="ai", portal_id=portal_id, web_user_id=None)
+    except Exception:
+        pass
     return row
 
 

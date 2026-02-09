@@ -227,6 +227,10 @@ def answer_from_kb(
     portal_id: int,
     query: str,
     dialog_id: int | None = None,
+    *,
+    audience: str = "staff",
+    system_prompt_extra_override: str | None = None,
+    model_overrides: dict | None = None,
 ) -> tuple[str | None, str | None, dict | None]:
     query = (query or "").strip()
     if not query:
@@ -256,6 +260,35 @@ def answer_from_kb(
     use_history = bool(settings.get("use_history")) if settings.get("use_history") is not None else True
     use_cache = bool(settings.get("use_cache")) if settings.get("use_cache") is not None else True
     system_prompt_extra = (settings.get("system_prompt_extra") or "").strip()
+    if system_prompt_extra_override:
+        system_prompt_extra = (system_prompt_extra + " " + system_prompt_extra_override).strip() if system_prompt_extra else system_prompt_extra_override.strip()
+    overrides = model_overrides or {}
+    if overrides.get("embedding_model"):
+        embed_model = str(overrides.get("embedding_model") or "").strip()
+    if overrides.get("chat_model"):
+        chat_model = str(overrides.get("chat_model") or "").strip()
+    if overrides.get("api_base"):
+        api_base = str(overrides.get("api_base") or "").strip()
+    if overrides.get("temperature") is not None:
+        try:
+            temperature = float(overrides.get("temperature"))
+        except Exception:
+            pass
+    if overrides.get("max_tokens") is not None:
+        try:
+            max_tokens = int(overrides.get("max_tokens"))
+        except Exception:
+            pass
+    if overrides.get("top_p") is not None:
+        top_p = overrides.get("top_p")
+    if overrides.get("presence_penalty") is not None:
+        presence_penalty = overrides.get("presence_penalty")
+    if overrides.get("frequency_penalty") is not None:
+        frequency_penalty = overrides.get("frequency_penalty")
+    if overrides.get("system_prompt_extra"):
+        extra_override = str(overrides.get("system_prompt_extra") or "").strip()
+        if extra_override:
+            system_prompt_extra = (system_prompt_extra + " " + extra_override).strip() if system_prompt_extra else extra_override
     import logging
     logging.getLogger(__name__).warning(
         "kb_rag_models portal_id=%s embed=%s chat=%s api_base=%s",
@@ -285,6 +318,7 @@ def answer_from_kb(
         return None, err or "embedding_failed", None
     qv = q_vecs[0]
 
+    aud = audience if audience in ("staff", "client") else "staff"
     base_query = (
         select(
             KBEmbedding.vector_json,
@@ -301,6 +335,7 @@ def answer_from_kb(
         .where(
             KBChunk.portal_id == portal_id,
             KBFile.status == "ready",
+            KBFile.audience == aud,
         )
         .order_by(KBChunk.id.desc())
         .limit(2000)

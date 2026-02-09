@@ -24,8 +24,8 @@ export function TracesPage() {
 
   return (
     <div>
-      <h1 className="text-xl font-bold mb-4">Трейсы Bitrix</h1>
-      {isLoading && <p>Загрузка...</p>}
+      <h1 className="text-xl font-bold mb-4"> Bitrix</h1>
+      {isLoading && <p>...</p>}
       <div className="bg-white shadow rounded overflow-hidden">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
@@ -49,14 +49,14 @@ export function TracesPage() {
                     {r.trace_id}
                   </Link>
                 </td>
-                <td className="px-4 py-2 text-sm">{r.portal_id ?? "—"}</td>
+                <td className="px-4 py-2 text-sm">{r.portal_id ?? ""}</td>
                 <td className="px-4 py-2 text-sm">{r.direction}</td>
                 <td className="px-4 py-2 text-sm">{r.kind}</td>
                 <td className="px-4 py-2 text-sm">{r.method}</td>
                 <td className="px-4 py-2 text-sm truncate max-w-[200px]">{r.path}</td>
-                <td className="px-4 py-2 text-sm">{r.status_code ?? "—"}</td>
-                <td className="px-4 py-2 text-sm">{r.latency_ms ?? "—"}</td>
-                <td className="px-4 py-2 text-sm text-gray-500">{r.created_at?.slice(0, 19) ?? "—"}</td>
+                <td className="px-4 py-2 text-sm">{r.status_code ?? ""}</td>
+                <td className="px-4 py-2 text-sm">{r.latency_ms ?? ""}</td>
+                <td className="px-4 py-2 text-sm text-gray-500">{r.created_at?.slice(0, 19) ?? ""}</td>
               </tr>
             ))}
           </tbody>

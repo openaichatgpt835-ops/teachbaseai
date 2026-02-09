@@ -13,8 +13,8 @@ from apps.backend.middleware.bitrix_inbound_events import BitrixInboundEventsMid
 from apps.backend.routers import health, admin_auth, admin_portals
 from apps.backend.routers import admin_dialogs, admin_events, admin_outbox
 from apps.backend.routers import admin_system, admin_logs, admin_traces, admin_debug
-from apps.backend.routers import admin_settings, admin_inbound_events, admin_billing
-from apps.backend.routers import bitrix, portal, debug, admin_kb
+from apps.backend.routers import admin_settings, admin_inbound_events, admin_billing, admin_registrations
+from apps.backend.routers import bitrix, portal, debug, admin_kb, telegram, web_auth
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +73,11 @@ app.include_router(admin_settings.router, prefix="/v1/admin/settings", tags=["Ad
 app.include_router(admin_inbound_events.router, prefix="/v1/admin", tags=["Admin Inbound Events"])
 app.include_router(admin_kb.router, prefix="/v1/admin/kb", tags=["Admin KB"])
 app.include_router(admin_billing.router, prefix="/v1/admin/billing", tags=["Admin Billing"])
+app.include_router(admin_registrations.router, prefix="/v1/admin", tags=["Admin Registrations"])
 app.include_router(bitrix.router, prefix="/v1/bitrix", tags=["Bitrix"])
+app.include_router(telegram.router, prefix="/v1/telegram", tags=["Telegram"])
 app.include_router(portal.router, prefix="/v1/portal", tags=["Portal"])
+app.include_router(web_auth.router, prefix="/v1/web", tags=["Web"])
 app.include_router(debug.router, prefix="/v1/debug", tags=["Debug"])
 
 

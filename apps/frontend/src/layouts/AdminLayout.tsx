@@ -38,6 +38,9 @@ export function AdminLayout() {
               <Link to="/admin/bot-settings" className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-100">
                 Настройки бота
               </Link>
+              <Link to="/admin/registrations" className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-100">
+                Регистрации
+              </Link>
             </div>
             <button
               onClick={handleLogout}

@@ -40,6 +40,8 @@ def process_outbox(outbox_id: int) -> bool:
     from apps.backend.clients.bitrix import im_message_add, imbot_message_add
     from apps.backend.services.portal_tokens import ensure_fresh_access_token, BitrixAuthError
     from apps.backend.config import get_settings
+    from apps.backend.clients.telegram import telegram_send_message
+    from apps.backend.services.telegram_settings import get_portal_telegram_token_plain
 
     factory = get_session_factory()
     with factory() as db:
@@ -47,6 +49,39 @@ def process_outbox(outbox_id: int) -> bool:
         if not o or o.status != "created":
             return False
         payload = json.loads(o.payload_json or "{}")
+        provider = payload.get("provider") or "bitrix"
+        if provider == "telegram":
+            chat_id = payload.get("chat_id")
+            body = payload.get("body")
+            kind = payload.get("kind") or "staff"
+            if not chat_id or not body:
+                o.status = "error"
+                o.error_message = "Missing chat_id or body"
+                db.commit()
+                return False
+            token = get_portal_telegram_token_plain(db, o.portal_id, kind)
+            if not token:
+                o.status = "error"
+                o.error_message = "Missing telegram token"
+                db.commit()
+                return False
+            parts = _split_message(body, limit=3500)
+            ok = True
+            err = None
+            for part in parts:
+                ok, err = telegram_send_message(token, chat_id, part)
+                if not ok:
+                    break
+            if ok:
+                from datetime import datetime
+                o.status = "sent"
+                o.sent_at = datetime.utcnow()
+            else:
+                o.status = "error"
+                o.error_message = (err or "send_failed")[:200]
+                o.retry_count = (o.retry_count or 0) + 1
+            db.commit()
+            return ok
         dialog_id = payload.get("dialog_id")
         body = payload.get("body")
         domain = payload.get("domain")
@@ -125,6 +160,7 @@ def process_kb_job(job_id: int) -> bool:
     """Process KB job (ingest)."""
     from apps.backend.database import get_session_factory
     from apps.backend.models.kb import KBJob
+    from apps.backend.models.outbox import Outbox
     from apps.backend.services.kb_ingest import ingest_file
     from apps.backend.services.kb_sources import process_url_source
 
@@ -197,4 +233,32 @@ def process_kb_job(job_id: int) -> bool:
         job.status = "done"
         db.add(job)
         db.commit()
+        try:
+            chat_id = payload.get("tg_chat_id")
+            kind = payload.get("tg_kind") or "staff"
+            fname = payload.get("tg_filename")
+            if chat_id:
+                body = f"Изучил ваш документ {fname}, задавайте вопросы! ✅" if fname else "Изучил ваш документ, задавайте вопросы! ✅"
+                outbox = Outbox(
+                    portal_id=job.portal_id,
+                    message_id=None,
+                    status="created",
+                    payload_json=json.dumps({
+                        "provider": "telegram",
+                        "kind": kind,
+                        "chat_id": chat_id,
+                        "body": body,
+                    }, ensure_ascii=False),
+                )
+                db.add(outbox)
+                db.commit()
+                from redis import Redis
+                from rq import Queue
+                from apps.backend.config import get_settings
+                s = get_settings()
+                r = Redis(host=s.redis_host, port=s.redis_port)
+                q = Queue("default", connection=r)
+                q.enqueue("apps.worker.jobs.process_outbox", outbox.id)
+        except Exception:
+            pass
         return True

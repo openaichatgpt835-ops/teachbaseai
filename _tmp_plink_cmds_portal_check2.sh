@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select portal_id, (staff_bot_token_enc is not null) as staff_has_token, (client_bot_token_enc is not null) as client_has_token from portal_telegram_settings where portal_id = (select id from portals where domain='b24-9ex49z.bitrix24.ru');"

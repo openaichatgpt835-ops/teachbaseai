@@ -10,8 +10,8 @@ export function TraceDetailPage() {
     enabled: !!traceId,
   });
 
-  if (isLoading) return <div>Загрузка...</div>;
-  if (error) return <div className="text-red-600">Ошибка: {String(error)}</div>;
+  if (isLoading) return <div>...</div>;
+  if (error) return <div className="text-red-600">: {String(error)}</div>;
   if (!data) return null;
 
   const payload = data as {
@@ -42,9 +42,9 @@ export function TraceDetailPage() {
   return (
     <div>
       <div className="mb-4">
-        <Link to="/admin/traces" className="text-blue-600 hover:underline">← Трейсы Bitrix</Link>
+        <Link to="/admin/traces" className="text-blue-600 hover:underline">  Bitrix</Link>
       </div>
-      <h1 className="text-xl font-bold mb-4">Детали трейса: {payload.trace_id}</h1>
+      <h1 className="text-xl font-bold mb-4"> : {payload.trace_id}</h1>
       <div className="space-y-6">
         {payload.items.map((r) => (
           <div key={r.id} className="bg-white shadow rounded-lg p-4 border">
@@ -58,11 +58,11 @@ export function TraceDetailPage() {
               <dt className="text-gray-500">path</dt>
               <dd className="font-mono">{r.path}</dd>
               <dt className="text-gray-500">status_code</dt>
-              <dd>{r.status_code ?? "—"}</dd>
+              <dd>{r.status_code ?? ""}</dd>
               <dt className="text-gray-500">latency_ms</dt>
-              <dd>{r.latency_ms ?? "—"}</dd>
+              <dd>{r.latency_ms ?? ""}</dd>
               <dt className="text-gray-500">created_at</dt>
-              <dd>{r.created_at ?? "—"}</dd>
+              <dd>{r.created_at ?? ""}</dd>
               {r.bitrix_error_code != null && (
                 <>
                   <dt className="text-gray-500">bitrix_error_code</dt>
@@ -108,7 +108,7 @@ export function TraceDetailPage() {
               {(r.kind === "imbot_chat_add" || r.kind === "imbot_message_add") && r.summary && (
                 <>
                   <dt className="text-gray-500">target_user_id</dt>
-                  <dd>{(r.summary as { target_user_id?: number }).target_user_id ?? "—"}</dd>
+                  <dd>{(r.summary as { target_user_id?: number }).target_user_id ?? ""}</dd>
                   {(r.summary as { dialog_id?: string }).dialog_id != null && (
                     <>
                       <dt className="text-gray-500">dialog_id</dt>
@@ -126,11 +126,11 @@ export function TraceDetailPage() {
               {r.kind === "prepare_chats" && r.summary && (
                 <>
                   <dt className="text-gray-500">total</dt>
-                  <dd>{(r.summary as { total?: number }).total ?? "—"}</dd>
+                  <dd>{(r.summary as { total?: number }).total ?? ""}</dd>
                   <dt className="text-gray-500">ok_count</dt>
-                  <dd>{(r.summary as { ok_count?: number }).ok_count ?? "—"}</dd>
+                  <dd>{(r.summary as { ok_count?: number }).ok_count ?? ""}</dd>
                   <dt className="text-gray-500">users_failed</dt>
-                  <dd>{(r.summary as { users_failed?: number }).users_failed ?? "—"}</dd>
+                  <dd>{(r.summary as { users_failed?: number }).users_failed ?? ""}</dd>
                   {(r.summary as { failed?: Array<{ user_id?: number; code?: string }> }).failed?.length ? (
                     <>
                       <dt className="text-gray-500">failed</dt>

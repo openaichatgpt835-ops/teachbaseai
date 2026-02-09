@@ -13,6 +13,7 @@ class KBSource(Base):
     id = Column(Integer, primary_key=True, index=True)
     portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
     source_type = Column(String(32), nullable=False)  # file|web|youtube|vk|rutube
+    audience = Column(String(16), nullable=False, default="staff")  # staff|client
     url = Column(Text, nullable=True)
     title = Column(String(256), nullable=True)
     status = Column(String(32), nullable=False, default="new")
@@ -30,6 +31,7 @@ class KBFile(Base):
     portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
     source_id = Column(Integer, ForeignKey("kb_sources.id"), nullable=True, index=True)
     filename = Column(String(256), nullable=False)
+    audience = Column(String(16), nullable=False, default="staff")  # staff|client
     mime_type = Column(String(128), nullable=True)
     size_bytes = Column(Integer, nullable=False, default=0)
     storage_path = Column(Text, nullable=False)
@@ -55,6 +57,7 @@ class KBChunk(Base):
     portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
     file_id = Column(Integer, ForeignKey("kb_files.id"), nullable=True, index=True)
     source_id = Column(Integer, ForeignKey("kb_sources.id"), nullable=True, index=True)
+    audience = Column(String(16), nullable=False, default="staff")  # staff|client
     chunk_index = Column(Integer, nullable=False, default=0)
     text = Column(Text, nullable=False)
     token_count = Column(Integer, nullable=True)

@@ -35,14 +35,24 @@ def _safe_filename(name: str) -> str:
     return name[:120] if name else "source"
 
 
-def create_url_source(db: Session, portal_id: int, url: str, title: str | None = None) -> dict:
+def create_url_source(
+    db: Session,
+    portal_id: int,
+    url: str,
+    title: str | None = None,
+    *,
+    audience: str = "staff",
+) -> dict:
     url = (url or "").strip()
     if not url:
         return {"ok": False, "error": "missing_url"}
+    if audience not in ("staff", "client"):
+        audience = "staff"
     source_type = _detect_source_type(url)
     src = KBSource(
         portal_id=portal_id,
         source_type=source_type,
+        audience=audience,
         url=url,
         title=title,
         status="new",
@@ -133,6 +143,7 @@ def process_url_source(db: Session, source_id: int) -> dict:
                 portal_id=src.portal_id,
                 source_id=src.id,
                 filename=filename,
+                audience=src.audience or "staff",
                 mime_type="text/plain",
                 size_bytes=os.path.getsize(file_path),
                 storage_path=file_path,
@@ -153,6 +164,7 @@ def process_url_source(db: Session, source_id: int) -> dict:
                 portal_id=src.portal_id,
                 source_id=src.id,
                 filename=filename,
+                audience=src.audience or "staff",
                 mime_type="audio/mpeg",
                 size_bytes=os.path.getsize(file_path),
                 storage_path=file_path,

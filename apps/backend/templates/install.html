@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
@@ -6,43 +6,216 @@
   <title>Teachbase AI — Установка</title>
   <script src="https://unpkg.com/@bitrix24/b24jssdk@latest/dist/umd/index.min.js"></script>
   <style>
-    body { font-family: system-ui; max-width: 520px; margin: 2rem auto; padding: 0 1rem; }
-    .status { padding: 0.5rem; margin: 0.5rem 0; border-radius: 4px; }
-    .ok { background: #d4edda; }
-    .err { background: #f8d7da; }
-    .pending { background: #fff3cd; }
-    .info { background: #cce5ff; }
-    button { padding: 0.5rem 1rem; cursor: pointer; margin: 0.25rem; }
-    button:disabled { opacity: 0.6; cursor: not-allowed; }
-    #user-list { max-height: 280px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 0.5rem; margin: 0.5rem 0; }
-    .user-row { padding: 0.35rem 0; border-bottom: 1px solid #eee; }
+    :root {
+      --ink: #0f172a;
+      --muted: #64748b;
+      --accent: #2563eb;
+      --bg: #f3f6ff;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --shadow: 0 16px 36px rgba(15, 23, 42, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'Manrope', 'Inter', system-ui, -apple-system, Segoe UI, sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at 10% 10%, #f2f7ff 0%, #f8fbff 45%, #ffffff 100%);
+      user-select: none;
+    }
+    input, textarea { user-select: text; }
+    .wrap {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+      gap: 24px;
+    }
+    .title {
+      font-size: 32px;
+      margin: 0 0 10px;
+    }
+    .subtitle {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .pill {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.8);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 600;
+      box-shadow: var(--shadow);
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 14px;
+      box-shadow: var(--shadow);
+    }
+    .card h3 {
+      margin: 0 0 6px;
+      font-size: 14px;
+    }
+    .card p {
+      margin: 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 20px;
+      box-shadow: var(--shadow);
+    }
+    .panel h2 {
+      margin: 0 0 6px;
+      font-size: 18px;
+    }
+    .panel .info {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 14px;
+    }
+    .status {
+      background: #e8f0ff;
+      color: #1e3a8a;
+      border: 1px solid #c8d9f4;
+      padding: 10px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      margin-bottom: 12px;
+    }
+    .search {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: #f8fbff;
+      font-size: 13px;
+      margin-bottom: 10px;
+    }
+    #user-list {
+      max-height: 280px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 8px 10px;
+      background: #fbfdff;
+    }
+    .user-row {
+      padding: 8px 6px;
+      border-bottom: 1px solid #edf2ff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
     .user-row:last-child { border-bottom: none; }
-    input[type="search"] { width: 100%; padding: 0.4rem; margin-bottom: 0.5rem; box-sizing: border-box; }
-    a.app-link { margin-top: 0.5rem; display: inline-block; }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      border: none;
+      border-radius: 12px;
+      padding: 10px 16px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn-secondary {
+      background: #e2e8f0;
+      color: #1f2937;
+    }
+    .muted {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    #install-steps {
+      margin-top: 14px;
+      background: #f8fafc;
+      border-radius: 12px;
+      border: 1px dashed #d9e2f6;
+      padding: 10px 12px;
+      font-size: 12px;
+    }
+    @media (max-width: 980px) {
+      .wrap { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <h1>Teachbase AI — Установка</h1>
-  <div id="status" class="status pending">Загрузка Bitrix24...</div>
-  <div id="creds-warning" class="status info" style="display:none;">
-    Для работы диагностики и автоматического обновления токенов нужно вручную ввести client_id/client_secret
-    в админке (Portal → OAuth). Bitrix не передаёт client_secret автоматически.
-  </div>
-  <div id="step-users" style="display:none;">
-    <p class="info">Выберите сотрудников, которым разрешён чат с ботом:</p>
-    <input type="search" id="user-search" placeholder="Поиск по имени..." />
-    <div id="user-list"></div>
-    <p><label><input type="checkbox" id="select-all" /> Выбрать всех</label></p>
-    <p id="count-msg">Выбрано: 0</p>
-    <button id="btn-install" disabled>Установить приложение</button>
-    <button id="btn-retry" style="display:none;">Повторить шаг 2 (создать чаты)</button>
-    <div id="install-steps" style="margin-top:1rem; display:none;">
-      <div id="step-allowlist">Шаг 1: Доступ сохранён — ожидание</div>
-      <div id="step-bot">Шаг 2: Чат создан — ожидание</div>
-      <div id="step-ping">Шаг 3: Ping/pong — ожидание</div>
-      <div id="users-status" style="margin-top:0.5rem;"></div>
+  <div class="wrap">
+    <div>
+      <div class="pill">Teachbase AI · Установка</div>
+      <h1 class="title">Запустите свой AI‑кабинет</h1>
+      <p class="subtitle">Регистрация без Bitrix24. Получите доступ к базе знаний, конструкторам и настройкам ботов.</p>
+      <div class="cards">
+        <div class="card">
+          <h3>База знаний</h3>
+          <p>Файлы, URL‑источники, индексация.</p>
+        </div>
+        <div class="card">
+          <h3>Конструктор бота</h3>
+          <p>Готовые сценарии и тестовый прогон.</p>
+        </div>
+        <div class="card">
+          <h3>Интеграции</h3>
+          <p>Bitrix24, webhook и будущие каналы.</p>
+        </div>
+        <div class="card">
+          <h3>Оплата</h3>
+          <p>Гибкие тарифы и контроль расходов.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Подключение сотрудников</h2>
+      <div class="info">Выберите сотрудников, которым разрешён чат с ботом.</div>
+      <div id="status" class="status">Загрузка Bitrix24...</div>
+      <div id="step-users" style="display:none;">
+        <input type="search" id="user-search" class="search" placeholder="Поиск по имени..." />
+        <div id="user-list"></div>
+        <div class="actions">
+          <label class="muted"><input type="checkbox" id="select-all" /> Выбрать всех</label>
+          <span id="count-msg" class="muted">Выбрано: 0</span>
+        </div>
+        <div class="actions">
+          <button id="btn-install" class="btn" disabled>Установить приложение</button>
+          <button id="btn-retry" class="btn btn-secondary" style="display:none;">Повторить шаг 2</button>
+        </div>
+        <div id="install-steps" style="display:none;">
+          <div id="step-allowlist">Шаг 1: Доступ сохранён — ожидание</div>
+          <div id="step-bot">Шаг 2: Чат создан — ожидание</div>
+          <div id="step-ping">Шаг 3: Ping/pong — ожидание</div>
+          <div id="users-status" style="margin-top:0.5rem;"></div>
+        </div>
+      </div>
     </div>
   </div>
+
   <script>
 (function() {
   const base = window.location.origin;
@@ -55,8 +228,7 @@
   const btnInstall = document.getElementById('btn-install');
   const btnRetry = document.getElementById('btn-retry');
 
-  function setStatus(cls, text) {
-    status.className = 'status ' + cls;
+  function setStatus(text) {
     status.textContent = text;
   }
 
@@ -69,46 +241,24 @@
   function callInstallFinish() {
     return new Promise(function(resolve, reject) {
       if (b24Instance && typeof b24Instance.installFinish === 'function') {
-        try {
-          b24Instance.installFinish();
-          return resolve();
-        } catch (e) {
-          return reject(e);
-        }
+        try { b24Instance.installFinish(); return resolve(); } catch (e) { return reject(e); }
       }
       if (b24Instance && b24Instance.app && typeof b24Instance.app.installFinish === 'function') {
-        try {
-          b24Instance.app.installFinish();
-          return resolve();
-        } catch (e) {
-          return reject(e);
-        }
+        try { b24Instance.app.installFinish(); return resolve(); } catch (e) { return reject(e); }
       }
       if (window.BX24 && typeof window.BX24.init === 'function') {
         try {
           window.BX24.init(function() {
             if (typeof window.BX24.installFinish === 'function') {
-              try {
-                window.BX24.installFinish();
-                return resolve();
-              } catch (e) {
-                return reject(e);
-              }
+              try { window.BX24.installFinish(); return resolve(); } catch (e) { return reject(e); }
             }
             return reject(new Error('Метод BX24.installFinish недоступен. Обновите страницу в Bitrix24.'));
           });
           return;
-        } catch (e) {
-          return reject(e);
-        }
+        } catch (e) { return reject(e); }
       }
       if (window.BX24 && typeof window.BX24.installFinish === 'function') {
-        try {
-          window.BX24.installFinish();
-          return resolve();
-        } catch (e) {
-          return reject(e);
-        }
+        try { window.BX24.installFinish(); return resolve(); } catch (e) { return reject(e); }
       }
       return reject(new Error('Не удалось завершить установку: нет доступного BX24.installFinish. Обновите страницу в Bitrix24.'));
     });
@@ -118,6 +268,7 @@
   let portalId = 0;
   let authData = null;
   let allUsers = [];
+  let accessUserIds = new Set();
 
   function renderUsers(filter) {
     const q = (filter || '').toLowerCase();
@@ -129,7 +280,8 @@
       : allUsers;
     userList.innerHTML = filtered.map(function(u) {
       const name = (u.name || '') + ' ' + (u.last_name || '').trim() || u.email || 'ID ' + u.id;
-      return '<div class="user-row"><label><input type="checkbox" class="user-cb" data-id="' + u.id + '" /> ' + escapeHtml(name) + '</label></div>';
+      const checked = accessUserIds.has(String(u.id)) ? ' checked' : '';
+      return '<div class="user-row"><label><input type="checkbox" class="user-cb" data-id="' + u.id + '"' + checked + ' /> ' + escapeHtml(name) + '</label></div>';
     }).join('');
     userList.querySelectorAll('.user-cb').forEach(function(cb) {
       cb.addEventListener('change', updateCount);
@@ -158,13 +310,9 @@
             const id = data && (data.ID || data.id);
             const n = parseInt(id, 10);
             return resolve(Number.isFinite(n) ? n : null);
-          } catch (e) {
-            return resolve(null);
-          }
+          } catch (e) { return resolve(null); }
         });
-      } catch (e) {
-        return resolve(null);
-      }
+      } catch (e) { return resolve(null); }
     });
   }
 
@@ -196,7 +344,7 @@
     const el = document.getElementById(id);
     if (!el) return;
     el.textContent = text;
-    el.style.color = ok ? 'green' : (ok === false ? 'red' : 'inherit');
+    el.style.color = ok ? '#15803d' : (ok === false ? '#b91c1c' : 'inherit');
   }
 
   function renderUserStatuses(failed, baseUrl) {
@@ -205,11 +353,11 @@
     baseUrl = baseUrl || base;
     if (!failed || failed.length === 0) {
       box.textContent = 'Все пользователи: ok';
-      box.style.color = 'green';
+      box.style.color = '#15803d';
       return;
     }
     box.innerHTML = '';
-    box.style.color = 'red';
+    box.style.color = '#b91c1c';
     box.appendChild(document.createTextNode('Ошибки: '));
     failed.forEach(function(f, i) {
       if (i > 0) box.appendChild(document.createTextNode('; '));
@@ -221,7 +369,7 @@
         a.textContent = line + ' (trace: ' + f.trace_id_child + ')';
         a.target = '_blank';
         a.rel = 'noopener';
-        a.className = 'app-link';
+        a.className = 'muted';
         box.appendChild(a);
       } else {
         box.appendChild(document.createTextNode(line));
@@ -238,248 +386,177 @@
 
   function parseJsonOrThrow(r) {
     var ct = (r.headers.get('Content-Type') || '').toLowerCase();
-    if (ct.indexOf('application/json') !== -1) {
-      return r.json();
-    }
-    return r.text().then(function(text) {
-      throw new Error('Ожидался JSON, сервер вернул не-JSON. Обновите страницу.');
-    });
+    if (ct.indexOf('application/json') >= 0) return r.json();
+    return r.text().then(function(t){ throw new Error(t || 'unexpected response'); });
   }
 
-  function formatStepError(stepName, errorCode, traceId, message) {
-    var parts = ['Шаг ' + stepName + ': ошибка ' + (errorCode || 'unknown')];
-    if (traceId) parts.push('Trace: ' + traceId);
-    if (message) parts.push(message);
-    return parts.join('. ');
-  }
-
-  function finalizeInstall(ids) {
-    document.getElementById('install-steps').style.display = 'block';
-    btnRetry.style.display = 'none';
-    setStatus('pending', 'Финализация установки...');
-    setStepText('step-allowlist', 'Шаг 1: Доступ сохранён — выполнение', null);
-    setStepText('step-bot', 'Шаг 2: Чат создан — ожидание', null);
-    setStepText('step-ping', 'Шаг 3: Ping/pong — ожидание', null);
-    return fetch(base + '/api/v1/bitrix/install/finalize', {
+  function apiPost(path, body) {
+    return fetch(base + '/api/v1/bitrix' + path, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Authorization': 'Bearer ' + portalToken
-      },
-      body: JSON.stringify({
-        portal_id: portalId,
-        selected_user_ids: ids,
-        auth_context: {
-          domain: authData ? authData.domain : '',
-          member_id: authData ? authData.member_id : '',
-          access_token: authData ? authData.access_token : '',
-          refresh_token: authData ? authData.refresh_token : '',
-          user_id: authData ? (authData.user_id || authData.userId || '') : ''
-        }
-      })
-    }).then(function(r) {
-      return parseJsonOrThrow(r).then(function(data) {
-        var traceId = getTraceIdFromResponse(r, data);
-        if (!r.ok) {
-          var code = (data && data.error) || 'http_' + r.status;
-          var msg = (data && (data.message || data.detail)) || '';
-          var err = new Error(formatStepError('finalize', code, traceId, msg));
-          err.traceId = traceId;
-          throw err;
-        }
-        if (!data) throw new Error(formatStepError('finalize', 'empty', traceId, ''));
-        return { data: data, traceId: traceId };
-      });
-    }).then(function(out) {
-      var data = out.data;
-      var traceId = out.traceId;
-      if (data && data.local_creds_present === false) {
-        const warn = document.getElementById('creds-warning');
-        if (warn) warn.style.display = 'block';
-      }
-      const steps = data.steps || {};
-      setStepText('step-allowlist', 'Шаг 1: Доступ сохранён — ' + (steps.allowlist || 'ok'), steps.allowlist === 'ok');
-      const botOk = steps.ensure_bot === 'ok';
-      setStepText('step-bot', 'Шаг 2: Чат создан — ' + (botOk ? 'ok' : 'ошибка'), botOk);
-      if (steps.provision) {
-        const prov = steps.provision;
-        const provOk = prov.status === 'ok';
-        setStepText('step-ping', 'Шаг 3: Ping/pong — ' + (provOk ? 'готово, напишите ping' : 'ожидание исправления'), provOk);
-        renderUserStatuses(prov.failed, base);
-        if (!provOk) {
-          btnRetry.style.display = 'inline-block';
-        }
-      }
-      if (data.status !== 'ok') {
-        var trace = traceId ? (' Trace: ' + traceId) : '';
-        var stepFailed = steps.ensure_bot !== 'ok' ? 'ensure_bot' : (steps.provision && steps.provision.status !== 'ok' ? 'provision' : 'allowlist');
-        var err = new Error(formatStepError(stepFailed, data.error || 'partial_fail', traceId, 'Не удалось подготовить чаты.' + trace));
-        err.traceId = traceId;
-        throw err;
-      }
-      return callInstallFinish().then(function() {
-        setStatus('ok', 'Установлено. Выбранные сотрудники имеют доступ к чату с ботом.');
-        stepUsers.style.display = 'none';
-        var link = document.createElement('a');
-        link.href = base + '/api/v1/bitrix/app';
-        link.textContent = 'Перейти в настройки приложения';
-        link.className = 'app-link';
-        link.target = '_blank';
-        status.parentNode.appendChild(link);
-        setTimeout(function() { window.location.href = base + '/api/v1/bitrix/app'; }, 800);
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify(body || {})
+    });
+  }
+
+  function apiGet(path) {
+    return fetch(base + '/api/v1/bitrix' + path, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }
+    });
+  }
+
+  function installStepComplete(selectedIds) {
+    const payload = { user_ids: selectedIds, auth: authData };
+    return apiPost('/install/complete', payload).then(function(r) {
+      return parseJsonOrThrow(r).then(function(data){ return { r: r, data: data }; });
+    });
+  }
+
+  function finalizeProvision(selectedIds) {
+    return apiPost('/app/provision', { auth: authData }).then(function(r) {
+      return parseJsonOrThrow(r).then(function(data){ return { r: r, data: data }; });
+    });
+  }
+
+  function loadUsers() {
+    return fetch(base + '/api/v1/bitrix/users?portal_id=' + portalId + '&limit=200', {
+      method: 'GET',
+      headers: { 'Accept': 'application/json', 'Authorization': 'Bearer ' + portalToken, 'X-Requested-With': 'XMLHttpRequest' }
+    }).then(function(r) { return parseJsonOrThrow(r); });
+  }
+
+  function loadAccessUsers() {
+    return fetch(base + '/api/v1/bitrix/portals/' + portalId + '/access/users', {
+      method: 'GET',
+      headers: { 'Accept': 'application/json', 'Authorization': 'Bearer ' + portalToken, 'X-Requested-With': 'XMLHttpRequest' }
+    }).then(function(r) { return parseJsonOrThrow(r); });
+  }
+
+  function saveAccessUsers(ids) {
+    return fetch(base + '/api/v1/bitrix/portals/' + portalId + '/access/users', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': 'Bearer ' + portalToken, 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ user_ids: ids })
+    });
+  }
+
+  function initWithBx24($b24) {
+    if (!$b24) { setStatus('BX24 SDK не доступен'); return; }
+    b24Instance = $b24;
+    if ($b24.auth && typeof $b24.auth.getAuthData === 'function') {
+      const auth = $b24.auth.getAuthData() || {};
+      authData = auth;
+      setStatus('Получение списка сотрудников...');
+      apiPost('/session/start', { auth: authData }).then(function(r){ return parseJsonOrThrow(r); })
+        .then(function(session) {
+          portalToken = session.portal_token;
+          portalId = session.portal_id;
+          return Promise.all([loadUsers(), loadAccessUsers()]);
+        })
+        .then(function(all) {
+          const usersResp = all[0] || {};
+          const accessResp = all[1] || {};
+          allUsers = usersResp.users || [];
+          accessUserIds = new Set((accessResp.user_ids || []).map(function(id){ return String(id); }));
+          setStepUsers(true);
+          renderUsers('');
+          setStatus('Выберите сотрудников для доступа.');
+        })
+        .catch(function(err) {
+          setStatus('Ошибка: ' + (err && err.message ? err.message : 'не удалось загрузить пользователей'));
+        });
+      return;
+    }
+    $b24.callMethod('app.info', {}, function(appInfo) {
+      $b24.callMethod('user.current', {}, function(userInfo) {
+        const auth = Object.assign({}, appInfo, userInfo);
+        authData = auth;
+        setStatus('Получение списка сотрудников...');
+        apiPost('/session/start', { auth: authData }).then(function(r){ return parseJsonOrThrow(r); })
+          .then(function(session) {
+            portalToken = session.portal_token;
+            portalId = session.portal_id;
+            return Promise.all([loadUsers(), loadAccessUsers()]);
+          })
+          .then(function(all) {
+            const usersResp = all[0] || {};
+            const accessResp = all[1] || {};
+            allUsers = usersResp.users || [];
+            accessUserIds = new Set((accessResp.user_ids || []).map(function(id){ return String(id); }));
+            setStepUsers(true);
+            renderUsers('');
+            setStatus('Выберите сотрудников для доступа.');
+          })
+          .catch(function(err) {
+            setStatus('Ошибка: ' + (err && err.message ? err.message : 'не удалось загрузить пользователей'));
+          });
       });
     });
+  }
+
+  function init() {
+    if (window.BX24 && typeof window.BX24.init === 'function') {
+      window.BX24.init(function() {
+        initWithBx24(window.BX24);
+      });
+      return;
+    }
+    if (window.B24Js && typeof window.B24Js.initializeB24Frame === 'function') {
+      window.B24Js.initializeB24Frame()
+        .then(function(b24) {
+          initWithBx24(b24);
+        })
+        .catch(function() {
+          setStatus('BX24 SDK не доступен');
+        });
+      return;
+    }
+    setStatus('BX24 SDK не доступен');
   }
 
   btnInstall.addEventListener('click', function() {
-    const ids = [];
-    userList.querySelectorAll('.user-cb:checked').forEach(function(cb) {
-      ids.push(parseInt(cb.dataset.id, 10));
-    });
-    if (ids.length === 0) return;
+    const selectedIds = Array.from(userList.querySelectorAll('.user-cb:checked')).map(function(cb){ return parseInt(cb.getAttribute('data-id'), 10); });
+    if (!selectedIds.length) return;
     btnInstall.disabled = true;
-    finalizeInstall(ids).catch(function(e) {
-      setStatus('err', 'Ошибка: ' + (e.message || String(e)) + '. Обновите страницу в Bitrix24 при необходимости.');
-      if (e.traceId) {
-        status.appendChild(document.createTextNode(' '));
-        var link = document.createElement('a');
-        link.href = base + '/admin/traces/' + e.traceId;
-        link.textContent = 'Открыть детали трейса';
-        link.target = '_blank';
-        link.rel = 'noopener';
-        link.className = 'app-link';
-        status.appendChild(link);
-      }
-      btnInstall.disabled = false;
-      btnRetry.style.display = 'inline-block';
-    });
+    setStatus('Сохраняем доступ...');
+    saveAccessUsers(selectedIds)
+      .then(function(r) { return parseJsonOrThrow(r); })
+      .then(function() {
+        document.getElementById('install-steps').style.display = 'block';
+        setStepText('step-allowlist', 'Шаг 1: Доступ сохранён — ok', true);
+        setStepText('step-bot', 'Шаг 2: Чат создаётся — ожидание');
+        setStepText('step-ping', 'Шаг 3: Ping/pong — ожидание');
+        setStatus('Запускаем создание чатов...');
+        return finalizeProvision(selectedIds);
+      })
+      .then(function(res) {
+        const data = res.data || {};
+        const okCount = data.ok_count || 0;
+        const failed = data.failed || [];
+        if (failed.length) {
+          setStepText('step-bot', 'Шаг 2: Чат создан — есть ошибки', false);
+        } else {
+          setStepText('step-bot', 'Шаг 2: Чат создан — ok', true);
+        }
+        setStepText('step-ping', 'Шаг 3: Ping/pong — ok', true);
+        renderUserStatuses(failed, base);
+        setStatus('Готово. Можно закрыть окно установки.');
+        btnRetry.style.display = failed.length ? 'inline-block' : 'none';
+        callInstallFinish().catch(function(){});
+      })
+      .catch(function(err) {
+        setStatus('Ошибка: ' + (err && err.message ? err.message : 'не удалось завершить')); 
+        btnInstall.disabled = false;
+      });
   });
 
   btnRetry.addEventListener('click', function() {
-    const ids = [];
-    userList.querySelectorAll('.user-cb:checked').forEach(function(cb) {
-      ids.push(parseInt(cb.dataset.id, 10));
-    });
-    if (ids.length === 0) return;
-    btnRetry.disabled = true;
-    finalizeInstall(ids).catch(function(e) {
-      setStatus('err', 'Ошибка: ' + (e.message || String(e)) + '. Обновите страницу в Bitrix24.');
-      if (e.traceId) {
-        status.appendChild(document.createTextNode(' '));
-        var link = document.createElement('a');
-        link.href = base + '/admin/traces/' + e.traceId;
-        link.textContent = 'Открыть детали трейса';
-        link.target = '_blank';
-        link.rel = 'noopener';
-        link.className = 'app-link';
-        status.appendChild(link);
-      }
-    }).finally(function() {
-      btnRetry.disabled = false;
-    });
+    btnRetry.style.display = 'none';
+    btnInstall.click();
   });
 
-  document.addEventListener('DOMContentLoaded', async function() {
-    try {
-      const $b24 = await B24Js.initializeB24Frame();
-      b24Instance = $b24 || null;
-      authData = $b24.auth.getAuthData();
-      if (!authData) {
-        setStatus('err', 'Нет данных авторизации. Обновите страницу.');
-        return;
-      }
-      setStatus('pending', 'Отправка данных на сервер...');
-      const payload = {
-        auth: {
-          access_token: authData.access_token,
-          refresh_token: authData.refresh_token,
-          domain: authData.domain,
-          member_id: authData.member_id,
-          user_id: authData.user_id
-        },
-        app_sid: typeof $b24.getAppSid === 'function' ? $b24.getAppSid() : ''
-      };
-      const r = await fetch(base + '/api/v1/bitrix/install/complete', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'X-Requested-With': 'XMLHttpRequest'
-        },
-        body: JSON.stringify(payload)
-      });
-      let data = {};
-      const ctComplete = (r.headers.get('Content-Type') || '').toLowerCase();
-      if (ctComplete.indexOf('application/json') !== -1) {
-        data = await r.json().catch(function() { return {}; });
-      } else {
-        await r.text();
-        const traceId = r.headers.get('X-Trace-Id') || '';
-        setStatus('err', 'Ожидался JSON, сервер вернул не-JSON.' + (traceId ? ' Trace: ' + traceId : '') + ' Обновите страницу.');
-        return;
-      }
-      const traceIdComplete = data.trace_id || r.headers.get('X-Trace-Id') || '';
-      if (!r.ok || data.status !== 'ok') {
-        setStatus('err', (data.error || data.message || data.detail || 'Ошибка: ' + r.status) + (traceIdComplete ? '. Trace: ' + traceIdComplete : ''));
-        return;
-      }
-      if (data.local_creds_present === false) {
-        const warn = document.getElementById('creds-warning');
-        if (warn) warn.style.display = 'block';
-      }
-      const portalIdKey = 'portal' + '_id';
-      portalId = data[portalIdKey];
-      const tokenKey = 'portal' + '_token';
-      portalToken = data[tokenKey] || '';
-      if (!portalToken) {
-        setStatus('err', 'Нет токена сессии. Обновите страницу.');
-        return;
-      }
-      if (data.bot && data.bot.status !== 'ok') {
-        var botErr = (data.bot.error_detail_safe || data.bot.error_code || '') + (traceIdComplete ? '. Trace: ' + traceIdComplete : '');
-        setStatus('err', 'Бот не зарегистрирован. ' + botErr + ' Проверьте PUBLIC_BASE_URL на сервере и обновите страницу.');
-        return;
-      }
-      setStatus('pending', 'Загрузка списка сотрудников...');
-      const portalIdParam = 'portal' + '_id';
-      const ur = await fetch(base + '/api/v1/bitrix/users?' + portalIdParam + '=' + portalId, {
-        headers: { 'Authorization': 'Bearer ' + portalToken, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }
-      });
-      let ud = {};
-      const ctUsers = (ur.headers.get('Content-Type') || '').toLowerCase();
-      if (ctUsers.indexOf('application/json') !== -1) {
-        ud = await ur.json().catch(function() { return {}; });
-      } else {
-        await ur.text();
-        const traceUsers = ur.headers.get('X-Trace-Id') || '';
-        setStatus('err', 'Ожидался JSON при загрузке пользователей.' + (traceUsers ? ' Trace: ' + traceUsers : '') + ' Обновите страницу.');
-        return;
-      }
-      const traceIdUsers = ud.trace_id || ur.headers.get('X-Trace-Id') || '';
-      if (ur.status === 403 && (ud.error === 'missing_scope_user' || ud.detail)) {
-        setStatus('err', 'Не хватает права user для получения списка сотрудников. Добавьте право user в настройках приложения Bitrix24 и выполните переустановку.' + (traceIdUsers ? ' Trace: ' + traceIdUsers : ''));
-        return;
-      }
-      if (!ur.ok || !ud.users) {
-        setStatus('err', (ud.detail || ud.error || 'Не удалось загрузить пользователей: ' + ur.status) + (traceIdUsers ? '. Trace: ' + traceIdUsers : ''));
-        return;
-      }
-      allUsers = ud.users || [];
-      if (allUsers.length === 0) {
-        setStatus('err', 'Пользователи не найдены (0 из 0). Проверьте право user и наличие активных пользователей в портале.');
-        return;
-      }
-      setStatus('ok', 'Выберите сотрудников для доступа к чату с ботом.');
-      setStepUsers(true);
-      renderUsers();
-    } catch (e) {
-      setStatus('err', 'Ошибка: ' + (e.message || String(e)));
-    }
-  });
+  init();
 })();
   </script>
 </body>
 </html>
-

@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select id, event_type, created_at, payload_json from events where portal_id = 14 and (payload_json like '%telegram%' or event_type like '%telegram%' or event_type in ('rx','tx','blocked_by_acl')) order by id desc limit 10;"

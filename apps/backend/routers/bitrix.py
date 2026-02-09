@@ -4,14 +4,14 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, Request, Depends, UploadFile, File, HTTPException
+from fastapi import APIRouter, Request, Depends, UploadFile, File, HTTPException, Form
 from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse, PlainTextResponse
 
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 from sqlalchemy.orm import Session
 from sqlalchemy import select, delete, func
@@ -22,7 +22,13 @@ from apps.backend.models.portal import Portal, PortalUsersAccess
 from apps.backend.models.dialog import Dialog, Message
 from apps.backend.models.bitrix_inbound_event import BitrixInboundEvent
 from apps.backend.models.kb import KBFile, KBJob, KBSource, KBChunk, KBEmbedding
-from apps.backend.auth import create_portal_token_with_user, require_portal_access, decode_token
+from apps.backend.auth import (
+    create_portal_token_with_user,
+    require_portal_access,
+    decode_token,
+    get_password_hash,
+    verify_password,
+)
 from apps.backend.clients.bitrix import exchange_code, user_current, user_get
 from apps.backend.services.bitrix_events import process_imbot_message
 from apps.backend.services.portal_tokens import save_tokens, get_valid_access_token, BitrixAuthError
@@ -42,6 +48,19 @@ from apps.backend.services.finalize_install import finalize_install, step_provis
 from apps.backend.services.bot_provisioning import ensure_bot_registered
 from apps.backend.clients.bitrix import imbot_bot_list, BOT_CODE_DEFAULT
 from apps.backend.utils.bitrix_request import parse_bitrix_body
+from apps.backend.services.telegram_settings import (
+    normalize_telegram_username,
+    get_portal_telegram_settings,
+    set_portal_telegram_settings,
+    get_portal_telegram_secret,
+    get_portal_telegram_token_plain,
+)
+from apps.backend.models.portal_bot_flow import PortalBotFlow
+from apps.backend.models.web_user import WebUser
+from apps.backend.models.portal_link_request import PortalLinkRequest
+from apps.backend.services.bot_flow_engine import execute_client_flow_preview
+from apps.backend.services.activity import log_activity
+from apps.backend.clients.telegram import telegram_get_me, telegram_set_webhook
 
 router = APIRouter()
 
@@ -607,10 +626,12 @@ async def bitrix_session_start(request: Request, db: Session = Depends(get_db)):
     domain_clean = _domain_clean(domain)
     portal = db.execute(select(Portal).where(Portal.domain == domain_clean)).scalar_one_or_none()
     if not portal:
-        return JSONResponse(
-            {"error": "Portal not found", "trace_id": tid},
-            status_code=404,
-        )
+        # New install flow may hit session/start before any portal row exists.
+        portal = Portal(domain=domain_clean, status="active", install_type="market")
+        db.add(portal)
+        db.commit()
+        db.refresh(portal)
+    log_activity(db, kind="iframe", portal_id=portal.id, web_user_id=None)
     domain_full = f"https://{portal.domain}"
     if not user_id and access_token:
         uid, _err = user_current(domain_full, access_token)
@@ -639,8 +660,16 @@ async def bitrix_session_start(request: Request, db: Session = Depends(get_db)):
     if access_token:
         save_tokens(db, portal.id, access_token, refresh_token or "", 3600)
     is_portal_admin = bool(user_id and portal.admin_user_id and int(portal.admin_user_id) == int(user_id))
+    web_linked = db.execute(
+        select(WebUser.id).where(WebUser.portal_id == portal.id).limit(1)
+    ).first() is not None
     portal_token = create_portal_token_with_user(portal.id, user_id, expires_minutes=15)
-    return JSONResponse({"portal_token": portal_token, "portal_id": portal.id, "is_portal_admin": is_portal_admin})
+    return JSONResponse({
+        "portal_token": portal_token,
+        "portal_id": portal.id,
+        "is_portal_admin": is_portal_admin,
+        "web_linked": web_linked,
+    })
 
 
 @router.get("/users")
@@ -684,8 +713,36 @@ async def bitrix_users(
     return JSONResponse({"users": out, "total": len(out)})
 
 
+class AccessUserItem(BaseModel):
+    user_id: int
+    telegram_username: str | None = None
+
+
 class AccessUsersBody(BaseModel):
-    user_ids: list[int]
+    user_ids: list[int] | None = None
+    items: list[AccessUserItem] | None = None
+
+
+class TelegramBotSettingsBody(BaseModel):
+    bot_token: str | None = None
+    enabled: bool | None = None
+    clear_token: bool = False
+    allow_uploads: bool | None = None
+
+
+class WebAccessUserBody(BaseModel):
+    name: str
+    telegram_username: str | None = None
+
+
+class BotFlowBody(BaseModel):
+    draft_json: dict | None = None
+
+
+class BotFlowTestBody(BaseModel):
+    text: str
+    draft_json: dict | None = None
+    state_json: dict | None = None
 
 
 class FinalizeInstallBody(BaseModel):
@@ -694,14 +751,196 @@ class FinalizeInstallBody(BaseModel):
     auth_context: dict = {}
 
 
+class WebRegisterBody(BaseModel):
+    email: EmailStr
+    password: str
+    company: str | None = None
+
+
+class WebLinkRequestBody(BaseModel):
+    email: EmailStr
+
+
+class WebLoginBody(BaseModel):
+    email: EmailStr
+    password: str
+
+
 def _require_portal_admin(db: Session, portal_id: int, request: Request) -> Portal:
     portal = db.execute(select(Portal).where(Portal.id == portal_id)).scalar_one_or_none()
     if not portal:
         raise HTTPException(status_code=404, detail="Portal not found")
     uid = _portal_user_id_from_token(request)
-    if not uid or not portal.admin_user_id or int(portal.admin_user_id) != int(uid):
-        raise HTTPException(status_code=403, detail="Доступ только для администратора портала")
+    if uid and portal.admin_user_id and int(portal.admin_user_id) == int(uid):
+        return portal
+    # allow web owner for linked portals
+    if uid:
+        web_user = db.execute(
+            select(WebUser).where(WebUser.id == int(uid), WebUser.portal_id == portal_id)
+        ).scalar_one_or_none()
+        if web_user:
+            return portal
+    raise HTTPException(status_code=403, detail="Доступ только для администратора портала")
     return portal
+
+
+@router.post("/portals/{portal_id}/web/register")
+async def register_web_from_bitrix(
+    request: Request,
+    portal_id: int,
+    body: WebRegisterBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        raise HTTPException(status_code=403, detail="portal_id mismatch")
+    portal = _require_portal_admin(db, portal_id, request)
+    email = body.email.lower().strip()
+    if len(body.password) < 6:
+        raise HTTPException(status_code=400, detail="password_too_short")
+    existing = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail="email_exists")
+    user = WebUser(
+        email=email,
+        password_hash=get_password_hash(body.password),
+        portal_id=portal_id,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(user)
+    try:
+        meta = json.loads(portal.metadata_json or "{}") if portal.metadata_json else {}
+    except Exception:
+        meta = {}
+    meta["owner_email"] = email
+    if body.company:
+        meta["company"] = body.company
+    portal.metadata_json = json.dumps(meta, ensure_ascii=False)
+    db.add(portal)
+    db.commit()
+    demo_until = (user.created_at + timedelta(days=7)).date().isoformat()
+    return {"status": "ok", "email": user.email, "demo_until": demo_until}
+
+
+@router.post("/portals/{portal_id}/web/link/request")
+async def request_web_link(
+    request: Request,
+    portal_id: int,
+    body: WebLinkRequestBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        raise HTTPException(status_code=403, detail="portal_id mismatch")
+    _require_portal_admin(db, portal_id, request)
+    email = body.email.lower().strip()
+    web_user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
+    if not web_user:
+        raise HTTPException(status_code=404, detail="web_user_not_found")
+    if web_user.portal_id == portal_id:
+        return {"status": "already_linked"}
+    if not web_user.portal_id:
+        raise HTTPException(status_code=400, detail="web_user_missing_portal")
+    existing = db.execute(
+        select(PortalLinkRequest).where(
+            PortalLinkRequest.portal_id == portal_id,
+            PortalLinkRequest.web_user_id == web_user.id,
+            PortalLinkRequest.status == "pending",
+        )
+    ).scalar_one_or_none()
+    if existing:
+        return {"status": "pending", "request_id": existing.id}
+    req = PortalLinkRequest(
+        portal_id=portal_id,
+        web_user_id=web_user.id,
+        source_portal_id=web_user.portal_id,
+        status="pending",
+        created_at=datetime.utcnow(),
+    )
+    db.add(req)
+    db.commit()
+    return {"status": "pending", "request_id": req.id}
+
+
+@router.get("/portals/{portal_id}/web/status")
+async def get_web_link_status(
+    request: Request,
+    portal_id: int,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        raise HTTPException(status_code=403, detail="portal_id mismatch")
+    _require_portal_admin(db, portal_id, request)
+    owner_email = None
+    portal = db.get(Portal, portal_id)
+    if portal and portal.metadata_json:
+        try:
+            meta = json.loads(portal.metadata_json) if isinstance(portal.metadata_json, str) else portal.metadata_json
+            owner_email = (meta.get("owner_email") or "").strip().lower() or None
+        except Exception:
+            owner_email = None
+    user = None
+    if owner_email:
+        user = db.execute(select(WebUser).where(WebUser.email == owner_email)).scalar_one_or_none()
+        if user and user.portal_id != portal_id:
+            user = None
+    if not user:
+        user = db.execute(select(WebUser).where(WebUser.portal_id == portal_id)).scalar_one_or_none()
+    if not user:
+        return {"linked": False}
+    demo_until = (user.created_at + timedelta(days=7)).date().isoformat()
+    return {"linked": True, "email": user.email, "demo_until": demo_until}
+
+
+@router.post("/portals/{portal_id}/web/login")
+async def login_web_from_bitrix(
+    request: Request,
+    portal_id: int,
+    body: WebLoginBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        raise HTTPException(status_code=403, detail="portal_id mismatch")
+    _require_portal_admin(db, portal_id, request)
+    email = body.email.lower().strip()
+    user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
+    if not user or not verify_password(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="invalid_credentials")
+    if not user.portal_id:
+        raise HTTPException(status_code=400, detail="missing_portal")
+    if int(user.portal_id) == int(portal_id):
+        demo_until = (user.created_at + timedelta(days=7)).date().isoformat()
+        return {"status": "linked", "email": user.email, "demo_until": demo_until}
+    existing = db.execute(
+        select(PortalLinkRequest).where(
+            PortalLinkRequest.portal_id == portal_id,
+            PortalLinkRequest.web_user_id == user.id,
+            PortalLinkRequest.status == "pending",
+        )
+    ).scalar_one_or_none()
+    if existing:
+        return {"status": "pending", "request_id": existing.id}
+    req = PortalLinkRequest(
+        portal_id=portal_id,
+        web_user_id=user.id,
+        source_portal_id=user.portal_id,
+        status="pending",
+        created_at=datetime.utcnow(),
+    )
+    db.add(req)
+    db.commit()
+    return {"status": "pending", "request_id": req.id}
+
+
+def _telegram_webhook_url(kind: str, portal_id: int, secret: str) -> str | None:
+    s = get_settings()
+    base = (s.public_base_url or "").rstrip("/")
+    if not base:
+        return None
+    return f"{base}/v1/telegram/{kind}/{portal_id}/{secret}"
 
 
 @router.get("/portals/{portal_id}/access/users")
@@ -716,7 +955,14 @@ async def get_portal_access_users(
     rows = db.execute(
         select(PortalUsersAccess).where(PortalUsersAccess.portal_id == portal_id)
     ).scalars().all()
-    return JSONResponse({"user_ids": [r.user_id for r in rows]})
+    items = [{
+        "user_id": r.user_id,
+        "telegram_username": r.telegram_username,
+        "display_name": r.display_name,
+        "kind": r.kind,
+    } for r in rows]
+    user_ids = [r.user_id for r in rows if (r.kind or "bitrix") == "bitrix"]
+    return JSONResponse({"user_ids": user_ids, "items": items})
 
 
 @router.get("/portals/{portal_id}/kb/files")
@@ -744,6 +990,7 @@ async def get_portal_kb_files(
             "filename": f.filename,
             "mime_type": f.mime_type,
             "size_bytes": f.size_bytes,
+            "audience": f.audience or "staff",
             "status": f.status,
             "error_message": f.error_message,
             "created_at": f.created_at.isoformat() if f.created_at else None,
@@ -756,6 +1003,7 @@ async def upload_portal_kb_file(
     portal_id: int,
     request: Request,
     file: UploadFile = File(...),
+    audience: str | None = Form(default=None),
     db: Session = Depends(get_db),
     pid: int = Depends(require_portal_access),
 ):
@@ -769,9 +1017,13 @@ async def upload_portal_kb_file(
     suffix = uuid.uuid4().hex[:8]
     dst_path = os.path.join(portal_dir, f"{suffix}_{safe_name}")
     size, sha256 = save_upload(file.file, dst_path)
+    aud = (audience or "staff").strip().lower()
+    if aud not in ("staff", "client"):
+        aud = "staff"
     rec = KBFile(
         portal_id=portal_id,
         filename=safe_name,
+        audience=aud,
         mime_type=file.content_type,
         size_bytes=size,
         storage_path=dst_path,
@@ -957,6 +1209,7 @@ class PortalKBSettingsBody(BaseModel):
 class PortalKBSourceBody(BaseModel):
     url: str
     title: str | None = None
+    audience: str | None = None
 
 
 @router.post("/portals/{portal_id}/kb/settings")
@@ -996,6 +1249,204 @@ async def set_portal_kb_settings_api(
     return JSONResponse(out)
 
 
+@router.get("/portals/{portal_id}/telegram/staff")
+async def get_portal_telegram_staff_settings(
+    portal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    settings = get_portal_telegram_settings(db, portal_id)
+    secret = get_portal_telegram_secret(db, portal_id, "staff") or ""
+    webhook_url = _telegram_webhook_url("staff", portal_id, secret) if secret else None
+    return JSONResponse({"kind": "staff", **settings.get("staff", {}), "webhook_url": webhook_url})
+
+
+@router.post("/portals/{portal_id}/telegram/staff")
+async def set_portal_telegram_staff_settings(
+    portal_id: int,
+    body: TelegramBotSettingsBody,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    if body.clear_token:
+        body.enabled = False
+    settings = set_portal_telegram_settings(
+        db,
+        portal_id,
+        kind="staff",
+        bot_token=body.bot_token,
+        enabled=body.enabled,
+        clear_token=bool(body.clear_token),
+        allow_uploads=body.allow_uploads,
+    )
+    secret = get_portal_telegram_secret(db, portal_id, "staff") or ""
+    webhook_url = _telegram_webhook_url("staff", portal_id, secret) if secret else None
+    webhook_ok = None
+    webhook_error = None
+    bot_info = None
+    if settings.get("staff", {}).get("enabled") and not webhook_url:
+        webhook_error = "missing_public_base_url"
+    if webhook_url and settings.get("staff", {}).get("has_token") and settings.get("staff", {}).get("enabled"):
+        token_plain = body.bot_token or (get_portal_telegram_token_plain(db, portal_id, "staff") or "")
+        if token_plain:
+            bot_info, _ = telegram_get_me(token_plain)
+            webhook_ok, webhook_error = telegram_set_webhook(token_plain, webhook_url, secret)
+    return JSONResponse({
+        "kind": "staff",
+        **settings.get("staff", {}),
+        "webhook_url": webhook_url,
+        "webhook_ok": webhook_ok,
+        "webhook_error": webhook_error,
+        "bot_username": bot_info.get("username") if bot_info else None,
+        "bot_id": bot_info.get("id") if bot_info else None,
+    })
+
+
+@router.get("/portals/{portal_id}/telegram/client")
+async def get_portal_telegram_client_settings(
+    portal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    settings = get_portal_telegram_settings(db, portal_id)
+    secret = get_portal_telegram_secret(db, portal_id, "client") or ""
+    webhook_url = _telegram_webhook_url("client", portal_id, secret) if secret else None
+    return JSONResponse({"kind": "client", **settings.get("client", {}), "webhook_url": webhook_url})
+
+
+@router.post("/portals/{portal_id}/telegram/client")
+async def set_portal_telegram_client_settings(
+    portal_id: int,
+    body: TelegramBotSettingsBody,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    if body.clear_token:
+        body.enabled = False
+    settings = set_portal_telegram_settings(
+        db,
+        portal_id,
+        kind="client",
+        bot_token=body.bot_token,
+        enabled=body.enabled,
+        clear_token=bool(body.clear_token),
+        allow_uploads=body.allow_uploads,
+    )
+    secret = get_portal_telegram_secret(db, portal_id, "client") or ""
+    webhook_url = _telegram_webhook_url("client", portal_id, secret) if secret else None
+    webhook_ok = None
+    webhook_error = None
+    bot_info = None
+    if settings.get("client", {}).get("enabled") and not webhook_url:
+        webhook_error = "missing_public_base_url"
+    if webhook_url and settings.get("client", {}).get("has_token") and settings.get("client", {}).get("enabled"):
+        token_plain = body.bot_token or (get_portal_telegram_token_plain(db, portal_id, "client") or "")
+        if token_plain:
+            bot_info, _ = telegram_get_me(token_plain)
+            webhook_ok, webhook_error = telegram_set_webhook(token_plain, webhook_url, secret)
+    return JSONResponse({
+        "kind": "client",
+        **settings.get("client", {}),
+        "webhook_url": webhook_url,
+        "webhook_ok": webhook_ok,
+        "webhook_error": webhook_error,
+        "bot_username": bot_info.get("username") if bot_info else None,
+        "bot_id": bot_info.get("id") if bot_info else None,
+    })
+
+
+@router.get("/portals/{portal_id}/botflow/client")
+async def get_portal_botflow_client(
+    portal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    row = db.get(PortalBotFlow, {"portal_id": portal_id, "kind": "client"})
+    return JSONResponse({
+        "draft": row.draft_json if row else None,
+        "published": row.published_json if row else None,
+    })
+
+
+@router.post("/portals/{portal_id}/botflow/client")
+async def set_portal_botflow_client(
+    portal_id: int,
+    body: BotFlowBody,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    row = db.get(PortalBotFlow, {"portal_id": portal_id, "kind": "client"})
+    if not row:
+        row = PortalBotFlow(portal_id=portal_id, kind="client", draft_json=body.draft_json)
+        db.add(row)
+    else:
+        row.draft_json = body.draft_json
+    db.commit()
+    return JSONResponse({"status": "ok"})
+
+
+@router.post("/portals/{portal_id}/botflow/client/publish")
+async def publish_portal_botflow_client(
+    portal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    row = db.get(PortalBotFlow, {"portal_id": portal_id, "kind": "client"})
+    if not row or not row.draft_json:
+        return JSONResponse({"error": "missing_draft"}, status_code=400)
+    row.published_json = row.draft_json
+    db.commit()
+    return JSONResponse({"status": "ok"})
+
+
+@router.post("/portals/{portal_id}/botflow/client/test")
+async def test_portal_botflow_client(
+    portal_id: int,
+    body: BotFlowTestBody,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    row = db.get(PortalBotFlow, {"portal_id": portal_id, "kind": "client"})
+    flow = body.draft_json or (row.draft_json if row else None)
+    if not flow:
+        return JSONResponse({"error": "missing_draft"}, status_code=400)
+    # preview uses dialog_id=0 (no state saved)
+    text, state, trace = execute_client_flow_preview(db, portal_id, 0, body.text, flow, state_override=body.state_json)
+    return JSONResponse({"text": text, "state": state, "trace": trace})
+
+
 @router.get("/portals/{portal_id}/kb/models")
 async def get_portal_kb_models(
     portal_id: int,
@@ -1030,7 +1481,10 @@ async def add_portal_kb_url_source(
     if pid != portal_id:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
     _require_portal_admin(db, portal_id, request)
-    result = create_url_source(db, portal_id, body.url, body.title)
+    aud = (body.audience or "staff").strip().lower()
+    if aud not in ("staff", "client"):
+        aud = "staff"
+    result = create_url_source(db, portal_id, body.url, body.title, audience=aud)
     if not result.get("ok"):
         return JSONResponse({"error": result.get("error")}, status_code=400)
     # enqueue job
@@ -1071,6 +1525,7 @@ async def list_portal_kb_sources(
             "url": s.url,
             "title": s.title,
             "source_type": s.source_type,
+            "audience": s.audience or "staff",
             "status": s.status,
             "created_at": s.created_at.isoformat() if s.created_at else None,
             "updated_at": s.updated_at.isoformat() if s.updated_at else None,
@@ -1333,15 +1788,35 @@ async def put_portal_access_users(
     if pid != portal_id:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
     prev_rows = db.execute(
-        select(PortalUsersAccess.user_id).where(PortalUsersAccess.portal_id == portal_id)
+        select(PortalUsersAccess.user_id).where(
+            PortalUsersAccess.portal_id == portal_id,
+            PortalUsersAccess.kind == "bitrix",
+        )
     ).scalars().all()
     prev_set = set(str(u) for u in prev_rows)
-    user_ids_str = [str(uid) for uid in body.user_ids]
+    items = body.items or []
+    if not items and body.user_ids:
+        items = [AccessUserItem(user_id=int(uid)) for uid in body.user_ids]
+    user_ids_str = [str(it.user_id) for it in items]
     new_set = set(user_ids_str)
 
-    db.execute(delete(PortalUsersAccess).where(PortalUsersAccess.portal_id == portal_id))
-    for uid in user_ids_str:
-        db.add(PortalUsersAccess(portal_id=portal_id, user_id=uid))
+    db.execute(delete(PortalUsersAccess).where(
+        PortalUsersAccess.portal_id == portal_id,
+        PortalUsersAccess.kind == "bitrix",
+    ))
+    seen_tg: set[str] = set()
+    for it in items:
+        uname = normalize_telegram_username(it.telegram_username)
+        if uname:
+            if uname in seen_tg:
+                return JSONResponse({"error": "duplicate_telegram_username", "detail": uname}, status_code=400)
+            seen_tg.add(uname)
+        db.add(PortalUsersAccess(
+            portal_id=portal_id,
+            user_id=str(it.user_id),
+            telegram_username=uname,
+            kind="bitrix",
+        ))
     db.commit()
 
     added = sorted(list(new_set - prev_set))
@@ -1397,6 +1872,57 @@ async def put_portal_access_users(
         "count": len(user_ids_str),
         "welcome": {"status": welcome_status, "error": welcome_error, "added": added},
     })
+
+
+@router.post("/portals/{portal_id}/access/web-users")
+async def add_portal_web_user(
+    portal_id: int,
+    body: WebAccessUserBody,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name_required")
+    uname = normalize_telegram_username(body.telegram_username)
+    rec = PortalUsersAccess(
+        portal_id=portal_id,
+        user_id=f"webu_{uuid.uuid4().hex[:10]}",
+        display_name=name,
+        telegram_username=uname,
+        kind="web",
+    )
+    db.add(rec)
+    db.commit()
+    return JSONResponse({"status": "ok", "id": rec.user_id})
+
+
+@router.delete("/portals/{portal_id}/access/web-users/{user_id}")
+async def delete_portal_web_user(
+    portal_id: int,
+    user_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    rec = db.execute(
+        select(PortalUsersAccess).where(
+            PortalUsersAccess.portal_id == portal_id,
+            PortalUsersAccess.user_id == user_id,
+            PortalUsersAccess.kind == "web",
+        )
+    ).scalar_one_or_none()
+    if rec:
+        db.delete(rec)
+        db.commit()
+    return JSONResponse({"status": "ok"})
 
 
 @router.post("/install")
