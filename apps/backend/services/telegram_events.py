@@ -33,6 +33,15 @@ from apps.backend.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+MSG_MISSING_USERNAME = "Укажите username в Telegram и напишите боту снова."
+MSG_NO_ACCESS = "Нет доступа. Обратитесь к администратору портала."
+MSG_UPLOADS_DISABLED = "Загрузка файлов отключена в настройках."
+MSG_FILE_RECEIVED = "Файл получил, изучаю 🔍"
+MSG_FILE_QUEUED = "Файл получен и отправлен на индексацию."
+MSG_LIMIT_EXCEEDED = "Лимит запросов исчерпан. Обратитесь к администратору портала."
+MSG_KB_EMPTY = "База знаний пока пуста. Обратитесь к администратору портала."
+MSG_SERVICE_DOWN = "Сервис ответа временно недоступен. Попробуйте позже."
+
 
 def _dialog_id(chat_id: int | str) -> str:
     return f"tg:{chat_id}"
@@ -102,7 +111,7 @@ def process_telegram_update(
                 "status": "blocked",
                 "reason": "acl",
                 "detail": "missing_username",
-                "reply": "Укажите username в Telegram и напишите боту снова.",
+                "reply": MSG_MISSING_USERNAME,
                 "chat_id": chat_id,
             }
         access_row = _find_allowed_user(db, portal_id, sender_username)
@@ -124,7 +133,7 @@ def process_telegram_update(
                 "status": "blocked",
                 "reason": "acl",
                 "detail": "no_access",
-                "reply": "Нет доступа. Обратитесь к администратору портала.",
+                "reply": MSG_NO_ACCESS,
                 "chat_id": chat_id,
             }
         sender_user_id = access_row.user_id
@@ -136,7 +145,7 @@ def process_telegram_update(
             return {
                 "status": "blocked",
                 "reason": "uploads_disabled",
-                "reply": "Загрузка файлов отключена в настройках.",
+                "reply": MSG_UPLOADS_DISABLED,
                 "chat_id": chat_id,
             }
         token = get_portal_telegram_token_plain(db, portal_id, kind) or ""
@@ -192,6 +201,19 @@ def process_telegram_update(
         )
         db.add(job)
         db.commit()
+        outbox = Outbox(
+            portal_id=portal_id,
+            message_id=None,
+            status="created",
+            payload_json=json.dumps({
+                "provider": "telegram",
+                "kind": kind,
+                "chat_id": chat_id,
+                "body": MSG_FILE_RECEIVED,
+            }, ensure_ascii=False),
+        )
+        db.add(outbox)
+        db.commit()
         try:
             from redis import Redis
             from rq import Queue
@@ -199,25 +221,14 @@ def process_telegram_update(
             r = Redis(host=s.redis_host, port=s.redis_port)
             q = Queue("default", connection=r)
             q.enqueue("apps.worker.jobs.process_kb_job", job.id, job_timeout=1800)
-            outbox = Outbox(
-                portal_id=portal_id,
-                message_id=None,
-                status="created",
-                payload_json=json.dumps({
-                    "provider": "telegram",
-                    "kind": kind,
-                    "chat_id": chat_id,
-                    "body": "Файл получил, изучаю 🔍",
-                }, ensure_ascii=False),
-            )
-            db.add(outbox)
-            db.commit()
             q.enqueue("apps.worker.jobs.process_outbox", outbox.id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("telegram enqueue failed: %s", e)
+            job.error_message = f"enqueue_failed:{str(e)[:180]}"
+            db.commit()
         return {
             "status": "ok",
-            "reply": "Файл получен и отправлен на индексацию.",
+            "reply": MSG_FILE_QUEUED,
             "chat_id": chat_id,
         }
 
@@ -278,7 +289,7 @@ def process_telegram_update(
                 status="blocked",
                 error_code="limit_exceeded",
             )
-            response_body = "Лимит запросов исчерпан. Обратитесь к администратору портала."
+            response_body = MSG_LIMIT_EXCEEDED
         else:
             if kind == "client":
                 try:
@@ -306,10 +317,10 @@ def process_telegram_update(
             if rag_answer:
                 response_body = rag_answer
             elif rag_err == "kb_empty":
-                response_body = "База знаний пока пуста. Обратитесь к администратору портала."
+                response_body = MSG_KB_EMPTY
             else:
                 logger.warning("kb_rag_error portal_id=%s err=%s", portal_id, rag_err)
-                response_body = "Сервис ответа временно недоступен. Попробуйте позже."
+                response_body = MSG_SERVICE_DOWN
             pricing = get_pricing(db)
             tokens_prompt = None
             tokens_completion = None
@@ -364,7 +375,6 @@ def process_telegram_update(
     try:
         from redis import Redis
         from rq import Queue
-        from apps.backend.config import get_settings
         s = get_settings()
         r = Redis(host=s.redis_host, port=s.redis_port)
         q = Queue("default", connection=r)

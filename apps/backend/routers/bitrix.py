@@ -1204,6 +1204,8 @@ class PortalKBSettingsBody(BaseModel):
     use_history: bool | None = None
     use_cache: bool | None = None
     system_prompt_extra: str | None = None
+    show_sources: bool | None = None
+    sources_format: str | None = None
 
 
 class PortalKBSourceBody(BaseModel):
@@ -1245,6 +1247,8 @@ async def set_portal_kb_settings_api(
         use_history=body.use_history,
         use_cache=body.use_cache,
         system_prompt_extra=body.system_prompt_extra,
+        show_sources=body.show_sources,
+        sources_format=body.sources_format,
     )
     return JSONResponse(out)
 

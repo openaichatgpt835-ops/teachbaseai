@@ -36,7 +36,8 @@ def save_tokens(
     row = db.query(PortalToken).filter(PortalToken.portal_id == portal_id).first()
     if row:
         row.access_token = at_enc
-        row.refresh_token = rt_enc
+        if rt_enc is not None:
+            row.refresh_token = rt_enc
         row.expires_at = expires
     else:
         row = PortalToken(

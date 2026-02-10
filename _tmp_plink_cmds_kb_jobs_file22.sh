@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select id, status, error_message, payload_json, created_at from kb_jobs where payload_json::text like '%\"file_id\": 22%' order by id desc;"

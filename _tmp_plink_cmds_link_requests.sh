@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select id, web_user_id, portal_id, source_portal_id, status, created_at from portal_link_requests where web_user_id=1 order by id desc;"

@@ -265,29 +265,221 @@
           <h2 class="tb-card-title">Настройки</h2>
           <div v-if="!isPortalAdmin" class="tb-empty">Доступно только администратору портала.</div>
           <div v-else>
-            <div class="tb-field">
-              <label>Embedding model</label>
-              <select v-model="kbSettings.embedding_model">
-                <option value="">—</option>
-                <option v-for="m in embedModels" :key="m" :value="m">{{ m }}</option>
-              </select>
+            <div class="tb-settings-block">
+              <div class="tb-settings-title">База знаний</div>
+              <div class="tb-field">
+                <label class="tb-label">
+                  <span>Embedding‑модель</span>
+                  <span class="tb-help">
+                    <span class="tb-help-icon">?</span>
+                    <span class="tb-help-balloon">Модель для поиска по базе знаний. Обычно не требуется менять.</span>
+                  </span>
+                </label>
+                <select v-model="kbSettings.embedding_model">
+                  <option value="">—</option>
+                  <option v-for="m in embedModels" :key="m" :value="m">{{ m }}</option>
+                </select>
+              </div>
+              <div class="tb-field">
+                <label class="tb-label">
+                  <span>Chat‑модель</span>
+                  <span class="tb-help">
+                    <span class="tb-help-icon">?</span>
+                    <span class="tb-help-balloon">Основная модель, которая формирует ответ по найденным фрагментам.</span>
+                  </span>
+                </label>
+                <select v-model="kbSettings.chat_model">
+                  <option value="">—</option>
+                  <option v-for="m in chatModels" :key="m" :value="m">{{ m }}</option>
+                </select>
+              </div>
+              <div class="tb-field">
+                <label class="tb-label">
+                  <span>Пресет ответа</span>
+                  <span class="tb-help">
+                    <span class="tb-help-icon">?</span>
+                    <span class="tb-help-balloon">Выберите стиль ответа: краткий обзор, FAQ или таймлайн.</span>
+                  </span>
+                </label>
+                <select v-model="kbSettings.prompt_preset">
+                  <option value="auto">Авто</option>
+                  <option value="summary">Краткий обзор</option>
+                  <option value="faq">FAQ</option>
+                  <option value="timeline">Таймлайн</option>
+                </select>
+              </div>
             </div>
-            <div class="tb-field">
-              <label>Chat model</label>
-              <select v-model="kbSettings.chat_model">
-                <option value="">—</option>
-                <option v-for="m in chatModels" :key="m" :value="m">{{ m }}</option>
-              </select>
+
+            <div class="tb-settings-block">
+              <div class="tb-settings-title">Ответы бота</div>
+              <div class="tb-field">
+                <label class="tb-label">
+                  <span>Препромпт</span>
+                  <span class="tb-help">
+                    <span class="tb-help-icon">?</span>
+                    <span class="tb-help-balloon">Инструкция, которая добавляется в системное сообщение перед каждым ответом.</span>
+                  </span>
+                </label>
+                <textarea v-model="kbSettings.system_prompt_extra" class="tb-input" rows="3" placeholder="Например: отвечай кратко и по делу."></textarea>
+              </div>
+              <div class="tb-field">
+                <label class="tb-inline">
+                  <input type="checkbox" v-model="kbSettings.show_sources" />
+                  Показывать источники в ответе
+                </label>
+              </div>
+              <div class="tb-field">
+                <label class="tb-label">
+                  <span>Формат источников</span>
+                  <span class="tb-help">
+                    <span class="tb-help-icon">?</span>
+                    <span class="tb-help-balloon">Короткий список — только названия файлов. Подробный — с фрагментами.</span>
+                  </span>
+                </label>
+                <select v-model="kbSettings.sources_format">
+                  <option value="detailed">Подробный (цитаты)</option>
+                  <option value="short">Короткий список</option>
+                  <option value="none">Не показывать</option>
+                </select>
+              </div>
+              <div class="tb-field">
+                <label class="tb-inline">
+                  <input type="checkbox" v-model="kbSettings.use_history" />
+                  Учитывать контекст диалога
+                </label>
+              </div>
+              <div class="tb-settings-grid">
+                <div class="tb-field">
+                  <label class="tb-label">
+                    <span>Глубина контекста (сообщений)</span>
+                    <span class="tb-help">
+                      <span class="tb-help-icon">?</span>
+                      <span class="tb-help-balloon">Сколько последних сообщений учитывать при ответе.</span>
+                    </span>
+                  </label>
+                  <input v-model.number="kbSettings.context_messages" type="number" min="0" class="tb-input" />
+                </div>
+                <div class="tb-field">
+                  <label class="tb-label">
+                    <span>Ограничение контекста (символы)</span>
+                    <span class="tb-help">
+                      <span class="tb-help-icon">?</span>
+                      <span class="tb-help-balloon">Максимальный объём контекста, который отправляется в модель.</span>
+                    </span>
+                  </label>
+                  <input v-model.number="kbSettings.context_chars" type="number" min="0" class="tb-input" />
+                </div>
+              </div>
+              <div class="tb-field">
+                <label class="tb-inline">
+                  <input type="checkbox" v-model="kbSettings.strict_mode" />
+                  Строгий режим (только по базе знаний)
+                </label>
+              </div>
+              <div class="tb-field">
+                <label class="tb-inline">
+                  <input type="checkbox" v-model="kbSettings.allow_general" />
+                  Разрешить общий ответ, если база знаний пуста
+                </label>
+              </div>
+              <div class="tb-field">
+                <label class="tb-inline">
+                  <input type="checkbox" v-model="kbSettings.use_cache" />
+                  Использовать кэш релевантности
+                </label>
+              </div>
+              <div class="tb-info">
+                Бот отвечает только по вашей базе знаний (файлы и URL‑источники).
+              </div>
             </div>
-            <div class="tb-field">
-              <label>Пресет ответа</label>
-              <select v-model="kbSettings.prompt_preset">
-                <option value="auto">Авто</option>
-                <option value="summary">Краткий обзор</option>
-                <option value="faq">FAQ</option>
-                <option value="timeline">Таймлайн</option>
-              </select>
-            </div>
+
+            <details class="tb-accordion">
+              <summary class="tb-accordion-summary">Продвинутые параметры</summary>
+              <div class="tb-settings-grid">
+                <div class="tb-field">
+                  <label class="tb-label">
+                    <span>Температура</span>
+                    <span class="tb-help">
+                      <span class="tb-help-icon">?</span>
+                      <span class="tb-help-balloon">Чем выше, тем более креативные ответы. Обычно 0.2–0.5.</span>
+                    </span>
+                  </label>
+                  <input v-model="kbSettings.temperature" type="number" step="0.05" min="0" max="1.5" class="tb-input" />
+                </div>
+                <div class="tb-field">
+                  <label class="tb-label">
+                    <span>Макс. токенов</span>
+                    <span class="tb-help">
+                      <span class="tb-help-icon">?</span>
+                      <span class="tb-help-balloon">Ограничение длины ответа.</span>
+                    </span>
+                  </label>
+                  <input v-model="kbSettings.max_tokens" type="number" min="0" class="tb-input" />
+                </div>
+                <div class="tb-field">
+                  <label class="tb-label">
+                    <span>Top‑P</span>
+                    <span class="tb-help">
+                      <span class="tb-help-icon">?</span>
+                      <span class="tb-help-balloon">Альтернатива температуре для управления случайностью.</span>
+                    </span>
+                  </label>
+                  <input v-model="kbSettings.top_p" type="number" step="0.05" min="0" max="1" class="tb-input" />
+                </div>
+                <div class="tb-field">
+                  <label class="tb-label">
+                    <span>Presence penalty</span>
+                    <span class="tb-help">
+                      <span class="tb-help-icon">?</span>
+                      <span class="tb-help-balloon">Снижает повторяемость тем в ответах.</span>
+                    </span>
+                  </label>
+                  <input v-model="kbSettings.presence_penalty" type="number" step="0.1" class="tb-input" />
+                </div>
+                <div class="tb-field">
+                  <label class="tb-label">
+                    <span>Frequency penalty</span>
+                    <span class="tb-help">
+                      <span class="tb-help-icon">?</span>
+                      <span class="tb-help-balloon">Снижает повторяемость слов и фраз.</span>
+                    </span>
+                  </label>
+                  <input v-model="kbSettings.frequency_penalty" type="number" step="0.1" class="tb-input" />
+                </div>
+              </div>
+              <div class="tb-settings-grid">
+                <div class="tb-field">
+                  <label class="tb-label">
+                    <span>Top‑K фрагментов</span>
+                    <span class="tb-help">
+                      <span class="tb-help-icon">?</span>
+                      <span class="tb-help-balloon">Сколько фрагментов базы знаний передавать в модель.</span>
+                    </span>
+                  </label>
+                  <input v-model.number="kbSettings.retrieval_top_k" type="number" min="1" class="tb-input" />
+                </div>
+                <div class="tb-field">
+                  <label class="tb-label">
+                    <span>Макс. размер контекста из базы</span>
+                    <span class="tb-help">
+                      <span class="tb-help-icon">?</span>
+                      <span class="tb-help-balloon">Ограничение объёма найденных фрагментов.</span>
+                    </span>
+                  </label>
+                  <input v-model.number="kbSettings.retrieval_max_chars" type="number" min="0" class="tb-input" />
+                </div>
+                <div class="tb-field">
+                  <label class="tb-label">
+                    <span>Усиление лексики</span>
+                    <span class="tb-help">
+                      <span class="tb-help-icon">?</span>
+                      <span class="tb-help-balloon">Усиливает точное совпадение ключевых слов.</span>
+                    </span>
+                  </label>
+                  <input v-model="kbSettings.lex_boost" type="number" step="0.01" min="0" class="tb-input" />
+                </div>
+              </div>
+            </details>
             <div class="tb-actions">
               <button class="tb-btn tb-btn-primary" @click="saveKbSettings">Сохранить</button>
               <span class="tb-muted" v-if="kbSettingsMessage">{{ kbSettingsMessage }}</span>
@@ -657,7 +849,28 @@ type KbFile = { id: number; filename: string; status: string; error_message?: st
 type KbSource = { id: number; url: string; status: string; created_at?: string };
 
 type DialogItem = { body?: string; direction?: 'tx' | 'rx' };
-type KbSettings = { embedding_model: string; chat_model: string; prompt_preset: string };
+  type KbSettings = {
+    embedding_model: string;
+    chat_model: string;
+    prompt_preset: string;
+    system_prompt_extra: string;
+    show_sources: boolean;
+    sources_format: string;
+    allow_general: boolean;
+    strict_mode: boolean;
+    use_history: boolean;
+    use_cache: boolean;
+    context_messages: number;
+    context_chars: number;
+    retrieval_top_k: number;
+    retrieval_max_chars: number;
+    lex_boost: number;
+    temperature: number;
+    max_tokens: number;
+    top_p: number | '';
+    presence_penalty: number | '';
+    frequency_penalty: number | '';
+  };
 type FlowNode = { id: string; type: string; title?: string; config?: any; x?: number; y?: number };
 type FlowEdge = { id: string; from: string; to: string; condition?: any };
 type FlowDraft = {
@@ -721,7 +934,28 @@ const recentDialogs = ref<DialogItem[]>([]);
 type TopicSummary = { topic: string; score?: number | null };
 const topicSummaries = ref<TopicSummary[]>([]);
 const currentTab = ref<'overview' | 'kb' | 'sources' | 'users' | 'analytics' | 'settings' | 'flow'>('overview');
-const kbSettings = ref<KbSettings>({ embedding_model: '', chat_model: '', prompt_preset: 'auto' });
+  const kbSettings = ref<KbSettings>({
+    embedding_model: '',
+    chat_model: '',
+    prompt_preset: 'auto',
+    system_prompt_extra: '',
+    show_sources: true,
+    sources_format: 'detailed',
+    allow_general: false,
+    strict_mode: true,
+    use_history: true,
+    use_cache: true,
+    context_messages: 6,
+    context_chars: 4000,
+    retrieval_top_k: 5,
+    retrieval_max_chars: 4000,
+    lex_boost: 0.12,
+    temperature: 0.2,
+    max_tokens: 700,
+    top_p: '',
+    presence_penalty: '',
+    frequency_penalty: '',
+  });
 const embedModels = ref<string[]>([]);
 const chatModels = ref<string[]>([]);
 const kbSettingsMessage = ref('');
@@ -1197,6 +1431,18 @@ async function webApiJson(path: string, opts: RequestInit = {}) {
     },
   });
   const data = await r.json().catch(() => null);
+  if ((r.status === 401 || r.status === 403) && await refreshWebSession()) {
+    const r2 = await fetch(base + path, {
+      ...opts,
+      headers: {
+        ...(opts.headers || {}),
+        'Authorization': `Bearer ${webSessionToken.value}`,
+        'Accept': 'application/json',
+      },
+    });
+    const data2 = await r2.json().catch(() => null);
+    return { ok: r2.ok, status: r2.status, data: data2 };
+  }
   return { ok: r.ok, status: r.status, data };
 }
 
@@ -1472,19 +1718,36 @@ async function loadKbSources() {
   if (ok && data?.items) kbSources.value = data.items;
 }
 
-async function loadKbSettings() {
-  if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
-  const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/settings`, {
-    headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-  });
-  if (ok && data) {
-    kbSettings.value = {
-      embedding_model: data.embedding_model || 'EmbeddingsGigaR',
-      chat_model: data.chat_model || 'GigaChat-2-Pro',
-      prompt_preset: data.prompt_preset || 'auto'
-    };
+  async function loadKbSettings() {
+    if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
+    const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/settings`, {
+      headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    });
+    if (ok && data) {
+      kbSettings.value = {
+        embedding_model: data.embedding_model || 'EmbeddingsGigaR',
+        chat_model: data.chat_model || 'GigaChat-2-Pro',
+        prompt_preset: data.prompt_preset || 'auto',
+        system_prompt_extra: data.system_prompt_extra || '',
+        show_sources: data.show_sources !== false,
+        sources_format: data.sources_format || 'detailed',
+        allow_general: !!data.allow_general,
+        strict_mode: data.strict_mode !== false,
+        use_history: data.use_history !== false,
+        use_cache: data.use_cache !== false,
+        context_messages: data.context_messages ?? 6,
+        context_chars: data.context_chars ?? 4000,
+        retrieval_top_k: data.retrieval_top_k ?? 5,
+        retrieval_max_chars: data.retrieval_max_chars ?? 4000,
+        lex_boost: data.lex_boost ?? 0.12,
+        temperature: data.temperature ?? 0.2,
+        max_tokens: data.max_tokens ?? 700,
+        top_p: data.top_p ?? '',
+        presence_penalty: data.presence_penalty ?? '',
+        frequency_penalty: data.frequency_penalty ?? '',
+      };
+    }
   }
-}
 
 async function loadKbModels() {
   if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
@@ -1498,16 +1761,42 @@ async function loadKbModels() {
   }
 }
 
-async function saveKbSettings() {
-  if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
-  kbSettingsMessage.value = 'Сохранение...';
-  const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/settings`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-    body: JSON.stringify(kbSettings.value)
-  });
-  kbSettingsMessage.value = ok ? 'Сохранено' : (data?.error || 'Ошибка');
-}
+  function toOptionalNumber(v: any) {
+    if (v === '' || v === null || v === undefined) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function toOptionalInt(v: any) {
+    if (v === '' || v === null || v === undefined) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.trunc(n) : null;
+  }
+
+  async function saveKbSettings() {
+    if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
+    kbSettingsMessage.value = 'Сохранение...';
+    const payload = {
+      ...kbSettings.value,
+      top_p: toOptionalNumber(kbSettings.value.top_p),
+      presence_penalty: toOptionalNumber(kbSettings.value.presence_penalty),
+      frequency_penalty: toOptionalNumber(kbSettings.value.frequency_penalty),
+      temperature: toOptionalNumber(kbSettings.value.temperature),
+      max_tokens: toOptionalInt(kbSettings.value.max_tokens),
+      context_messages: toOptionalInt(kbSettings.value.context_messages),
+      context_chars: toOptionalInt(kbSettings.value.context_chars),
+      retrieval_top_k: toOptionalInt(kbSettings.value.retrieval_top_k),
+      retrieval_max_chars: toOptionalInt(kbSettings.value.retrieval_max_chars),
+      lex_boost: toOptionalNumber(kbSettings.value.lex_boost),
+      show_sources: kbSettings.value.sources_format === 'none' ? false : kbSettings.value.show_sources,
+    };
+    const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify(payload)
+    });
+    kbSettingsMessage.value = ok ? 'Сохранено' : (data?.error || 'Ошибка');
+  }
 
 async function loadTelegramSettings() {
   if (!portalId.value || !portalToken.value) return;
@@ -1748,12 +2037,17 @@ async function init() {
     const webPortalId = Number(localStorage.getItem('tb_web_portal_id') || 0);
     const webPortalToken = localStorage.getItem('tb_web_portal_token') || '';
     webSessionToken.value = localStorage.getItem('tb_web_session_token') || '';
-    if (!webPortalId || !webPortalToken) {
+    if (!webPortalId || !webPortalToken || !webSessionToken.value) {
       statusMessage.value = 'Нет данных веб-сессии. Войдите в веб-кабинет.';
       return;
     }
     portalId.value = webPortalId;
     portalToken.value = webPortalToken;
+    const refreshed = await refreshWebSession();
+    if (!refreshed) {
+      statusMessage.value = 'Сессия истекла. Войдите в веб-кабинет заново.';
+      return;
+    }
     isPortalAdmin.value = true;
     sessionReady.value = true;
     statusMessage.value = 'Сессия активна.';

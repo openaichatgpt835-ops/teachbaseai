@@ -86,6 +86,23 @@ def _format_citations(chunks: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _format_citations_short(chunks: list[dict[str, Any]]) -> str:
+    if not chunks:
+        return ""
+    seen = set()
+    names: list[str] = []
+    for ch in chunks:
+        fname = (ch.get("filename") or "Файл").strip()
+        if not fname:
+            continue
+        key = fname.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(fname)
+    return ", ".join(names)
+
+
 def _trigger_mode(text: str) -> str | None:
     t = (text or "").strip().lower()
     if not t:
@@ -260,6 +277,8 @@ def answer_from_kb(
     use_history = bool(settings.get("use_history")) if settings.get("use_history") is not None else True
     use_cache = bool(settings.get("use_cache")) if settings.get("use_cache") is not None else True
     system_prompt_extra = (settings.get("system_prompt_extra") or "").strip()
+    show_sources = bool(settings.get("show_sources")) if settings.get("show_sources") is not None else True
+    sources_format = (settings.get("sources_format") or "detailed").strip().lower()
     if system_prompt_extra_override:
         system_prompt_extra = (system_prompt_extra + " " + system_prompt_extra_override).strip() if system_prompt_extra else system_prompt_extra_override.strip()
     overrides = model_overrides or {}
@@ -480,9 +499,15 @@ def answer_from_kb(
         return None, err or "empty_answer", usage
     out = _strip_markdown_basic(answer.strip())
     out = re.sub(r"\[\d+\]", "", out).strip()
-    citations = _format_citations(used_chunks)
-    if citations:
-        out = out + "\n\nИсточники:\n" + citations
+    if show_sources and sources_format not in ("none", "off", "false"):
+        if sources_format == "short":
+            short_list = _format_citations_short(used_chunks)
+            if short_list:
+                out = out + "\n\nИсточники: " + short_list
+        else:
+            citations = _format_citations(used_chunks)
+            if citations:
+                out = out + "\n\nИсточники:\n" + citations
     if dialog_id and use_cache:
         used_ids = [int(c.get("chunk_id")) for c in used_chunks if c.get("chunk_id")]
         _save_rag_cache(db, dialog_id, portal_id, embed_model, used_ids, keywords)

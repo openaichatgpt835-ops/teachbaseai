@@ -99,6 +99,8 @@ def get_bot_settings(db: Session) -> dict[str, Any]:
         "use_history": bool(data.get("use_history")) if data.get("use_history") is not None else True,
         "use_cache": bool(data.get("use_cache")) if data.get("use_cache") is not None else True,
         "system_prompt_extra": (data.get("system_prompt_extra") or ""),
+        "show_sources": bool(data.get("show_sources")) if data.get("show_sources") is not None else True,
+        "sources_format": (data.get("sources_format") or "detailed"),
     }
 
 
@@ -163,6 +165,8 @@ def get_portal_kb_settings(db: Session, portal_id: int) -> dict[str, Any]:
             "chat_model": DEFAULT_CHAT_MODEL,
             "api_base": "",
             "prompt_preset": "auto",
+            "show_sources": True,
+            "sources_format": "detailed",
             **get_portal_bot_settings(db, portal_id),
         }
     return {
@@ -170,6 +174,8 @@ def get_portal_kb_settings(db: Session, portal_id: int) -> dict[str, Any]:
         "chat_model": row.chat_model or DEFAULT_CHAT_MODEL,
         "api_base": row.api_base or "",
         "prompt_preset": row.prompt_preset or "auto",
+        "show_sources": row.show_sources if row.show_sources is not None else True,
+        "sources_format": row.sources_format or "detailed",
         **get_portal_bot_settings(db, portal_id),
     }
 
@@ -197,6 +203,8 @@ def set_portal_kb_settings(
     use_history: bool | None = None,
     use_cache: bool | None = None,
     system_prompt_extra: str | None = None,
+    show_sources: bool | None = None,
+    sources_format: str | None = None,
 ) -> dict[str, Any]:
     row = db.get(PortalKBSetting, portal_id)
     if not row:
@@ -240,6 +248,10 @@ def set_portal_kb_settings(
         row.use_cache = use_cache
     if system_prompt_extra is not None:
         row.system_prompt_extra = (system_prompt_extra or "").strip() or None
+    if show_sources is not None:
+        row.show_sources = bool(show_sources)
+    if sources_format is not None:
+        row.sources_format = (sources_format or "").strip() or None
     from datetime import datetime
     row.updated_at = datetime.utcnow()
     db.commit()
@@ -283,6 +295,8 @@ def get_effective_gigachat_settings(db: Session, portal_id: int) -> dict[str, An
         "use_history",
         "use_cache",
         "system_prompt_extra",
+        "show_sources",
+        "sources_format",
     ):
         if p.get(k) is not None:
             base[k] = p.get(k)

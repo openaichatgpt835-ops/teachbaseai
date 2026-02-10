@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select portal_id, access_token is not null as has_token, refresh_token is not null as has_refresh, expires_at, updated_at from portal_tokens where portal_id in (2,14) order by portal_id;"

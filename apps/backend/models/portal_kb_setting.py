@@ -29,4 +29,6 @@ class PortalKBSetting(Base):
     use_history = Column(Boolean, nullable=True)
     use_cache = Column(Boolean, nullable=True)
     system_prompt_extra = Column(Text, nullable=True)
+    show_sources = Column(Boolean, nullable=True)
+    sources_format = Column(String(16), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
