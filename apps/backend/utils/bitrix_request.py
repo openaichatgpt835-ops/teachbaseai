@@ -1,6 +1,7 @@
 """Безопасный парсер входящих Bitrix запросов: query + form + json."""
 import json
 import logging
+from urllib.parse import parse_qs
 from typing import Any
 
 from starlette.requests import Request
@@ -52,31 +53,48 @@ async def parse_bitrix_body(request: Request) -> dict[str, Any]:
     # 1. Query params
     merged.update(dict(request.query_params))
 
-    # 2. Form (application/x-www-form-urlencoded, multipart)
+    # 2. Body parse (handles missing/incorrect content-type)
     ct = (request.headers.get("content-type") or "").lower()
-    if "application/x-www-form-urlencoded" in ct or "multipart/form-data" in ct:
-        try:
-            form = await request.form()
-            for k, v in form.items():
-                val: Any = v
-                if isinstance(v, str) and v.strip().startswith(("{", "[")):
-                    try:
-                        val = json.loads(v)
-                    except json.JSONDecodeError:
-                        val = v
-                _assign_bracketed(merged, k, val)
-        except Exception as e:
-            logger.warning("bitrix parse form error: %s", e)
+    is_json = "application/json" in ct
+    body = b""
+    try:
+        body = await request.body()
+    except Exception as e:
+        logger.warning("bitrix read body error: %s", e)
+        body = b""
 
-    # 3. JSON (только если content-type application/json)
-    elif "application/json" in ct:
+    if body:
+        body_str = ""
         try:
-            body = await request.body()
-            if body:
-                merged.update(json.loads(body))
-        except json.JSONDecodeError as e:
-            logger.warning("bitrix parse json error: %s", e)
-        except Exception as e:
-            logger.warning("bitrix parse body error: %s", e)
+            body_str = body.decode("utf-8", errors="ignore")
+        except Exception:
+            body_str = ""
+
+        # Try JSON first if content-type says JSON or body looks like JSON
+        if is_json or body_str.lstrip().startswith(("{", "[")):
+            try:
+                merged.update(json.loads(body_str))
+            except json.JSONDecodeError as e:
+                logger.warning("bitrix parse json error: %s", e)
+            except Exception as e:
+                logger.warning("bitrix parse body error: %s", e)
+        else:
+            # Fallback: parse as urlencoded (even if content-type missing)
+            try:
+                qs = parse_qs(body_str, keep_blank_values=True)
+                for k, vals in qs.items():
+                    if not vals:
+                        _assign_bracketed(merged, k, "")
+                        continue
+                    for v in vals:
+                        val: Any = v
+                        if isinstance(v, str) and v.strip().startswith(("{", "[")):
+                            try:
+                                val = json.loads(v)
+                            except json.JSONDecodeError:
+                                val = v
+                        _assign_bracketed(merged, k, val)
+            except Exception as e:
+                logger.warning("bitrix parse urlencoded error: %s", e)
 
     return merged

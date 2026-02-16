@@ -28,3 +28,17 @@ class WebSession(Base):
     expires_at = Column(DateTime, nullable=True)
 
     user = relationship("WebUser")
+
+
+class WebEmailToken(Base):
+    __tablename__ = "web_email_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("web_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token = Column(String(128), unique=True, nullable=False, index=True)
+    kind = Column(String(32), nullable=False, default="confirm")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=True)
+    used_at = Column(DateTime, nullable=True)
+
+    user = relationship("WebUser")

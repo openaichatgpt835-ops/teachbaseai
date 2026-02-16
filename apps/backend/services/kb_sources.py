@@ -149,6 +149,9 @@ def process_url_source(db: Session, source_id: int) -> dict:
                 storage_path=file_path,
                 sha256=None,
                 status="uploaded",
+                uploaded_by_type="system",
+                uploaded_by_id="source",
+                uploaded_by_name=src.source_type or "source",
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
             )
@@ -170,6 +173,9 @@ def process_url_source(db: Session, source_id: int) -> dict:
                 storage_path=file_path,
                 sha256=None,
                 status="uploaded",
+                uploaded_by_type="system",
+                uploaded_by_id="source",
+                uploaded_by_name=src.source_type or "source",
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
             )

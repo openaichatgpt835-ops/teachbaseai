@@ -370,7 +370,7 @@ def kb_upload_file(
     portal_id: int = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    _: dict = Depends(get_current_admin),
+    admin: dict = Depends(get_current_admin),
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Файл не задан")
@@ -387,6 +387,9 @@ def kb_upload_file(
         storage_path=dst_path,
         sha256=sha256,
         status="uploaded",
+        uploaded_by_type="admin",
+        uploaded_by_id=str(admin.get("sub") or ""),
+        uploaded_by_name=str(admin.get("sub") or "admin"),
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )

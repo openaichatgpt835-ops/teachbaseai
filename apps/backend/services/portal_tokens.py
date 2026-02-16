@@ -20,6 +20,11 @@ class BitrixAuthError(Exception):
         self.code = code
         self.detail = detail or code
 
+    def __str__(self) -> str:
+        if self.detail and self.detail != self.code:
+            return f"{self.code}: {self.detail}"
+        return self.code
+
 
 def save_tokens(
     db: Session,
@@ -113,8 +118,10 @@ def get_client_credentials(db: Session, portal_id: int) -> tuple[str, str, str]:
     if install_type == "local":
         raise BitrixAuthError("missing_client_credentials", "Client credentials missing")
     s = get_settings()
-    if s.bitrix_client_id and s.bitrix_client_secret:
-        return s.bitrix_client_id, s.bitrix_client_secret, "env"
+    bitrix_client_id = getattr(s, "bitrix_client_id", None)
+    bitrix_client_secret = getattr(s, "bitrix_client_secret", None)
+    if bitrix_client_id and bitrix_client_secret:
+        return bitrix_client_id, bitrix_client_secret, "env"
     raise BitrixAuthError("missing_client_credentials", "Client credentials missing")
 
 

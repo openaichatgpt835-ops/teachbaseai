@@ -421,6 +421,16 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
     base_batch = 6
     # retry with backoff on 429 (rate limit)
     retry_delays = [2, 4, 8]
+
+    def _unpack_embeddings(result):
+        if isinstance(result, tuple):
+            if len(result) == 3:
+                return result
+            if len(result) == 2:
+                embeds, err = result
+                return embeds, err, None
+        return None, "invalid_embeddings_response", None
+
     for i in range(0, len(chunk_rows), base_batch):
         batch = chunk_rows[i:i + base_batch]
         texts = [c.text for c in batch]
@@ -434,11 +444,11 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
                 time.sleep(delay)
             size = batch_sizes[min(attempt, len(batch_sizes) - 1)]
             subset = texts[:size]
-            embeds, err, usage = create_embeddings(api_base, token, model, subset)
+            embeds, err, usage = _unpack_embeddings(create_embeddings(api_base, token, model, subset))
             if err and "401" in err:
                 token, err2 = get_valid_gigachat_access_token(db, force_refresh=True)
                 if token and not err2:
-                    embeds, err, usage = create_embeddings(api_base, token, model, subset)
+                    embeds, err, usage = _unpack_embeddings(create_embeddings(api_base, token, model, subset))
             if err and "429" in err:
                 continue
             if err:
@@ -451,11 +461,11 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
                     # process remaining texts in the batch
                     rest = texts[size:]
                     for j in range(0, len(rest), 1):
-                        embeds2, err2, _usage2 = create_embeddings(api_base, token, model, [rest[j]])
+                        embeds2, err2, _usage2 = _unpack_embeddings(create_embeddings(api_base, token, model, [rest[j]]))
                         if err2 and "401" in err2:
                             token, err3 = get_valid_gigachat_access_token(db, force_refresh=True)
                             if token and not err3:
-                                embeds2, err2, _usage2 = create_embeddings(api_base, token, model, [rest[j]])
+                                embeds2, err2, _usage2 = _unpack_embeddings(create_embeddings(api_base, token, model, [rest[j]]))
                         if err2 and "429" in err2:
                             err = "rate_limited"
                             break

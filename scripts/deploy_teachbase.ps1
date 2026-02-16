@@ -20,11 +20,13 @@ $ArchiveName = "teachbaseai-deploy.tar.gz"
 $ArchivePath = Join-Path $env:TEMP $ArchiveName
 if (Test-Path $ArchivePath) { Remove-Item $ArchivePath -Force }
 
-Write-Host "Создание архива..." -ForegroundColor Cyan
+Write-Host "Creating archive..." -ForegroundColor Cyan
+& python "scripts/check_text_integrity.py"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $tarArgs = @("-czf", $ArchivePath) + $files
 & tar $tarArgs
 
-Write-Host "Загрузка на сервер..." -ForegroundColor Cyan
+Write-Host "Uploading to server..." -ForegroundColor Cyan
 plink -batch -load $Session "mkdir -p $RemoteDir"
 pscp -batch -load $Session $ArchivePath "${RemoteUser}@${RemoteHost}:${RemoteDir}/"
 

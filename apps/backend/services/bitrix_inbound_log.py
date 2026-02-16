@@ -131,7 +131,12 @@ def _parse_body_by_content_type(content_type: str | None, body_bytes: bytes) -> 
             parsed = json.loads(body_bytes.decode("utf-8", errors="replace"))
             return parsed if isinstance(parsed, dict) else None
         except Exception:
-            return None
+            try:
+                import ast
+                parsed = ast.literal_eval(body_bytes.decode("utf-8", errors="replace"))
+                return parsed if isinstance(parsed, dict) else None
+            except Exception:
+                return None
     if "application/x-www-form-urlencoded" in ct or "multipart/form-data" in ct or not ct:
         try:
             text = body_bytes.decode("utf-8", errors="replace")

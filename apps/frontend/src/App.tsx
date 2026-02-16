@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+﻿import { Routes, Route, Navigate } from "react-router-dom";
 import { AdminLayout } from "./layouts/AdminLayout";
 import { LoginPage } from "./pages/admin/LoginPage";
 import { PortalsPage } from "./pages/admin/PortalsPage";
@@ -16,7 +16,18 @@ import { RegistrationsPage } from "./pages/admin/RegistrationsPage";
 import { B24AppPage } from "./pages/b24/B24AppPage";
 import { RegisterPage } from "./pages/web/RegisterPage";
 import { WebLoginPage } from "./pages/web/WebLoginPage";
-import { WebAppPage } from "./pages/web/WebAppPage";
+import { WebLayout } from "./pages/web/WebLayout";
+import { WebOverviewPage } from "./pages/web/WebOverviewPage";
+import { WebStubPage } from "./pages/web/WebStubPage";
+import { WebKbPage } from "./pages/web/WebKbPage";
+import { WebSourcesPage } from "./pages/web/WebSourcesPage";
+import { WebUsersPage } from "./pages/web/WebUsersPage";
+import { WebSettingsPage } from "./pages/web/WebSettingsPage";
+import { WebIntegrationsPage } from "./pages/web/WebIntegrationsPage";
+import { WebFlowPage } from "./pages/web/WebFlowPage";
+import { ConfirmEmailPage } from "./pages/web/ConfirmEmailPage";
+import { WebAiRopPage } from "./pages/web/WebAiRopPage";
+import { WebAiRopAccessPage } from "./pages/web/WebAiRopAccessPage";
 
 export default function App() {
   return (
@@ -24,7 +35,22 @@ export default function App() {
       <Route path="/" element={<Navigate to="/register" replace />} />
       <Route path="/register" element={<RegisterPage />} />
       <Route path="/login" element={<WebLoginPage />} />
-      <Route path="/app" element={<WebAppPage />} />
+      <Route path="/confirm" element={<ConfirmEmailPage />} />
+      <Route path="/app" element={<WebLayout />}>
+        <Route index element={<Navigate to="/app/overview" replace />} />
+        <Route path="overview" element={<WebOverviewPage />} />
+        <Route path="kb" element={<WebKbPage />} />
+        <Route path="sources" element={<WebSourcesPage />} />
+        <Route path="users" element={<WebUsersPage />} />
+        <Route path="analytics" element={<WebStubPage title="Аналитика" />} />
+        <Route path="settings" element={<WebSettingsPage />} />
+        <Route path="settings/integrations" element={<WebIntegrationsPage />} />
+        <Route path="ai-rop" element={<WebAiRopPage />} />
+        <Route path="ai-rop/access" element={<WebAiRopAccessPage />} />
+        <Route path="ai-rop/trainer" element={<WebStubPage title="AI Тренер" />} />
+        <Route path="ai-rop/analyst" element={<WebStubPage title="AI Аналитик" />} />
+        <Route path="flow" element={<WebFlowPage />} />
+      </Route>
       <Route path="/admin/login" element={<LoginPage />} />
       <Route path="/admin" element={<AdminLayout />}>
         <Route path="portals" element={<PortalsPage />} />

@@ -33,6 +33,12 @@ from apps.backend.services.telegram_settings import (
 )
 from apps.backend.clients.telegram import telegram_get_me, telegram_set_webhook
 from apps.backend.config import get_settings
+from apps.backend.services.web_email import (
+    create_email_token,
+    send_registration_email,
+    send_registration_confirmed_email,
+    get_valid_confirm_token,
+)
 
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
@@ -53,6 +59,11 @@ class TokenResponse(BaseModel):
     session_token: str
     portal_id: int
     portal_token: str
+    email: str
+
+
+class RegisterResponse(BaseModel):
+    status: str
     email: str
 
 
@@ -102,7 +113,7 @@ def _get_current_web_user(
     return user
 
 
-@router.post("/auth/register", response_model=TokenResponse)
+@router.post("/auth/register", response_model=RegisterResponse)
 def register(body: RegisterBody, db: Session = Depends(get_db)):
     email = body.email.lower().strip()
     if len(body.password) < 6:
@@ -124,15 +135,11 @@ def register(body: RegisterBody, db: Session = Depends(get_db)):
     portal.admin_user_id = user.id
     db.add(portal)
     db.commit()
-    session_token = _create_session(db, user)
-    portal_token = create_portal_token_with_user(portal.id, user.id, expires_minutes=60)
-    log_activity(db, kind="web", portal_id=portal.id, web_user_id=user.id)
-    return TokenResponse(
-        session_token=session_token,
-        portal_id=portal.id,
-        portal_token=portal_token,
-        email=user.email,
-    )
+    token = create_email_token(db, user.id)
+    ok, err = send_registration_email(db, user, token)
+    if not ok:
+        raise HTTPException(status_code=500, detail=err or "email_send_failed")
+    return RegisterResponse(status="confirm_required", email=user.email)
 
 
 @router.post("/auth/login", response_model=TokenResponse)
@@ -141,6 +148,8 @@ def login(body: LoginBody, db: Session = Depends(get_db)):
     user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid_credentials")
+    if not user.email_verified_at:
+        raise HTTPException(status_code=403, detail="email_not_verified")
     if not user.portal_id:
         raise HTTPException(status_code=400, detail="missing_portal")
     session_token = _create_session(db, user)
@@ -152,6 +161,46 @@ def login(body: LoginBody, db: Session = Depends(get_db)):
         portal_token=portal_token,
         email=user.email,
     )
+
+
+class ConfirmEmailBody(BaseModel):
+    email: EmailStr
+
+
+@router.get("/auth/confirm")
+def confirm_email(token: str, db: Session = Depends(get_db)):
+    if not token:
+        raise HTTPException(status_code=400, detail="missing_token")
+    rec = get_valid_confirm_token(db, token)
+    if not rec:
+        raise HTTPException(status_code=400, detail="invalid_or_expired_token")
+    user = db.get(WebUser, rec.user_id)
+    if not user:
+        raise HTTPException(status_code=400, detail="user_not_found")
+    if not user.email_verified_at:
+        user.email_verified_at = datetime.utcnow()
+        user.updated_at = datetime.utcnow()
+    rec.used_at = datetime.utcnow()
+    db.add(user)
+    db.add(rec)
+    db.commit()
+    send_registration_confirmed_email(db, user)
+    return {"status": "ok", "email": user.email}
+
+
+@router.post("/auth/resend-confirm")
+def resend_confirm(body: ConfirmEmailBody, db: Session = Depends(get_db)):
+    email = body.email.lower().strip()
+    user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="user_not_found")
+    if user.email_verified_at:
+        return {"status": "already_verified"}
+    token = create_email_token(db, user.id)
+    ok, err = send_registration_email(db, user, token)
+    if not ok:
+        raise HTTPException(status_code=500, detail=err or "email_send_failed")
+    return {"status": "ok"}
 
 
 @router.get("/auth/me", response_model=TokenResponse)

@@ -6,7 +6,7 @@ import re
 import json
 from typing import Iterable, Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from apps.backend.models.kb import KBChunk, KBEmbedding, KBFile
@@ -342,12 +342,13 @@ def answer_from_kb(
         select(
             KBEmbedding.vector_json,
             KBChunk.text,
-        KBChunk.chunk_index,
-        KBChunk.start_ms,
-        KBChunk.end_ms,
-        KBChunk.page_num,
-        KBFile.filename,
-        KBChunk.id,
+            KBChunk.chunk_index,
+            KBChunk.start_ms,
+            KBChunk.end_ms,
+            KBChunk.page_num,
+            KBFile.filename,
+            KBChunk.id,
+            KBFile.id,
         )
         .join(KBChunk, KBChunk.id == KBEmbedding.chunk_id)
         .join(KBFile, KBFile.id == KBChunk.file_id)
@@ -371,7 +372,7 @@ def answer_from_kb(
 
     keywords = _extract_keywords(query)
     scored: list[tuple[float, bool, dict[str, Any]]] = []
-    for vec, text, chunk_index, start_ms, end_ms, page_num, filename, chunk_id in rows:
+    for vec, text, chunk_index, start_ms, end_ms, page_num, filename, chunk_id, file_id in rows:
         if not isinstance(vec, list):
             continue
         txt = (text or "")
@@ -391,6 +392,7 @@ def answer_from_kb(
                 "page_num": page_num,
                 "filename": filename or "",
                 "chunk_id": chunk_id,
+                "file_id": file_id,
             }
         ))
     if not scored:
@@ -511,4 +513,12 @@ def answer_from_kb(
     if dialog_id and use_cache:
         used_ids = [int(c.get("chunk_id")) for c in used_chunks if c.get("chunk_id")]
         _save_rag_cache(db, dialog_id, portal_id, embed_model, used_ids, keywords)
+    file_ids = {int(c.get("file_id")) for c in used_chunks if c.get("file_id")}
+    if file_ids:
+        db.execute(
+            update(KBFile)
+            .where(KBFile.id.in_(file_ids))
+            .values(query_count=KBFile.query_count + 1)
+        )
+        db.commit()
     return out, None, usage

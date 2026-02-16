@@ -1,18 +1,18 @@
 ﻿import { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
-import { setWebUser, setWebSession } from "./auth";
+import { Link } from "react-router-dom";
 
 export function RegisterPage() {
-  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [company, setCompany] = useState("");
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setSuccess("");
     if (!email || !password) {
       setError("Укажите email и пароль.");
       return;
@@ -36,13 +36,7 @@ export function RegisterPage() {
         setError(data?.detail || "Ошибка регистрации.");
         return;
       }
-      setWebUser({
-        email,
-        company,
-        createdAt: new Date().toISOString(),
-      });
-      setWebSession(data.session_token, data.portal_id, data.portal_token);
-      navigate("/app");
+      setSuccess("Письмо отправлено. Подтвердите email, чтобы войти в кабинет.");
     } catch {
       setError("Сервис временно недоступен.");
     }
@@ -81,7 +75,7 @@ export function RegisterPage() {
 
         <div className="bg-white rounded-3xl shadow-lg border border-slate-100 p-8">
           <h2 className="text-xl font-semibold text-slate-900">Регистрация</h2>
-          <p className="text-xs text-slate-500 mt-1">Пока без подтверждения email. Это временно.</p>
+          <p className="text-xs text-slate-500 mt-1">Подтвердите email для доступа в кабинет.</p>
           <form className="mt-6 space-y-4" onSubmit={onSubmit}>
             <div>
               <label className="text-xs text-slate-600">Email</label>
@@ -127,6 +121,9 @@ export function RegisterPage() {
             </div>
             {error && (
               <div className="rounded-xl bg-rose-50 text-rose-700 text-xs px-3 py-2">{error}</div>
+            )}
+            {success && (
+              <div className="rounded-xl bg-emerald-50 text-emerald-700 text-xs px-3 py-2">{success}</div>
             )}
             <button className="w-full rounded-xl bg-sky-600 text-white py-2 text-sm font-semibold hover:bg-sky-700">
               Создать аккаунт

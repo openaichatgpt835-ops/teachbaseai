@@ -1,4 +1,5 @@
-"""Подключение к БД."""
+"""Database connection helpers."""
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
@@ -9,6 +10,8 @@ from apps.backend.config import get_settings
 
 
 def get_database_url() -> str:
+    if os.environ.get("TESTING") == "1" or os.environ.get("PYTEST_CURRENT_TEST"):
+        return "sqlite:///:memory:"
     s = get_settings()
     return (
         f"postgresql://{s.postgres_user}:{s.postgres_password}@"
@@ -18,6 +21,14 @@ def get_database_url() -> str:
 
 def get_engine():
     url = get_database_url()
+    if url.startswith("sqlite:///:memory:"):
+        eng = create_engine(
+            url,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(eng)
+        return eng
     return create_engine(url, pool_pre_ping=True)
 
 

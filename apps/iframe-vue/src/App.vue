@@ -39,6 +39,9 @@
           </span>
           Настройки
         </button>
+        <button class="tb-nav-sub" :class="{ 'is-active': currentTab === 'integrations' }" @click="selectTab('integrations')">
+          Интеграции
+        </button>
         <button
           v-if="isWebMode"
           class="tb-nav-item"
@@ -60,8 +63,15 @@
           <p class="tb-sub">Управление доступом и базой знаний портала.</p>
         </div>
         <div class="tb-top-actions">
-          <div class="tb-plan" v-if="webLinked && demoUntil">{{ demoUntilLabel }}</div>
+          <div class="tb-plan" v-if="webLinked && demoUntil && !isWebMode">{{ demoUntilLabel }}</div>
+          <div class="tb-plan" v-if="isWebMode && demoUntil">{{ demoLeftLabel }}</div>
           <button v-if="webLinked" class="tb-btn" @click="openWebCabinet">Перейти в кабинет</button>
+          <button v-if="isWebMode" class="tb-btn tb-btn-ghost" @click="openNewWebUi">Новый дизайн</button>
+          <div v-if="isWebMode" class="tb-user-pill">
+            <span class="tb-user-dot"></span>
+            {{ webUserLabel }}
+          </div>
+          <button v-if="isWebMode" class="tb-btn tb-btn-ghost" @click="logoutWeb">Выйти</button>
           <div class="tb-status" v-if="!sessionReady">{{ statusMessage }}</div>
         </div>
       </header>
@@ -190,38 +200,286 @@
         </div>
       </section>
 
-      <section v-if="currentTab === 'kb' && isPortalAdmin" class="tb-grid" key="kb">
-        <div class="tb-card">
-          <h2 class="tb-card-title">Загрузка файлов</h2>
-          <div class="tb-field">
-            <label>Файлы</label>
-            <input ref="fileInput" type="file" multiple class="tb-input tb-file-input" />
+      <section v-if="currentTab === 'kb' && isPortalAdmin" class="tb-kb-shell" key="kb">
+        <aside class="tb-kb-sidebar">
+          <div class="tb-kb-side-title">Структура</div>
+          <input ref="fileInput" type="file" multiple class="tb-file-hidden" @change="onFilePickerChange" />
+          <div
+            class="tb-dropzone tb-dropzone-mini"
+            @click="openFilePicker"
+            @dragover="onDragOverFiles"
+            @drop="onDropFiles"
+          >
+            <div class="tb-dropzone-icon">+</div>
+            <div class="tb-dropzone-title">Добавить файлы</div>
+            <div class="tb-dropzone-sub">Перетащите сюда или нажмите</div>
           </div>
-          <div class="tb-actions">
-            <button class="tb-btn tb-btn-primary" @click="uploadFiles">Загрузить</button>
-            <button class="tb-btn" @click="reindex">Переиндексировать</button>
-            <span class="tb-muted" v-if="kbUploadMessage">{{ kbUploadMessage }}</span>
+          <div
+            class="tb-kb-side-item"
+            :class="{ 'is-active': kbFilter.kind === 'all', 'is-drop': dragOverCollectionId === 0 }"
+            @click="selectKbFilter('all')"
+            @dragenter.prevent="onDragEnterCollection(0)"
+            @dragleave.prevent="onDragLeaveCollection(0)"
+            @dragover.prevent
+            @drop="onDropToCollection(0, $event)"
+          >
+            Все файлы
           </div>
-        </div>
+          <div class="tb-kb-side-group">
+            <div class="tb-kb-side-group-title">Папки</div>
+            <div
+              v-for="c in kbCollections"
+              :key="c.id"
+              class="tb-kb-side-item"
+              :class="{
+                'is-active': kbFilter.kind === 'collection' && kbFilter.id === c.id,
+                'is-drop': dragOverCollectionId === c.id,
+              }"
+              @click="selectKbFilter('collection', c.id)"
+              @dragenter.prevent="onDragEnterCollection(c.id)"
+              @dragleave.prevent="onDragLeaveCollection(c.id)"
+              @dragover.prevent
+              @drop="onDropToCollection(c.id, $event)"
+            >
+              <span class="tb-kb-side-dot" v-if="c.color" :style="{ backgroundColor: c.color }"></span>
+              <span class="tb-kb-side-name">{{ c.name }}</span>
+              <span class="tb-kb-side-count">{{ c.file_count || (kbCollectionFiles[c.id]?.length || 0) }}</span>
+            </div>
+            <div class="tb-kb-side-new">
+              <input v-model="newCollectionName" class="tb-input" placeholder="Новая папка" />
+              <input v-model="newCollectionColor" class="tb-input tb-input-sm" placeholder="#3A7BFA" />
+              <button class="tb-btn" @click="createCollection">Создать</button>
+              <div class="tb-muted">Подпапки пока не поддерживаются.</div>
+            </div>
+          </div>
+          <div class="tb-kb-side-group">
+            <div class="tb-kb-side-group-title">
+              Умные папки
+              <button class="tb-link" @click="smartFoldersOpen = !smartFoldersOpen">{{ smartFoldersOpen ? 'Свернуть' : 'Показать' }}</button>
+            </div>
+            <div v-show="smartFoldersOpen">
+              <button
+                v-for="s in kbSmartFolders"
+                :key="s.id"
+                class="tb-kb-side-item"
+                :class="{ 'is-active': kbFilter.kind === 'smart' && kbFilter.id === s.id }"
+                @click="selectKbFilter('smart', s.id)"
+              >
+                {{ s.name }}
+              </button>
+              <div v-if="kbTopicSuggestions.length" class="tb-kb-side-suggest">
+                <div class="tb-muted">Рекомендации</div>
+                <button
+                  v-for="s in kbTopicSuggestions"
+                  :key="s.id"
+                  class="tb-kb-side-suggest-btn"
+                  @click="createSmartFolderFromTopic(s.id, s.name)"
+                >
+                  + «{{ s.name }}»
+                </button>
+              </div>
+            </div>
+          </div>
+        </aside>
 
-        <div class="tb-card">
-          <h2 class="tb-card-title">Файлы</h2>
-          <div class="tb-empty" v-if="kbFiles.length === 0">Файлов пока нет.</div>
-          <div class="tb-list" v-else>
-            <div v-for="f in kbFiles" :key="f.id" class="tb-row">
-              <div class="tb-row-body">
-                <div class="tb-row-text">{{ f.filename }}</div>
-                <div class="tb-muted">{{ f.status }} · {{ f.created_at }}</div>
-                <div class="tb-alert" v-if="f.error_message">ошибка: {{ f.error_message }}</div>
-                <div class="tb-actions">
-                  <button class="tb-btn" @click="reindexFile(f.id)">Переиндексировать</button>
-                  <button class="tb-btn tb-btn-danger" @click="deleteFile(f.id)">Удалить</button>
+        <div class="tb-kb-main" @click="closeFileMenu">
+          <div class="tb-kb-header">
+            <h2>Добро пожаловать в базу знаний</h2>
+            <p>Управляйте документами и доступами в едином пространстве.</p>
+          </div>
+          <div class="tb-kb-search">
+            <div class="tb-kb-search-input">
+              <input v-model="kbSearch" class="tb-input" placeholder="Поиск по базе знаний" @input="scheduleSearch" />
+            </div>
+            <button class="tb-btn tb-btn-ghost" @click="toggleSmartSearch">Умный поиск</button>
+          </div>
+          <div class="tb-search-status" v-if="kbSearchLoading">Ищем…</div>
+          <div class="tb-search-status tb-alert" v-if="kbSearchError">{{ kbSearchError }}</div>
+          <div class="tb-search-status" v-if="kbSearchResults !== null && !kbSearchLoading && !kbSearchError">
+            Найдено: {{ kbSearchResults.length }}
+          </div>
+          <div class="tb-search-preview" v-if="kbSearchMatches.length">
+            <div class="tb-search-preview-item" v-for="m in kbSearchMatches.slice(0, 5)" :key="m.file_id">
+              <div class="tb-search-preview-name">{{ m.filename }}</div>
+              <div class="tb-muted" v-if="m.snippet">{{ m.snippet }}</div>
+            </div>
+          </div>
+
+          <div class="tb-smart-search" v-if="smartSearchOpen">
+            <div class="tb-field">
+              <label>Умный запрос</label>
+              <input v-model="smartSearchQuery" class="tb-input" placeholder="Например: какие есть тарифы?" />
+            </div>
+            <div class="tb-actions">
+              <button class="tb-btn tb-btn-primary" @click="runSmartSearch" :disabled="smartSearchLoading">
+                {{ smartSearchLoading ? 'Ищу...' : 'Спросить' }}
+              </button>
+              <span class="tb-muted" v-if="smartSearchError">{{ smartSearchError }}</span>
+            </div>
+            <div class="tb-smart-answer" v-if="smartSearchAnswer">{{ smartSearchAnswer }}</div>
+          </div>
+          <div class="tb-kb-filters">
+            <select v-model="kbTypeFilter" class="tb-input">
+              <option value="all">Тип: все</option>
+              <option v-for="t in kbTypeOptions" :key="t" :value="t">{{ t }}</option>
+            </select>
+            <select v-model="kbPeopleFilter" class="tb-input">
+              <option value="all">Люди: все</option>
+              <option v-for="p in kbPeopleOptions" :key="p" :value="p">{{ p }}</option>
+            </select>
+            <select v-model="kbLocationFilter" class="tb-input">
+              <option value="all">Местоположение: все</option>
+              <option v-for="c in kbCollections" :key="c.id" :value="String(c.id)">{{ c.name }}</option>
+            </select>
+            <select v-model="kbSort" class="tb-input">
+              <option value="new">Сначала новые</option>
+              <option value="name">По имени</option>
+              <option value="status">По статусу</option>
+            </select>
+            <div class="tb-view-toggle">
+              <button class="tb-view-btn" :class="{ 'is-active': kbViewMode === 'table' }" @click="kbViewMode = 'table'">Таблица</button>
+              <button class="tb-view-btn" :class="{ 'is-active': kbViewMode === 'grid' }" @click="kbViewMode = 'grid'">Плитки</button>
+            </div>
+          </div>
+
+          <details class="tb-accordion tb-kb-accordion" :open="smartFoldersOpen" @toggle="smartFoldersOpen = ($event.target as HTMLDetailsElement).open">
+            <summary class="tb-accordion-summary">Умные папки</summary>
+            <div class="tb-chip-row">
+              <button
+                v-for="s in kbSmartFolders"
+                :key="s.id"
+                class="tb-chip tb-chip-ghost"
+                :class="{ 'is-active': kbFilter.kind === 'smart' && kbFilter.id === s.id }"
+                @click="selectKbFilter('smart', s.id)"
+              >
+                {{ s.name }}
+              </button>
+              <span v-if="kbSmartFolders.length === 0" class="tb-muted">Умных папок пока нет.</span>
+            </div>
+            <div v-if="kbTopicSuggestions.length" class="tb-suggestions">
+              <div class="tb-muted">Предложения по темам (≥ {{ smartThreshold }} файлов):</div>
+              <div class="tb-chip-row">
+                <button
+                  v-for="s in kbTopicSuggestions"
+                  :key="s.id"
+                  class="tb-chip tb-chip-outline"
+                  @click="createSmartFolderFromTopic(s.id, s.name)"
+                >
+                  Создать «{{ s.name }}»
+                </button>
+              </div>
+            </div>
+          </details>
+
+          <div class="tb-kb-section">
+            <div class="tb-kb-section-title">Рекомендуемые папки</div>
+            <div class="tb-kb-folder-row">
+              <div
+                v-for="c in kbCollections.slice(0, 6)"
+                :key="c.id"
+                class="tb-kb-folder-card"
+                :class="{ 'is-drop': dragOverCollectionId === c.id }"
+                @click="selectKbFilter('collection', c.id)"
+                @dragenter.prevent="onDragEnterCollection(c.id)"
+                @dragleave.prevent="onDragLeaveCollection(c.id)"
+                @dragover.prevent
+                @drop="onDropToCollection(c.id, $event)"
+              >
+                <div class="tb-kb-folder-icon" :style="{ backgroundColor: c.color || '#dbeafe' }">📁</div>
+                <div>
+                  <div class="tb-kb-folder-name">{{ c.name }}</div>
+                  <div class="tb-muted">{{ c.file_count || (kbCollectionFiles[c.id]?.length || 0) }} файлов</div>
                 </div>
-                <div v-if="['uploaded','processing'].includes(String(f.status || '').toLowerCase())" class="tb-progress">
-                  <div class="tb-progress-bar" />
+              </div>
+              <div v-if="kbCollections.length === 0" class="tb-empty">Папок пока нет.</div>
+            </div>
+          </div>
+
+          <div class="tb-kb-section">
+            <div class="tb-kb-section-title">Рекомендуемые файлы</div>
+            <div class="tb-kb-table">
+              <div class="tb-kb-table-head">
+                <span>Название</span>
+                <span>Причина</span>
+                <span>Владелец</span>
+                <span>Папка</span>
+              </div>
+              <div class="tb-kb-table-row" v-for="f in recommendedKbFiles" :key="f.id">
+                <span class="tb-kb-file-name">
+                  <span class="tb-file-icon" :style="{ backgroundColor: fileTypeIcon(f.filename).color }">{{ fileTypeIcon(f.filename).label }}</span>
+                  {{ f.filename }}
+                </span>
+                <span>{{ (f.query_count || 0) > 0 ? `${f.query_count} запросов` : 'Новый файл' }}</span>
+                <span>{{ fileOwnerLabel(f) }}</span>
+                <span>{{ fileCollections(f.id)[0]?.name || 'Корень' }}</span>
+              </div>
+              <div v-if="recommendedKbFiles.length === 0" class="tb-empty">Рекомендаций пока нет.</div>
+            </div>
+          </div>
+
+          <div class="tb-kb-section">
+            <div class="tb-kb-section-head">
+              <div class="tb-kb-section-title">Файлы</div>
+              <button class="tb-btn" @click="reindex">Переиндексировать</button>
+            </div>
+            <div v-if="selectedFileIds.length" class="tb-selection-bar">
+              <div>Выбрано: {{ selectedFileIds.length }}</div>
+              <div class="tb-selection-actions">
+                <select class="tb-input" @change="bulkMoveToCollection($event)">
+                  <option value="">Переместить в папку</option>
+                  <option v-for="c in kbCollections" :key="c.id" :value="c.id">{{ c.name }}</option>
+                </select>
+                <button class="tb-btn" @click="bulkReindexFiles">Переиндексировать</button>
+                <button class="tb-btn tb-btn-danger" @click="bulkDeleteFiles">Удалить</button>
+                <button class="tb-btn tb-btn-ghost" @click="selectedFileIds = []">Снять выделение</button>
+              </div>
+            </div>
+            <div v-if="kbViewMode === 'table' && sortedKbFiles.length" class="tb-kb-table">
+              <div class="tb-kb-table-head">
+                <span>
+                  <label class="tb-file-check">
+                    <input type="checkbox" :checked="allVisibleSelected" @change="toggleSelectAllVisible" />
+                    Название
+                  </label>
+                </span>
+                <span>Владелец</span>
+                <span>Папка</span>
+                <span>Статус</span>
+              </div>
+              <div v-for="f in sortedKbFiles" :key="f.id" class="tb-kb-table-row" draggable="true" @dragstart="onDragStartFile(f.id, $event)" @dragend="onDragEndFile">
+                <span class="tb-kb-file-name">
+                  <label class="tb-file-check">
+                    <input type="checkbox" v-model="selectedFileIds" :value="f.id" />
+                    <span class="tb-file-icon" :style="{ backgroundColor: fileTypeIcon(f.filename).color }">{{ fileTypeIcon(f.filename).label }}</span>
+                    {{ f.filename }}
+                  </label>
+                </span>
+                <span>{{ fileOwnerLabel(f) }}</span>
+                <span>{{ fileCollections(f.id)[0]?.name || 'Корень' }}</span>
+                <span class="tb-status-pill" :class="`is-${(f.status || '').toLowerCase()}`" :title="f.status">{{ fileStatusLabel(f.status) }}</span>
+                <button class="tb-kb-menu" :class="{ 'is-open': openFileMenuId === f.id }" @click.stop="toggleFileMenu(f.id)">⋮</button>
+                <div v-if="openFileMenuId === f.id" class="tb-kb-menu-pop" @click.stop>
+                  <button @click="reindexFile(f.id)">Переиндексировать</button>
+                  <button @click="deleteFile(f.id)">Удалить</button>
                 </div>
               </div>
             </div>
+            <div v-if="kbViewMode === 'grid' && sortedKbFiles.length" class="tb-file-grid">
+              <div v-for="f in sortedKbFiles" :key="f.id" class="tb-file-card" draggable="true" @dragstart="onDragStartFile(f.id, $event)" @dragend="onDragEndFile">
+                <div class="tb-file-card-header">
+                  <span class="tb-file-icon" :style="{ backgroundColor: fileTypeIcon(f.filename).color }">{{ fileTypeIcon(f.filename).label }}</span>
+                  <button class="tb-kb-menu" :class="{ 'is-open': openFileMenuId === f.id }" @click.stop="toggleFileMenu(f.id)">⋮</button>
+                </div>
+                <div class="tb-file-card-name">{{ f.filename }}</div>
+                <div class="tb-file-card-meta">{{ fileOwnerLabel(f) }}</div>
+                <div class="tb-status-pill" :class="`is-${(f.status || '').toLowerCase()}`" :title="f.status">{{ fileStatusLabel(f.status) }}</div>
+                <div v-if="openFileMenuId === f.id" class="tb-kb-menu-pop" @click.stop>
+                  <button @click="reindexFile(f.id)">Переиндексировать</button>
+                  <button @click="deleteFile(f.id)">Удалить</button>
+                </div>
+              </div>
+            </div>
+            <div class="tb-empty" v-else>Файлов пока нет.</div>
           </div>
         </div>
       </section>
@@ -307,6 +565,24 @@
                   <option value="faq">FAQ</option>
                   <option value="timeline">Таймлайн</option>
                 </select>
+              </div>
+              <div class="tb-settings-grid">
+                <div class="tb-field">
+                  <label class="tb-inline">
+                    <input type="checkbox" v-model="kbSettings.collections_multi_assign" />
+                    Разрешить файл в нескольких папках
+                  </label>
+                </div>
+                <div class="tb-field">
+                  <label class="tb-label">
+                    <span>Порог для умных папок</span>
+                    <span class="tb-help">
+                      <span class="tb-help-icon">?</span>
+                      <span class="tb-help-balloon">Когда файлов по теме ≥ порога, предложим создать умную папку.</span>
+                    </span>
+                  </label>
+                  <input v-model.number="kbSettings.smart_folder_threshold" type="number" min="1" class="tb-input" />
+                </div>
               </div>
             </div>
 
@@ -487,44 +763,72 @@
           </div>
         </div>
 
+      </section>
+
+      <section v-if="currentTab === 'integrations'" class="tb-grid" key="integrations">
         <div class="tb-card">
-          <h2 class="tb-card-title">Telegram боты</h2>
-          <div v-if="!isPortalAdmin" class="tb-empty">Доступно только администратору портала.</div>
-          <div v-else>
-            <div class="tb-field">
-              <label>
-                <input type="checkbox" v-model="tgStaffEnabled" />
-                Бот для сотрудников (RAG: staff)
-              </label>
-              <label class="tb-inline">
-                <input type="checkbox" v-model="tgStaffAllowUploads" />
-                Разрешить загрузку файлов
-              </label>
-              <div class="tb-muted" v-if="tgStaffMasked">Токен: {{ tgStaffMasked }}</div>
-              <div class="tb-muted" v-if="tgStaffWebhook">Webhook: {{ tgStaffWebhook }}</div>
-              <input v-model="tgStaffToken" class="tb-input" placeholder="Bot token" />
-              <div class="tb-actions">
-                <button class="tb-btn tb-btn-primary" @click="saveTelegram('staff')">Сохранить</button>
-                <span class="tb-muted" v-if="tgStaffStatus">{{ tgStaffStatus }}</span>
+          <div class="tb-actions">
+            <h2 class="tb-card-title">Интеграции</h2>
+            <div class="tb-chip-row">
+              <button class="tb-chip tb-chip-ghost" :class="{ 'is-active': integrationTab === 'telegram' }" @click="integrationTab = 'telegram'">Телеграм</button>
+              <button class="tb-chip tb-chip-ghost" :class="{ 'is-active': integrationTab === 'bitrix' }" @click="integrationTab = 'bitrix'">Битрикс</button>
+              <button class="tb-chip tb-chip-ghost" :class="{ 'is-active': integrationTab === 'amocrm' }" @click="integrationTab = 'amocrm'">AmoCRM</button>
+            </div>
+          </div>
+          <div v-if="integrationTab === 'telegram'">
+            <div v-if="!isPortalAdmin" class="tb-empty">Доступно только администратору портала.</div>
+            <div v-else>
+              <div class="tb-field">
+                <label>
+                  <input type="checkbox" v-model="tgStaffEnabled" />
+                  Бот для сотрудников (RAG: staff)
+                </label>
+                <label class="tb-inline">
+                  <input type="checkbox" v-model="tgStaffAllowUploads" />
+                  Разрешить загрузку файлов
+                </label>
+                <div class="tb-muted" v-if="tgStaffMasked">Токен: {{ tgStaffMasked }}</div>
+                <div class="tb-muted" v-if="tgStaffWebhook">Webhook: {{ tgStaffWebhook }}</div>
+                <input v-model="tgStaffToken" class="tb-input" placeholder="Bot token" />
+                <div class="tb-actions">
+                  <button class="tb-btn tb-btn-primary" @click="saveTelegram('staff')">Сохранить</button>
+                  <span class="tb-muted" v-if="tgStaffStatus">{{ tgStaffStatus }}</span>
+                </div>
+              </div>
+              <div class="tb-field">
+                <label>
+                  <input type="checkbox" v-model="tgClientEnabled" />
+                  Бот для клиентов (RAG: client)
+                </label>
+                <label class="tb-inline">
+                  <input type="checkbox" v-model="tgClientAllowUploads" />
+                  Разрешить загрузку файлов
+                </label>
+                <div class="tb-muted" v-if="tgClientMasked">Токен: {{ tgClientMasked }}</div>
+                <div class="tb-muted" v-if="tgClientWebhook">Webhook: {{ tgClientWebhook }}</div>
+                <input v-model="tgClientToken" class="tb-input" placeholder="Bot token" />
+                <div class="tb-actions">
+                  <button class="tb-btn tb-btn-primary" @click="saveTelegram('client')">Сохранить</button>
+                  <span class="tb-muted" v-if="tgClientStatus">{{ tgClientStatus }}</span>
+                </div>
               </div>
             </div>
-            <div class="tb-field">
-              <label>
-                <input type="checkbox" v-model="tgClientEnabled" />
-                Бот для клиентов (RAG: client)
-              </label>
-              <label class="tb-inline">
-                <input type="checkbox" v-model="tgClientAllowUploads" />
-                Разрешить загрузку файлов
-              </label>
-              <div class="tb-muted" v-if="tgClientMasked">Токен: {{ tgClientMasked }}</div>
-              <div class="tb-muted" v-if="tgClientWebhook">Webhook: {{ tgClientWebhook }}</div>
-              <input v-model="tgClientToken" class="tb-input" placeholder="Bot token" />
+          </div>
+          <div v-else-if="integrationTab === 'bitrix'">
+            <div v-if="!isPortalAdmin" class="tb-empty">Доступно только администратору портала.</div>
+            <div v-else class="tb-field">
+              <label>Client ID</label>
+              <input v-model="bitrixClientId" class="tb-input" placeholder="client_id" />
+              <label class="tb-label" style="margin-top:10px;">Client Secret</label>
+              <input v-model="bitrixClientSecret" class="tb-input" placeholder="client_secret" />
               <div class="tb-actions">
-                <button class="tb-btn tb-btn-primary" @click="saveTelegram('client')">Сохранить</button>
-                <span class="tb-muted" v-if="tgClientStatus">{{ tgClientStatus }}</span>
+                <button class="tb-btn tb-btn-primary" @click="saveBitrixCreds">Сохранить</button>
+                <span class="tb-muted" v-if="bitrixCredsStatus">{{ bitrixCredsStatus }}</span>
               </div>
             </div>
+          </div>
+          <div v-else class="tb-info">
+            Настройки интеграции AmoCRM появятся здесь.
           </div>
         </div>
       </section>
@@ -768,8 +1072,8 @@
           <h2>{{ authMode === 'register' ? 'Регистрация' : 'Вход' }}</h2>
           <p class="tb-auth-sub">
             {{ authMode === 'register'
-              ? 'Пока без подтверждения email. Это временно.'
-              : 'Email + пароль. Пока без подтверждения.' }}
+              ? 'Подтвердите email для доступа в кабинет.'
+              : 'Email + пароль. Подтвердите email для входа.' }}
           </p>
           <div class="tb-auth-form">
             <label>
@@ -844,7 +1148,17 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 
-type KbFile = { id: number; filename: string; status: string; error_message?: string; created_at?: string };
+type KbFile = {
+    id: number;
+    filename: string;
+    status: string;
+    error_message?: string;
+    created_at?: string;
+    uploaded_by_type?: string;
+    uploaded_by_id?: string;
+    uploaded_by_name?: string;
+    query_count?: number;
+  };
 
 type KbSource = { id: number; url: string; status: string; created_at?: string };
 
@@ -856,6 +1170,8 @@ type DialogItem = { body?: string; direction?: 'tx' | 'rx' };
     system_prompt_extra: string;
     show_sources: boolean;
     sources_format: string;
+    collections_multi_assign: boolean;
+    smart_folder_threshold: number;
     allow_general: boolean;
     strict_mode: boolean;
     use_history: boolean;
@@ -901,6 +1217,17 @@ const webLinked = ref(false);
 const webEmail = ref('');
 const demoUntil = ref<string | null>(null);
 const webSessionToken = ref('');
+const webUserLabel = computed(() => {
+  if (webEmail.value) return webEmail.value;
+  try {
+    const raw = localStorage.getItem('tb_web_user') || '';
+    const parsed = raw ? JSON.parse(raw) : null;
+    const email = parsed?.email || '';
+    return email || 'Пользователь';
+  } catch {
+    return 'Пользователь';
+  }
+});
 const linkRequests = ref<{ id: number; portal_id: number; portal_domain: string; status: string; created_at: string }[]>([]);
 const linkModalOpen = ref(false);
 const linkModalRequest = ref<{ id: number; portal_id: number; portal_domain: string } | null>(null);
@@ -923,6 +1250,38 @@ const accessSaveStatus = ref<string>('');
 const accessSaving = ref(false);
 
 const kbFiles = ref<KbFile[]>([]);
+const kbCollections = ref<{ id: number; name: string; color?: string; file_count?: number }[]>([]);
+const kbCollectionFiles = ref<Record<number, number[]>>({});
+const kbSmartFolders = ref<{ id: number; name: string; system_tag?: string; rules?: any }[]>([]);
+const kbTopics = ref<{ id: string; name: string; count: number; file_ids: number[] }[]>([]);
+const kbTopicSuggestions = ref<{ id: string; name: string; count: number }[]>([]);
+const kbFilter = ref<{ kind: 'all' | 'collection' | 'smart' | 'topic'; id?: number | string }>({ kind: 'all' });
+const newCollectionName = ref('');
+const newCollectionColor = ref('');
+const smartThreshold = ref(5);
+const selectedFileIds = ref<number[]>([]);
+const dragOverCollectionId = ref<number | null>(null);
+const kbSearch = ref('');
+const kbSort = ref<'new' | 'name' | 'status'>('new');
+const editingCollectionId = ref<number | null>(null);
+const editingCollectionName = ref('');
+const kbTypeFilter = ref('all');
+const kbPeopleFilter = ref('all');
+const kbLocationFilter = ref('all');
+const smartFoldersOpen = ref(true);
+const kbSearchResults = ref<number[] | null>(null);
+const kbSearchMatches = ref<{ file_id: number; filename?: string; snippet?: string }[]>([]);
+const kbSearchLoading = ref(false);
+const kbSearchError = ref('');
+const smartSearchOpen = ref(false);
+const smartSearchQuery = ref('');
+const smartSearchAnswer = ref('');
+const smartSearchLoading = ref(false);
+const smartSearchError = ref('');
+const kbViewMode = ref<'table' | 'grid'>('table');
+const draggingFileIds = ref<number[]>([]);
+const openFileMenuId = ref<number | null>(null);
+let searchTimer: number | null = null;
 const kbSources = ref<KbSource[]>([]);
 const kbUrl = ref('');
 const kbUrlMessage = ref('');
@@ -933,7 +1292,7 @@ const lastUpdated = ref('—');
 const recentDialogs = ref<DialogItem[]>([]);
 type TopicSummary = { topic: string; score?: number | null };
 const topicSummaries = ref<TopicSummary[]>([]);
-const currentTab = ref<'overview' | 'kb' | 'sources' | 'users' | 'analytics' | 'settings' | 'flow'>('overview');
+const currentTab = ref<'overview' | 'kb' | 'sources' | 'users' | 'analytics' | 'settings' | 'integrations' | 'flow'>('overview');
   const kbSettings = ref<KbSettings>({
     embedding_model: '',
     chat_model: '',
@@ -941,6 +1300,8 @@ const currentTab = ref<'overview' | 'kb' | 'sources' | 'users' | 'analytics' | '
     system_prompt_extra: '',
     show_sources: true,
     sources_format: 'detailed',
+    collections_multi_assign: true,
+    smart_folder_threshold: 5,
     allow_general: false,
     strict_mode: true,
     use_history: true,
@@ -971,6 +1332,10 @@ const tgClientMasked = ref('');
 const tgClientWebhook = ref('');
 const tgClientStatus = ref('');
 const tgClientAllowUploads = ref(false);
+const integrationTab = ref<'telegram' | 'bitrix' | 'amocrm'>('telegram');
+const bitrixClientId = ref('');
+const bitrixClientSecret = ref('');
+const bitrixCredsStatus = ref('');
 const flowDraft = ref<FlowDraft>({
   version: 1,
   settings: { mood: 'нейтральный', custom_prompt: '', use_history: true },
@@ -1004,10 +1369,246 @@ const tabTitle = computed(() => {
     case 'users': return 'Пользователи и доступы';
     case 'analytics': return 'Аналитика';
     case 'settings': return 'Настройки';
+    case 'integrations': return 'Интеграции';
     case 'flow': return 'Конструктор бота';
     default: return 'Обзор';
   }
 });
+
+const filteredKbFiles = computed(() => {
+  const f = kbFilter.value;
+  let items = kbFiles.value.slice();
+  const query = kbSearch.value.trim().toLowerCase();
+  const hasFullText = kbSearchResults.value !== null;
+  if (query && !hasFullText) {
+    items = items.filter((x) =>
+      (x.filename || '').toLowerCase().includes(query) ||
+      (x.uploaded_by_name || '').toLowerCase().includes(query)
+    );
+  }
+  if (kbTypeFilter.value !== 'all') {
+    items = items.filter((x) => fileTypeCategory(x.filename) === kbTypeFilter.value);
+  }
+  if (kbPeopleFilter.value !== 'all') {
+    items = items.filter((x) => (x.uploaded_by_name || '') === kbPeopleFilter.value);
+  }
+  if (kbLocationFilter.value !== 'all') {
+    const ids = kbCollectionFiles.value[Number(kbLocationFilter.value)] || [];
+    items = items.filter((x) => ids.includes(x.id));
+  }
+  if (hasFullText) {
+    const ids = new Set(kbSearchResults.value || []);
+    items = items.filter((x) => ids.has(x.id));
+  }
+  if (f.kind === 'collection' && f.id) {
+    const ids = kbCollectionFiles.value[Number(f.id)] || [];
+    items = items.filter((x) => ids.includes(x.id));
+  }
+  if (f.kind === 'topic' && f.id) {
+    const topic = kbTopics.value.find((t) => t.id === String(f.id));
+    const ids = topic?.file_ids || [];
+    items = items.filter((x) => ids.includes(x.id));
+  }
+  if (f.kind === 'smart' && f.id) {
+    const folder = kbSmartFolders.value.find((s) => s.id === Number(f.id));
+    const topicId = (folder?.system_tag || folder?.rules?.topic_id || folder?.rules?.topicId || '').toString();
+    if (topicId) {
+      const topic = kbTopics.value.find((t) => t.id === topicId);
+      const ids = topic?.file_ids || [];
+      items = items.filter((x) => ids.includes(x.id));
+    }
+  }
+  return items;
+});
+
+const sortedKbFiles = computed(() => {
+  const items = filteredKbFiles.value.slice();
+  if (kbSort.value === 'name') {
+    items.sort((a, b) => (a.filename || '').localeCompare(b.filename || ''));
+  } else if (kbSort.value === 'status') {
+    items.sort((a, b) => (a.status || '').localeCompare(b.status || ''));
+  } else {
+    items.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+  }
+  return items;
+});
+
+const recentKbFiles = computed(() => sortedKbFiles.value.slice(0, 5));
+
+const allVisibleSelected = computed(() => {
+  if (!sortedKbFiles.value.length) return false;
+  return sortedKbFiles.value.every((f) => selectedFileIds.value.includes(f.id));
+});
+
+function toggleSelectAllVisible() {
+  if (allVisibleSelected.value) {
+    const visibleIds = new Set(sortedKbFiles.value.map((f) => f.id));
+    selectedFileIds.value = selectedFileIds.value.filter((id) => !visibleIds.has(id));
+    return;
+  }
+  const ids = new Set(selectedFileIds.value);
+  for (const f of sortedKbFiles.value) ids.add(f.id);
+  selectedFileIds.value = Array.from(ids);
+}
+
+const kbTypeOptions = computed(() => {
+  const types = new Set<string>();
+  for (const f of kbFiles.value) {
+    types.add(fileTypeCategory(f.filename));
+  }
+  return Array.from(types).sort();
+});
+
+const kbPeopleOptions = computed(() => {
+  const people = new Set<string>();
+  for (const f of kbFiles.value) {
+    if (f.uploaded_by_name) {
+      people.add(f.uploaded_by_name);
+    } else if (f.uploaded_by_type) {
+      people.add(f.uploaded_by_type);
+    }
+  }
+  return Array.from(people).sort();
+});
+
+const recommendedKbFiles = computed(() => {
+  return kbFiles.value
+    .filter((f) => (f.status || '').toLowerCase() === 'ready')
+    .slice()
+    .sort((a, b) => {
+      const qa = a.query_count || 0;
+      const qb = b.query_count || 0;
+      if (qa !== qb) return qb - qa;
+      return String(b.created_at || '').localeCompare(String(a.created_at || ''));
+    })
+    .slice(0, 20);
+});
+
+const kbSearchMatchesById = computed(() => {
+  const map = new Map<number, { filename?: string; snippet?: string }>();
+  for (const m of kbSearchMatches.value) {
+    map.set(Number(m.file_id), { filename: m.filename, snippet: m.snippet });
+  }
+  return map;
+});
+
+function fileCollections(fileId: number) {
+  const out: { id: number; name: string; color?: string }[] = [];
+  for (const c of kbCollections.value) {
+    const ids = kbCollectionFiles.value[c.id] || [];
+    if (ids.includes(fileId)) {
+      out.push({ id: c.id, name: c.name, color: c.color });
+    }
+  }
+  return out;
+}
+
+function fileTypeCategory(filename: string | undefined) {
+  const name = (filename || '').toLowerCase();
+  const ext = name.includes('.') ? name.split('.').pop() || '' : '';
+  if (['pdf', 'doc', 'docx', 'txt', 'rtf'].includes(ext)) return 'Документы';
+  if (['xls', 'xlsx', 'csv'].includes(ext)) return 'Таблицы';
+  if (['ppt', 'pptx', 'key'].includes(ext)) return 'Презентации';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) return 'Изображения';
+  if (['mp3', 'ogg', 'wav', 'm4a', 'aac'].includes(ext)) return 'Аудио';
+  if (['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(ext)) return 'Видео';
+  return 'Другое';
+}
+
+function fileTypeIcon(filename: string | undefined) {
+  const type = fileTypeCategory(filename);
+  const map: Record<string, { label: string; color: string }> = {
+    'Документы': { label: 'DOC', color: '#3b82f6' },
+    'Таблицы': { label: 'XLS', color: '#16a34a' },
+    'Презентации': { label: 'PPT', color: '#f59e0b' },
+    'Изображения': { label: 'IMG', color: '#a855f7' },
+    'Аудио': { label: 'AUD', color: '#0ea5e9' },
+    'Видео': { label: 'VID', color: '#f97316' },
+  };
+  return map[type] || { label: 'FILE', color: '#64748b' };
+}
+
+function fileStatusLabel(status: string | undefined) {
+  const s = (status || '').toLowerCase();
+  if (s === 'ready') return 'Готово';
+  if (s === 'processing') return 'Индексируется';
+  if (s === 'queued') return 'В очереди';
+  if (s === 'uploaded') return 'Загружен';
+  if (s === 'error') return 'Ошибка';
+  return status || '—';
+}
+
+function fileOwnerLabel(file: KbFile) {
+  if (file.uploaded_by_name) return file.uploaded_by_name;
+  if (file.uploaded_by_type && file.uploaded_by_id) return `${file.uploaded_by_type} ${file.uploaded_by_id}`;
+  return file.uploaded_by_type || '—';
+}
+
+function scheduleSearch() {
+  if (searchTimer) {
+    window.clearTimeout(searchTimer);
+    searchTimer = null;
+  }
+  searchTimer = window.setTimeout(() => {
+    runFullTextSearch();
+  }, 300);
+}
+
+async function runFullTextSearch() {
+  if (!portalId.value || !portalToken.value) return;
+  const q = kbSearch.value.trim();
+  if (!q) {
+    kbSearchResults.value = null;
+    kbSearchMatches.value = [];
+    kbSearchError.value = '';
+    return;
+  }
+  kbSearchLoading.value = true;
+  kbSearchError.value = '';
+  kbSearchResults.value = null;
+  kbSearchMatches.value = [];
+  const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/search?q=${encodeURIComponent(q)}&limit=100`, {
+    headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+  });
+  kbSearchLoading.value = false;
+  if (!ok) {
+    kbSearchError.value = data?.error || data?.detail || 'Ошибка поиска';
+    kbSearchResults.value = [];
+    kbSearchMatches.value = [];
+    return;
+  }
+  const ids = Array.isArray(data?.file_ids) ? data.file_ids.map((x: any) => Number(x)).filter((x: number) => Number.isFinite(x)) : [];
+  kbSearchResults.value = ids;
+  kbSearchMatches.value = Array.isArray(data?.matches) ? data.matches : [];
+}
+
+async function runSmartSearch() {
+  if (!portalId.value || !portalToken.value) return;
+  const q = smartSearchQuery.value.trim();
+  if (!q) return;
+  smartSearchLoading.value = true;
+  smartSearchError.value = '';
+  smartSearchAnswer.value = '';
+  const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    body: JSON.stringify({ query: q }),
+  });
+  smartSearchLoading.value = false;
+  if (!ok) {
+    smartSearchError.value = data?.error || data?.detail || 'Ошибка умного поиска';
+    return;
+  }
+  smartSearchAnswer.value = data?.answer || '';
+}
+
+function toggleSmartSearch() {
+  smartSearchOpen.value = !smartSearchOpen.value;
+  if (smartSearchOpen.value && !smartSearchQuery.value) {
+    smartSearchQuery.value = kbSearch.value.trim();
+  }
+}
+
 
 const demoUntilLabel = computed(() => {
   if (!demoUntil.value) return '';
@@ -1017,6 +1618,16 @@ const demoUntilLabel = computed(() => {
   const mm = String(dt.getMonth() + 1).padStart(2, '0');
   const yy = dt.getFullYear();
   return `Демо до ${dd}.${mm}.${yy}`;
+});
+
+const demoLeftLabel = computed(() => {
+  if (!demoUntil.value) return '';
+  const dt = new Date(demoUntil.value);
+  if (Number.isNaN(dt.getTime())) return `Тариф: до ${demoUntil.value}`;
+  const now = new Date();
+  const diffMs = dt.getTime() - now.getTime();
+  const days = Math.max(0, Math.ceil(diffMs / 86400000));
+  return `Тариф: осталось ${days} дн.`;
 });
 
 const pendingLinkRequests = computed(() =>
@@ -1388,6 +1999,9 @@ async function selectTab(tab: string) {
   }
   if (tab === 'kb' && isPortalAdmin.value) {
     await loadKbFiles();
+    await loadKbCollections();
+    await loadKbSmartFolders();
+    await loadKbTopics();
     return;
   }
   if (tab === 'sources' && isPortalAdmin.value) {
@@ -1499,6 +2113,19 @@ function openWebCabinet() {
   window.open('https://necrogame.ru/app', '_blank');
 }
 
+function openNewWebUi() {
+  localStorage.setItem('tb_web_ui_mode', 'new');
+  window.location.href = '/app/overview';
+}
+
+function logoutWeb() {
+  localStorage.removeItem('tb_web_user');
+  localStorage.removeItem('tb_web_session_token');
+  localStorage.removeItem('tb_web_portal_id');
+  localStorage.removeItem('tb_web_portal_token');
+  window.location.href = '/login';
+}
+
 async function submitAuth() {
   authError.value = '';
   authHint.value = '';
@@ -1531,11 +2158,19 @@ async function submitAuth() {
   });
   authLoading.value = false;
   if (!ok) {
+    if (data?.detail === 'email_not_verified') {
+      authHint.value = 'Подтвердите email. Письмо отправлено при регистрации.';
+      return;
+    }
     authError.value = data?.detail || data?.error || 'Ошибка авторизации.';
     return;
   }
   if (data?.status === 'pending') {
     authHint.value = 'Запрос на привязку отправлен. Подтвердите в веб‑кабинете.';
+    return;
+  }
+  if (data?.status === 'confirm_required') {
+    authHint.value = 'Письмо с подтверждением отправлено. Подтвердите email, чтобы продолжить.';
     return;
   }
   webLinked.value = true;
@@ -1699,6 +2334,140 @@ async function loadUserStats() {
   if (ok && data?.stats) userStats.value = data.stats;
 }
 
+
+async function loadKbCollections() {
+  if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
+  const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/collections`, {
+    headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+  });
+  if (ok && data?.items) {
+    kbCollections.value = data.items;
+    await loadAllCollectionFiles();
+  }
+}
+
+async function loadAllCollectionFiles() {
+  if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
+  const mapping: Record<number, number[]> = {};
+  for (const c of kbCollections.value) {
+    const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/collections/${c.id}/files`, {
+      headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    });
+    if (ok && data?.file_ids) {
+      mapping[c.id] = data.file_ids.map((x: any) => Number(x)).filter((x: number) => Number.isFinite(x));
+    }
+  }
+  kbCollectionFiles.value = mapping;
+}
+
+async function loadKbSmartFolders() {
+  if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
+  const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/smart-folders`, {
+    headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+  });
+  if (ok && data?.items) {
+    kbSmartFolders.value = data.items;
+  }
+}
+
+async function loadKbTopics() {
+  if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
+  const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/topics`, {
+    headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+  });
+  if (ok && data) {
+    kbTopics.value = data.topics || [];
+    kbTopicSuggestions.value = data.suggestions || [];
+    smartThreshold.value = data.threshold || 5;
+  }
+}
+
+async function createCollection() {
+  if (!portalId.value || !portalToken.value || !newCollectionName.value.trim()) return;
+  await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/collections`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    body: JSON.stringify({ name: newCollectionName.value.trim(), color: newCollectionColor.value.trim() || null }),
+  });
+  newCollectionName.value = '';
+  newCollectionColor.value = '';
+  await loadKbCollections();
+}
+
+function startEditCollection(c: { id: number; name: string }) {
+  editingCollectionId.value = c.id;
+  editingCollectionName.value = c.name;
+}
+
+async function saveCollectionName(collectionId: number) {
+  if (!portalId.value || !portalToken.value) return;
+  const name = editingCollectionName.value.trim();
+  if (!name) return;
+  await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/collections/${collectionId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    body: JSON.stringify({ name }),
+  });
+  editingCollectionId.value = null;
+  editingCollectionName.value = '';
+  await loadKbCollections();
+}
+
+function onAddToCollection(fileId: number, event: Event) {
+  const target = event.target as HTMLSelectElement | null;
+  if (!target) return;
+  const id = Number(target.value);
+  if (!id) return;
+  addToCollection(id, fileId);
+  target.value = '';
+}
+
+async function addToCollection(collectionId: number, fileId: number) {
+  if (!portalId.value || !portalToken.value) return;
+  if (!kbSettings.value.collections_multi_assign) {
+    for (const c of kbCollections.value) {
+      if (c.id === collectionId) continue;
+      const ids = kbCollectionFiles.value[c.id] || [];
+      if (ids.includes(fileId)) {
+        await removeFromCollection(c.id, fileId);
+      }
+    }
+  }
+  await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/collections/${collectionId}/files`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    body: JSON.stringify({ file_id: fileId }),
+  });
+  await loadAllCollectionFiles();
+}
+
+async function removeFromCollection(collectionId: number, fileId: number) {
+  if (!portalId.value || !portalToken.value) return;
+  await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/collections/${collectionId}/files/${fileId}`, {
+    method: 'DELETE',
+    headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+  });
+  await loadAllCollectionFiles();
+}
+
+async function createSmartFolderFromTopic(topicId: string, name: string) {
+  if (!portalId.value || !portalToken.value) return;
+  await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/smart-folders`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    body: JSON.stringify({ name, system_tag: topicId, rules_json: { type: 'topic', topic_id: topicId } }),
+  });
+  await loadKbSmartFolders();
+}
+
+function selectKbFilter(kind: 'all' | 'collection' | 'smart' | 'topic', id?: number | string) {
+  kbFilter.value = { kind, id };
+  if (kind === 'collection' && id) {
+    kbLocationFilter.value = String(id);
+  } else if (kind === 'all') {
+    kbLocationFilter.value = 'all';
+  }
+}
 async function loadKbFiles() {
   if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
   const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/files`, {
@@ -1731,6 +2500,8 @@ async function loadKbSources() {
         system_prompt_extra: data.system_prompt_extra || '',
         show_sources: data.show_sources !== false,
         sources_format: data.sources_format || 'detailed',
+        collections_multi_assign: data.collections_multi_assign !== false,
+        smart_folder_threshold: data.smart_folder_threshold ?? 5,
         allow_general: !!data.allow_general,
         strict_mode: data.strict_mode !== false,
         use_history: data.use_history !== false,
@@ -1776,7 +2547,7 @@ async function loadKbModels() {
   async function saveKbSettings() {
     if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
     kbSettingsMessage.value = 'Сохранение...';
-    const payload = {
+      const payload = {
       ...kbSettings.value,
       top_p: toOptionalNumber(kbSettings.value.top_p),
       presence_penalty: toOptionalNumber(kbSettings.value.presence_penalty),
@@ -1789,6 +2560,8 @@ async function loadKbModels() {
       retrieval_max_chars: toOptionalInt(kbSettings.value.retrieval_max_chars),
       lex_boost: toOptionalNumber(kbSettings.value.lex_boost),
       show_sources: kbSettings.value.sources_format === 'none' ? false : kbSettings.value.show_sources,
+      collections_multi_assign: kbSettings.value.collections_multi_assign,
+      smart_folder_threshold: toOptionalInt(kbSettings.value.smart_folder_threshold),
     };
     const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/settings`, {
       method: 'POST',
@@ -1964,12 +2737,13 @@ async function loadTopicSummaries() {
   }
 }
 
-async function uploadFiles() {
+async function uploadFiles(files?: FileList | File[]) {
   if (!portalId.value || !portalToken.value) return;
   const input = fileInput.value;
-  if (!input || !input.files || input.files.length === 0) return;
+  const list = files ? Array.from(files as any) : (input?.files ? Array.from(input.files) : []);
+  if (!list.length) return;
   kbUploadMessage.value = 'Загрузка...';
-  for (const f of Array.from(input.files)) {
+  for (const f of list) {
     const fd = new FormData();
     fd.append('file', f);
     await fetch(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/files/upload`, {
@@ -1978,9 +2752,141 @@ async function uploadFiles() {
       body: fd,
     });
   }
-  input.value = '';
+  if (input) input.value = '';
   kbUploadMessage.value = 'Файлы загружены.';
   await loadKbFiles();
+}
+
+function openFilePicker() {
+  if (!fileInput.value) return;
+  fileInput.value.click();
+}
+
+async function onFilePickerChange() {
+  if (!fileInput.value?.files?.length) return;
+  await uploadFiles(fileInput.value.files);
+}
+
+async function onDropFiles(event: DragEvent) {
+  event.preventDefault();
+  if (!event.dataTransfer?.files?.length) return;
+  await uploadFiles(event.dataTransfer.files);
+}
+
+function onDragOverFiles(event: DragEvent) {
+  event.preventDefault();
+}
+
+function onDragStartFile(fileId: number, event: DragEvent) {
+  if (!event.dataTransfer) return;
+  const ids = selectedFileIds.value.includes(fileId) ? selectedFileIds.value.slice() : [fileId];
+  draggingFileIds.value = ids;
+  event.dataTransfer.setData('application/json', JSON.stringify(ids));
+  event.dataTransfer.setData('text/plain', String(fileId));
+  event.dataTransfer.effectAllowed = 'move';
+}
+
+function onDragEndFile() {
+  draggingFileIds.value = [];
+  dragOverCollectionId.value = null;
+}
+
+function onDragEnterCollection(collectionId: number) {
+  dragOverCollectionId.value = collectionId;
+}
+
+function onDragLeaveCollection(collectionId: number) {
+  if (dragOverCollectionId.value === collectionId) {
+    dragOverCollectionId.value = null;
+  }
+}
+
+async function saveBitrixCreds() {
+  if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
+  bitrixCredsStatus.value = 'Сохранение...';
+  const payload = {
+    client_id: bitrixClientId.value,
+    client_secret: bitrixClientSecret.value,
+  };
+  const res = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/bitrix/credentials`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    body: JSON.stringify(payload),
+  });
+  bitrixCredsStatus.value = res.ok ? 'Сохранено' : (res.data?.error || 'Ошибка');
+}
+
+async function onDropToCollection(collectionId: number, event: DragEvent) {
+  event.preventDefault();
+  dragOverCollectionId.value = null;
+  const json = event.dataTransfer?.getData('application/json') || '';
+  let ids: number[] = [];
+  if (json) {
+    try {
+      ids = JSON.parse(json) as number[];
+    } catch (e) {
+      ids = [];
+    }
+  }
+  if (!ids.length) {
+    const idStr = event.dataTransfer?.getData('text/plain') || '';
+    const fileId = Number(idStr);
+    if (Number.isFinite(fileId) && fileId > 0) ids = [fileId];
+  }
+  if (!ids.length) return;
+  if (collectionId === 0) {
+    for (const id of ids) {
+      for (const c of kbCollections.value) {
+        const list = kbCollectionFiles.value[c.id] || [];
+        if (list.includes(id)) {
+          await removeFromCollection(c.id, id);
+        }
+      }
+    }
+    draggingFileIds.value = [];
+    return;
+  }
+  for (const id of ids) {
+    await addToCollection(collectionId, id);
+  }
+  draggingFileIds.value = [];
+}
+
+async function bulkMoveToCollection(event: Event) {
+  const target = event.target as HTMLSelectElement | null;
+  if (!target) return;
+  const collectionId = Number(target.value);
+  target.value = '';
+  if (!collectionId) return;
+  if (!selectedFileIds.value.length) return;
+  for (const id of selectedFileIds.value) {
+    await addToCollection(collectionId, id);
+  }
+  selectedFileIds.value = [];
+}
+
+async function bulkDeleteFiles() {
+  if (!selectedFileIds.value.length) return;
+  for (const id of selectedFileIds.value) {
+    await deleteFile(id);
+  }
+  selectedFileIds.value = [];
+}
+
+async function bulkReindexFiles() {
+  if (!selectedFileIds.value.length) return;
+  for (const id of selectedFileIds.value) {
+    await reindexFile(id);
+  }
+  selectedFileIds.value = [];
+}
+
+function toggleFileMenu(fileId: number) {
+  openFileMenuId.value = openFileMenuId.value === fileId ? null : fileId;
+}
+
+function closeFileMenu() {
+  openFileMenuId.value = null;
 }
 
 async function reindex() {

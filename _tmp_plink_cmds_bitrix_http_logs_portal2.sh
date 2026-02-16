@@ -1,0 +1,1 @@
+docker exec -i teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select id, status_code, summary_json, created_at from bitrix_http_logs where portal_id=2 and kind='oauth_refresh' order by id desc limit 5;"

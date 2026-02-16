@@ -21,7 +21,16 @@ from apps.backend.config import get_settings
 from apps.backend.models.portal import Portal, PortalUsersAccess
 from apps.backend.models.dialog import Dialog, Message
 from apps.backend.models.bitrix_inbound_event import BitrixInboundEvent
-from apps.backend.models.kb import KBFile, KBJob, KBSource, KBChunk, KBEmbedding
+from apps.backend.models.kb import (
+    KBFile,
+    KBJob,
+    KBSource,
+    KBChunk,
+    KBEmbedding,
+    KBCollection,
+    KBCollectionFile,
+    KBSmartFolder,
+)
 from apps.backend.auth import (
     create_portal_token_with_user,
     require_portal_access,
@@ -31,11 +40,12 @@ from apps.backend.auth import (
 )
 from apps.backend.clients.bitrix import exchange_code, user_current, user_get
 from apps.backend.services.bitrix_events import process_imbot_message
-from apps.backend.services.portal_tokens import save_tokens, get_valid_access_token, BitrixAuthError
+from apps.backend.services.portal_tokens import save_tokens, get_valid_access_token, BitrixAuthError, refresh_portal_tokens
 from apps.backend.services.token_crypto import encrypt_token
 from apps.backend.services.kb_storage import ensure_portal_dir, save_upload
 from apps.backend.services.kb_settings import get_portal_kb_settings, set_portal_kb_settings
 from apps.backend.services.kb_sources import create_url_source
+from apps.backend.services.kb_rag import answer_from_kb
 from apps.backend.services.billing import get_portal_usage_summary
 from apps.backend.services.gigachat_client import list_models, DEFAULT_API_BASE
 from apps.backend.services.kb_settings import get_effective_gigachat_settings, get_valid_gigachat_access_token
@@ -61,6 +71,7 @@ from apps.backend.models.portal_link_request import PortalLinkRequest
 from apps.backend.services.bot_flow_engine import execute_client_flow_preview
 from apps.backend.services.activity import log_activity
 from apps.backend.clients.telegram import telegram_get_me, telegram_set_webhook
+from apps.backend.services.web_email import create_email_token, send_registration_email
 
 router = APIRouter()
 
@@ -189,13 +200,17 @@ def _parse_install_auth(merged: dict) -> tuple[str | None, str | None, str | Non
         auth = {}
     access_token = (
         merged.get("AUTH_ID")
+        or auth.get("AUTH_ID")
         or auth.get("access_token")
         or auth.get("ACCESS_TOKEN")
+        or auth.get("auth_id")
     )
     refresh_token = (
         merged.get("REFRESH_ID")
+        or auth.get("REFRESH_ID")
         or auth.get("refresh_token")
         or auth.get("REFRESH_TOKEN")
+        or auth.get("refresh_id")
     )
     domain = merged.get("DOMAIN") or auth.get("domain") or auth.get("DOMAIN")
     member_id = str(merged.get("MEMBER_ID") or auth.get("member_id") or auth.get("MEMBER_ID") or "")
@@ -205,12 +220,20 @@ def _parse_install_auth(merged: dict) -> tuple[str | None, str | None, str | Non
         or auth.get("local_client_id")
         or merged.get("CLIENT_ID")
         or auth.get("CLIENT_ID")
+        or merged.get("client_id")
+        or auth.get("client_id")
+        or merged.get("clientId")
+        or auth.get("clientId")
     )
     local_client_secret = (
         merged.get("local_client_secret")
         or auth.get("local_client_secret")
         or merged.get("CLIENT_SECRET")
         or auth.get("CLIENT_SECRET")
+        or merged.get("client_secret")
+        or auth.get("client_secret")
+        or merged.get("clientSecret")
+        or auth.get("clientSecret")
     )
     user_id = merged.get("USER_ID") or auth.get("user_id") or auth.get("USER_ID")
     try:
@@ -508,7 +531,7 @@ async def bitrix_app_bot_check(request: Request, body: AppStatusBody, db: Sessio
 async def bitrix_install_complete_get(request: Request):
     """GET /install/complete не поддерживается как документ — редирект на страницу установки."""
     logger.info("install_complete_mode=document_blocked trace_id=%s method=GET", _trace_id(request))
-    return _html_install_blocked(request)
+    return RedirectResponse(url=_install_redirect_url(request), status_code=303)
 
 
 @router.post("/install/complete")
@@ -517,7 +540,7 @@ async def bitrix_install_complete(request: Request, db: Session = Depends(get_db
     tid = _trace_id(request)
     if not _is_install_complete_api_request(request):
         logger.info("install_complete_mode=document_blocked trace_id=%s method=POST", tid)
-        return _html_install_blocked(request)
+        return RedirectResponse(url=_install_redirect_url(request), status_code=303)
     logger.info("install_complete_mode=api trace_id=%s", tid)
     merged = await parse_bitrix_body(request)
     (
@@ -611,8 +634,20 @@ async def bitrix_session_start(request: Request, db: Session = Depends(get_db)):
     domain = (merged.get("DOMAIN") or auth.get("domain") or auth.get("DOMAIN") or "").strip()
     member_id = str(merged.get("MEMBER_ID") or auth.get("member_id") or auth.get("MEMBER_ID") or "")
     app_token = merged.get("APP_SID") or auth.get("application_token") or auth.get("APP_SID") or auth.get("APPLICATION_TOKEN")
-    access_token = merged.get("AUTH_ID") or auth.get("access_token") or auth.get("ACCESS_TOKEN")
-    refresh_token = merged.get("REFRESH_ID") or auth.get("refresh_token") or auth.get("REFRESH_TOKEN")
+    access_token = (
+        merged.get("AUTH_ID")
+        or auth.get("AUTH_ID")
+        or auth.get("access_token")
+        or auth.get("ACCESS_TOKEN")
+        or auth.get("auth_id")
+    )
+    refresh_token = (
+        merged.get("REFRESH_ID")
+        or auth.get("REFRESH_ID")
+        or auth.get("refresh_token")
+        or auth.get("REFRESH_TOKEN")
+        or auth.get("refresh_id")
+    )
     user_id = merged.get("USER_ID") or auth.get("user_id") or auth.get("USER_ID")
     try:
         user_id = int(user_id) if user_id is not None else None
@@ -623,6 +658,26 @@ async def bitrix_session_start(request: Request, db: Session = Depends(get_db)):
             {"error": "Missing domain or access_token", "trace_id": tid},
             status_code=400,
         )
+    local_client_id = (
+        merged.get("local_client_id")
+        or auth.get("local_client_id")
+        or merged.get("CLIENT_ID")
+        or auth.get("CLIENT_ID")
+        or merged.get("client_id")
+        or auth.get("client_id")
+        or merged.get("clientId")
+        or auth.get("clientId")
+    )
+    local_client_secret = (
+        merged.get("local_client_secret")
+        or auth.get("local_client_secret")
+        or merged.get("CLIENT_SECRET")
+        or auth.get("CLIENT_SECRET")
+        or merged.get("client_secret")
+        or auth.get("client_secret")
+        or merged.get("clientSecret")
+        or auth.get("clientSecret")
+    )
     domain_clean = _domain_clean(domain)
     portal = db.execute(select(Portal).where(Portal.domain == domain_clean)).scalar_one_or_none()
     if not portal:
@@ -631,6 +686,14 @@ async def bitrix_session_start(request: Request, db: Session = Depends(get_db)):
         db.add(portal)
         db.commit()
         db.refresh(portal)
+    enc_key = get_settings().token_encryption_key or get_settings().secret_key
+    if local_client_id:
+        portal.local_client_id = str(local_client_id)
+    if local_client_secret and enc_key:
+        portal.local_client_secret_encrypted = encrypt_token(str(local_client_secret), enc_key)
+    if local_client_id or local_client_secret:
+        db.add(portal)
+        db.commit()
     log_activity(db, kind="iframe", portal_id=portal.id, web_user_id=None)
     domain_full = f"https://{portal.domain}"
     if not user_id and access_token:
@@ -751,6 +814,11 @@ class FinalizeInstallBody(BaseModel):
     auth_context: dict = {}
 
 
+class LocalBitrixCredentialsBody(BaseModel):
+    client_id: str
+    client_secret: str
+
+
 class WebRegisterBody(BaseModel):
     email: EmailStr
     password: str
@@ -764,6 +832,26 @@ class WebLinkRequestBody(BaseModel):
 class WebLoginBody(BaseModel):
     email: EmailStr
     password: str
+
+
+class CollectionBody(BaseModel):
+    name: str | None = None
+    color: str | None = None
+
+
+class CollectionFileBody(BaseModel):
+    file_id: int
+
+
+class SmartFolderBody(BaseModel):
+    name: str
+    system_tag: str | None = None
+    rules_json: dict | None = None
+
+
+class KBAskBody(BaseModel):
+    query: str
+    audience: str | None = None
 
 
 def _require_portal_admin(db: Session, portal_id: int, request: Request) -> Portal:
@@ -782,6 +870,61 @@ def _require_portal_admin(db: Session, portal_id: int, request: Request) -> Port
             return portal
     raise HTTPException(status_code=403, detail="Доступ только для администратора портала")
     return portal
+
+
+def _resolve_uploader(db: Session, portal_id: int, request: Request) -> tuple[str | None, str | None, str | None]:
+    uid = _portal_user_id_from_token(request)
+    if uid is None:
+        return None, None, None
+    web_user = db.execute(
+        select(WebUser).where(WebUser.id == int(uid), WebUser.portal_id == portal_id)
+    ).scalar_one_or_none()
+    if web_user:
+        return "web", str(web_user.id), web_user.email
+    access = db.execute(
+        select(PortalUsersAccess).where(
+            PortalUsersAccess.portal_id == portal_id,
+            PortalUsersAccess.user_id == str(uid),
+        )
+    ).scalar_one_or_none()
+    if access:
+        return "bitrix", str(uid), access.display_name or f"Bitrix user {uid}"
+    return "bitrix", str(uid), f"Bitrix user {uid}"
+
+
+_KB_TOPICS = [
+    {
+        "id": "product",
+        "name": "Продукт и функциональность",
+        "keywords": [
+            "функции", "функционал", "feature", "возможности", "платформа",
+            "rag", "база знаний", "модели", "интерфейс",
+        ],
+    },
+    {
+        "id": "pricing",
+        "name": "Тарифы и цены",
+        "keywords": [
+            "тариф", "цена", "стоимость", "оплата", "подписка", "billing",
+            "счет", "прайс",
+        ],
+    },
+    {
+        "id": "integrations",
+        "name": "Интеграции и процессы",
+        "keywords": [
+            "интеграция", "интеграции", "crm", "bitrix", "битрикс", "amo",
+            "webhook", "api", "oauth",
+        ],
+    },
+]
+
+
+def _topic_matches(text: str, keywords: list[str]) -> bool:
+    t = (text or "").lower()
+    if not t:
+        return False
+    return any(k in t for k in keywords)
 
 
 @router.post("/portals/{portal_id}/web/register")
@@ -819,8 +962,11 @@ async def register_web_from_bitrix(
     portal.metadata_json = json.dumps(meta, ensure_ascii=False)
     db.add(portal)
     db.commit()
-    demo_until = (user.created_at + timedelta(days=7)).date().isoformat()
-    return {"status": "ok", "email": user.email, "demo_until": demo_until}
+    token = create_email_token(db, user.id)
+    ok, err = send_registration_email(db, user, token)
+    if not ok:
+        raise HTTPException(status_code=500, detail=err or "email_send_failed")
+    return {"status": "confirm_required", "email": user.email}
 
 
 @router.post("/portals/{portal_id}/web/link/request")
@@ -909,6 +1055,8 @@ async def login_web_from_bitrix(
     user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid_credentials")
+    if not user.email_verified_at:
+        raise HTTPException(status_code=403, detail="email_not_verified")
     if not user.portal_id:
         raise HTTPException(status_code=400, detail="missing_portal")
     if int(user.portal_id) == int(portal_id):
@@ -993,9 +1141,78 @@ async def get_portal_kb_files(
             "audience": f.audience or "staff",
             "status": f.status,
             "error_message": f.error_message,
+            "uploaded_by_type": f.uploaded_by_type,
+            "uploaded_by_id": f.uploaded_by_id,
+            "uploaded_by_name": f.uploaded_by_name,
+            "query_count": int(f.query_count or 0),
             "created_at": f.created_at.isoformat() if f.created_at else None,
         })
     return JSONResponse({"items": items})
+
+
+@router.get("/portals/{portal_id}/kb/search")
+async def search_portal_kb(
+    portal_id: int,
+    q: str,
+    limit: int = 50,
+    audience: str | None = None,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    if not q:
+        return JSONResponse({"file_ids": [], "matches": []})
+    aud = (audience or "staff").strip().lower()
+    if aud not in ("staff", "client"):
+        aud = "staff"
+    like_q = f"%{q}%"
+    rows = db.execute(
+        select(KBFile.id, KBFile.filename, KBChunk.text)
+        .join(KBChunk, KBChunk.file_id == KBFile.id)
+        .where(
+            KBFile.portal_id == portal_id,
+            KBFile.audience == aud,
+            KBChunk.portal_id == portal_id,
+            (KBChunk.text.ilike(like_q) | KBFile.filename.ilike(like_q)),
+        )
+        .order_by(KBFile.id.desc())
+        .limit(max(1, min(limit, 200)))
+    ).all()
+    file_ids: list[int] = []
+    matches = []
+    seen: set[int] = set()
+    for fid, fname, text in rows:
+        if fid in seen:
+            continue
+        seen.add(fid)
+        file_ids.append(int(fid))
+        snippet = (text or "").strip().replace("\n", " ")
+        if len(snippet) > 160:
+            snippet = snippet[:160] + "..."
+        matches.append({"file_id": int(fid), "filename": fname, "snippet": snippet})
+    return JSONResponse({"file_ids": file_ids, "matches": matches})
+
+
+@router.post("/portals/{portal_id}/kb/ask")
+async def ask_portal_kb(
+    portal_id: int,
+    body: KBAskBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    query = (body.query or "").strip()
+    if not query:
+        return JSONResponse({"error": "empty_query"}, status_code=400)
+    aud = (body.audience or "staff").strip().lower()
+    if aud not in ("staff", "client"):
+        aud = "staff"
+    answer, err, _usage = answer_from_kb(db, portal_id, query, audience=aud)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    return JSONResponse({"answer": answer})
 
 
 @router.post("/portals/{portal_id}/kb/files/upload")
@@ -1017,6 +1234,7 @@ async def upload_portal_kb_file(
     suffix = uuid.uuid4().hex[:8]
     dst_path = os.path.join(portal_dir, f"{suffix}_{safe_name}")
     size, sha256 = save_upload(file.file, dst_path)
+    uploader_type, uploader_id, uploader_name = _resolve_uploader(db, portal_id, request)
     aud = (audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
@@ -1029,6 +1247,9 @@ async def upload_portal_kb_file(
         storage_path=dst_path,
         sha256=sha256,
         status="uploaded",
+        uploaded_by_type=uploader_type,
+        uploaded_by_id=uploader_id,
+        uploaded_by_name=uploader_name,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -1171,6 +1392,318 @@ async def delete_kb_file(
     return JSONResponse({"status": "ok"})
 
 
+@router.get("/portals/{portal_id}/kb/collections")
+async def list_kb_collections(
+    portal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    rows = db.execute(
+        select(KBCollection).where(KBCollection.portal_id == portal_id).order_by(KBCollection.id.desc())
+    ).scalars().all()
+    if rows:
+        counts = dict(db.execute(
+            select(KBCollectionFile.collection_id, func.count())
+            .where(KBCollectionFile.collection_id.in_([r.id for r in rows]))
+            .group_by(KBCollectionFile.collection_id)
+        ).all())
+    else:
+        counts = {}
+    return JSONResponse({
+        "items": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "color": c.color,
+                "file_count": int(counts.get(c.id) or 0),
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+            for c in rows
+        ]
+    })
+
+
+@router.post("/portals/{portal_id}/kb/collections")
+async def create_kb_collection(
+    portal_id: int,
+    request: Request,
+    body: CollectionBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    name = (body.name or "").strip()
+    if not name:
+        return JSONResponse({"error": "missing_name"}, status_code=400)
+    rec = KBCollection(
+        portal_id=portal_id,
+        name=name[:128],
+        color=(body.color or "").strip() or None,
+        created_at=datetime.utcnow(),
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return JSONResponse({"id": rec.id, "name": rec.name, "color": rec.color})
+
+
+@router.patch("/portals/{portal_id}/kb/collections/{collection_id}")
+async def update_kb_collection(
+    portal_id: int,
+    collection_id: int,
+    request: Request,
+    body: CollectionBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    rec = db.execute(
+        select(KBCollection).where(KBCollection.id == collection_id, KBCollection.portal_id == portal_id)
+    ).scalar_one_or_none()
+    if not rec:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    if body.name is not None:
+        name = (body.name or "").strip()
+        if name:
+            rec.name = name[:128]
+    if body.color is not None:
+        rec.color = (body.color or "").strip() or None
+    db.add(rec)
+    db.commit()
+    return JSONResponse({"status": "ok"})
+
+
+@router.delete("/portals/{portal_id}/kb/collections/{collection_id}")
+async def delete_kb_collection(
+    portal_id: int,
+    collection_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    db.execute(
+        delete(KBCollectionFile).where(KBCollectionFile.collection_id == collection_id)
+    )
+    db.execute(
+        delete(KBCollection).where(KBCollection.id == collection_id, KBCollection.portal_id == portal_id)
+    )
+    db.commit()
+    return JSONResponse({"status": "ok"})
+
+
+@router.post("/portals/{portal_id}/kb/collections/{collection_id}/files")
+async def add_file_to_collection(
+    portal_id: int,
+    collection_id: int,
+    request: Request,
+    body: CollectionFileBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    rec = db.execute(
+        select(KBCollection).where(KBCollection.id == collection_id, KBCollection.portal_id == portal_id)
+    ).scalar_one_or_none()
+    if not rec:
+        return JSONResponse({"error": "collection_not_found"}, status_code=404)
+    file_rec = db.execute(
+        select(KBFile).where(KBFile.id == body.file_id, KBFile.portal_id == portal_id)
+    ).scalar_one_or_none()
+    if not file_rec:
+        return JSONResponse({"error": "file_not_found"}, status_code=404)
+    settings = get_portal_kb_settings(db, portal_id)
+    multi = bool(settings.get("collections_multi_assign")) if settings.get("collections_multi_assign") is not None else True
+    if not multi:
+        db.execute(delete(KBCollectionFile).where(KBCollectionFile.file_id == file_rec.id))
+    exists = db.execute(
+        select(KBCollectionFile).where(
+            KBCollectionFile.collection_id == collection_id,
+            KBCollectionFile.file_id == file_rec.id,
+        )
+    ).scalar_one_or_none()
+    if not exists:
+        db.add(KBCollectionFile(collection_id=collection_id, file_id=file_rec.id, created_at=datetime.utcnow()))
+        db.commit()
+    return JSONResponse({"status": "ok"})
+
+
+@router.get("/portals/{portal_id}/kb/collections/{collection_id}/files")
+async def list_collection_files(
+    portal_id: int,
+    collection_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    rows = db.execute(
+        select(KBCollectionFile.file_id)
+        .where(KBCollectionFile.collection_id == collection_id)
+    ).scalars().all()
+    return JSONResponse({"file_ids": [int(x) for x in rows]})
+
+
+@router.delete("/portals/{portal_id}/kb/collections/{collection_id}/files/{file_id}")
+async def remove_file_from_collection(
+    portal_id: int,
+    collection_id: int,
+    file_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    db.execute(
+        delete(KBCollectionFile).where(
+            KBCollectionFile.collection_id == collection_id,
+            KBCollectionFile.file_id == file_id,
+        )
+    )
+    db.commit()
+    return JSONResponse({"status": "ok"})
+
+
+@router.get("/portals/{portal_id}/kb/smart-folders")
+async def list_kb_smart_folders(
+    portal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    rows = db.execute(
+        select(KBSmartFolder).where(KBSmartFolder.portal_id == portal_id).order_by(KBSmartFolder.id.desc())
+    ).scalars().all()
+    return JSONResponse({
+        "items": [
+            {
+                "id": r.id,
+                "name": r.name,
+                "system_tag": r.system_tag,
+                "rules": r.rules_json or {},
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+    })
+
+
+@router.post("/portals/{portal_id}/kb/smart-folders")
+async def create_kb_smart_folder(
+    portal_id: int,
+    request: Request,
+    body: SmartFolderBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    name = (body.name or "").strip()
+    if not name:
+        return JSONResponse({"error": "missing_name"}, status_code=400)
+    rec = KBSmartFolder(
+        portal_id=portal_id,
+        name=name[:128],
+        system_tag=(body.system_tag or "").strip() or None,
+        rules_json=body.rules_json or {},
+        created_at=datetime.utcnow(),
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return JSONResponse({"id": rec.id, "name": rec.name})
+
+
+@router.delete("/portals/{portal_id}/kb/smart-folders/{folder_id}")
+async def delete_kb_smart_folder(
+    portal_id: int,
+    folder_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    db.execute(
+        delete(KBSmartFolder).where(KBSmartFolder.id == folder_id, KBSmartFolder.portal_id == portal_id)
+    )
+    db.commit()
+    return JSONResponse({"status": "ok"})
+
+
+@router.get("/portals/{portal_id}/kb/topics")
+async def get_kb_topics(
+    portal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    files = db.execute(
+        select(KBFile.id, KBFile.filename)
+        .where(KBFile.portal_id == portal_id)
+        .order_by(KBFile.id.desc())
+    ).all()
+    topic_hits: dict[str, list[int]] = {t["id"]: [] for t in _KB_TOPICS}
+    for file_id, filename in files:
+        chunks = db.execute(
+            select(KBChunk.text)
+            .where(KBChunk.portal_id == portal_id, KBChunk.file_id == file_id)
+            .limit(20)
+        ).scalars().all()
+        text = (filename or "") + " " + " ".join(chunks)
+        for t in _KB_TOPICS:
+            if _topic_matches(text, t["keywords"]):
+                topic_hits[t["id"]].append(int(file_id))
+    settings = get_portal_kb_settings(db, portal_id)
+    threshold = int(settings.get("smart_folder_threshold") or 5)
+    existing = db.execute(
+        select(KBSmartFolder.system_tag)
+        .where(KBSmartFolder.portal_id == portal_id, KBSmartFolder.system_tag.isnot(None))
+    ).scalars().all()
+    existing_tags = {str(x) for x in existing if x}
+    topics_out = []
+    suggestions = []
+    for t in _KB_TOPICS:
+        ids = topic_hits.get(t["id"], [])
+        topics_out.append({
+            "id": t["id"],
+            "name": t["name"],
+            "count": len(ids),
+            "file_ids": ids,
+        })
+        if len(ids) >= threshold and t["id"] not in existing_tags:
+            suggestions.append({"id": t["id"], "name": t["name"], "count": len(ids)})
+    return JSONResponse({
+        "threshold": threshold,
+        "topics": topics_out,
+        "suggestions": suggestions,
+    })
+
+
 @router.get("/portals/{portal_id}/kb/settings")
 async def get_portal_kb_settings_api(
     portal_id: int,
@@ -1206,6 +1739,8 @@ class PortalKBSettingsBody(BaseModel):
     system_prompt_extra: str | None = None
     show_sources: bool | None = None
     sources_format: str | None = None
+    collections_multi_assign: bool | None = None
+    smart_folder_threshold: int | None = None
 
 
 class PortalKBSourceBody(BaseModel):
@@ -1249,6 +1784,8 @@ async def set_portal_kb_settings_api(
         system_prompt_extra=body.system_prompt_extra,
         show_sources=body.show_sources,
         sources_format=body.sources_format,
+        collections_multi_assign=body.collections_multi_assign,
+        smart_folder_threshold=body.smart_folder_threshold,
     )
     return JSONResponse(out)
 
@@ -1373,6 +1910,58 @@ async def set_portal_telegram_client_settings(
         "bot_username": bot_info.get("username") if bot_info else None,
         "bot_id": bot_info.get("id") if bot_info else None,
     })
+
+
+@router.post("/portals/{portal_id}/bitrix/credentials")
+async def set_portal_bitrix_credentials(
+    portal_id: int,
+    body: LocalBitrixCredentialsBody,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    portal = _require_portal_admin(db, portal_id, request)
+    client_id = (body.client_id or "").strip()
+    client_secret = (body.client_secret or "").strip()
+    if not client_id or not client_secret:
+        return JSONResponse({"error": "client_id/client_secret required"}, status_code=400)
+    s = get_settings()
+    enc = s.token_encryption_key or s.secret_key
+    portal.local_client_id = client_id
+    portal.local_client_secret_encrypted = encrypt_token(client_secret, enc)
+    db.add(portal)
+    db.commit()
+    masked = f"{client_id[:6]}...{client_id[-4:]}" if len(client_id) > 10 else f"{client_id[:2]}...{client_id[-2:]}"
+    refreshed = False
+    refresh_error = None
+    try:
+        refresh_portal_tokens(db, portal_id, trace_id=_trace_id(request))
+        refreshed = True
+    except BitrixAuthError as e:
+        refresh_error = e.code
+    return JSONResponse({"ok": True, "client_id_masked": masked, "refreshed": refreshed, "refresh_error": refresh_error})
+
+
+@router.get("/portals/{portal_id}/bitrix/credentials")
+async def get_portal_bitrix_credentials(
+    portal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    _require_portal_admin(db, portal_id, request)
+    portal = db.get(Portal, portal_id)
+    if not portal:
+        return JSONResponse({"error": "portal_not_found"}, status_code=404)
+    client_id = portal.local_client_id or ""
+    if not client_id:
+        return JSONResponse({"ok": True, "client_id_masked": ""})
+    masked = f"{client_id[:6]}...{client_id[-4:]}" if len(client_id) > 10 else f"{client_id[:2]}...{client_id[-2:]}"
+    return JSONResponse({"ok": True, "client_id_masked": masked})
 
 
 @router.get("/portals/{portal_id}/botflow/client")
@@ -1932,10 +2521,9 @@ async def delete_portal_web_user(
 @router.post("/install")
 async def bitrix_install_post(request: Request, db: Session = Depends(get_db)):
     """Fallback: Bitrix POST с AUTH_ID в query/form. Если нет токена — отдаём HTML UI."""
-    if not _is_json_api_request(request):
-        return _html_ui_response(_load_install_html())
     merged = await parse_bitrix_body(request)
     tid = _trace_id(request)
+    is_json = _is_json_api_request(request)
     (
         access_token,
         refresh_token,
@@ -1946,13 +2534,13 @@ async def bitrix_install_post(request: Request, db: Session = Depends(get_db)):
         local_client_secret,
         user_id,
     ) = _parse_install_auth(merged)
-    if not domain:
+    if not domain or not access_token:
+        if not is_json:
+            return _html_ui_response(_load_install_html())
         return JSONResponse(
-            {"error": "Missing domain", "status": "error", "trace_id": tid},
+            {"error": "Missing domain or access_token", "status": "error", "trace_id": tid},
             status_code=400,
         )
-    if not access_token:
-        return _html_ui_response(_load_install_html())
     domain_clean = _domain_clean(domain)
     s = get_settings()
     enc_key = s.token_encryption_key or s.secret_key
@@ -1980,7 +2568,23 @@ async def bitrix_install_post(request: Request, db: Session = Depends(get_db)):
             portal.admin_user_id = user_id
         db.commit()
     save_tokens(db, portal.id, access_token, refresh_token or "", 3600)
+    logger.info(
+        "bitrix_install_payload %s",
+        json.dumps(
+            {
+                "trace_id": tid,
+                "portal_id": portal.id,
+                "is_json": is_json,
+                "has_local_client_id": bool(local_client_id),
+                "has_local_client_secret": bool(local_client_secret),
+                "merged_keys": sorted([k for k in merged.keys() if k and k.upper() not in {"AUTH_ID", "REFRESH_ID", "ACCESS_TOKEN", "REFRESH_TOKEN"}])[:50],
+            },
+            ensure_ascii=False,
+        ),
+    )
     portal_token = create_portal_token_with_user(portal.id, user_id, expires_minutes=15)
+    if not is_json:
+        return _html_ui_response(_load_install_html())
     return JSONResponse({"status": "ok", "portal_id": portal.id, "portal_token": portal_token})
 
 
@@ -2096,6 +2700,10 @@ async def bitrix_events(request: Request, db: Session = Depends(get_db)):
             auth = {}
     if not isinstance(auth, dict):
         auth = {}
+    if event == "ONIMBOTMESSAGEADD":
+        domain = (auth.get("domain") or auth.get("DOMAIN") or "").strip()
+        if not domain:
+            return JSONResponse({"status": "ok", "event": event, "trace_id": tid})
     if event == "ONIMBOTMESSAGEADD":
         result = process_imbot_message(db, data, auth)
         return JSONResponse(result)

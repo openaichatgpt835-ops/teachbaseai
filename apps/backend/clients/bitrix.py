@@ -532,20 +532,23 @@ def user_get(
     Список пользователей (user.get). Требует scope user.
     Возвращает (list пользователей, error_code или None).
     """
-    result = rest_call(
+    result, err, err_desc, _status = rest_call_result_detailed(
         domain,
         access_token,
         "user.get",
         {"start": start, "filter": {"ACTIVE": True}},
     )
-    if result is None:
-        return [], "rest_error"
-    if result.get("error"):
+    if err:
+        desc = (err_desc or "").lower()
+        if "insufficient" in desc or "scope" in desc or "access" in desc:
+            return [], "missing_scope_user"
+        return [], err
+    if result and result.get("error"):
         desc = (result.get("error_description") or "").lower()
         if "insufficient" in desc or "scope" in desc or "access" in desc:
             return [], "missing_scope_user"
         return [], result.get("error", "unknown")
-    items = result.get("result") or []
+    items = (result or {}).get("result") or []
     return items[:limit], None
 
 

@@ -10,7 +10,16 @@ from apps.backend.models.admin import AdminUser
 from apps.backend.models.bitrix_log import BitrixHttpLog
 from apps.backend.models.bitrix_inbound_event import BitrixInboundEvent
 from apps.backend.models.app_setting import AppSetting
-from apps.backend.models.kb import KBFile, KBChunk, KBEmbedding, KBSource, KBJob
+from apps.backend.models.kb import (
+    KBFile,
+    KBChunk,
+    KBEmbedding,
+    KBSource,
+    KBJob,
+    KBCollection,
+    KBCollectionFile,
+    KBSmartFolder,
+)
 from apps.backend.models.portal_kb_setting import PortalKBSetting
 from apps.backend.models.portal_telegram_setting import PortalTelegramSetting
 from apps.backend.models.portal_bot_flow import PortalBotFlow
@@ -46,6 +55,9 @@ __all__ = [
     "KBEmbedding",
     "KBSource",
     "KBJob",
+    "KBCollection",
+    "KBCollectionFile",
+    "KBSmartFolder",
     "PortalTopicSummary",
     "WebUser",
     "WebSession",

@@ -1,6 +1,9 @@
 """Точка входа FastAPI."""
 import logging
 import uuid
+import threading
+import time
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -15,6 +18,8 @@ from apps.backend.routers import admin_dialogs, admin_events, admin_outbox
 from apps.backend.routers import admin_system, admin_logs, admin_traces, admin_debug
 from apps.backend.routers import admin_settings, admin_inbound_events, admin_billing, admin_registrations
 from apps.backend.routers import bitrix, portal, debug, admin_kb, telegram, web_auth
+from apps.backend.services.token_refresh_daemon import refresh_tokens_once
+from apps.backend.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +43,23 @@ def _is_bitrix_xhr_path(path: str) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    stop_event = threading.Event()
+    s = get_settings()
+    if s.token_refresh_enabled and not (bool(os.environ.get("PYTEST_CURRENT_TEST")) or os.environ.get("TESTING") == "1"):
+        interval_sec = max(300, int(s.token_refresh_interval_minutes or 30) * 60)
+
+        def _loop():
+            # initial delay to allow app startup
+            time.sleep(5)
+            while not stop_event.is_set():
+                refresh_tokens_once(skew_seconds=interval_sec)
+                stop_event.wait(interval_sec)
+
+        t = threading.Thread(target=_loop, name="token_refresh_daemon", daemon=True)
+        t.start()
+        app.state.token_refresh_thread = t
     yield
-    # shutdown
+    stop_event.set()
 
 
 app = FastAPI(

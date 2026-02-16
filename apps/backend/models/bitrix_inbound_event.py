@@ -10,7 +10,7 @@ from apps.backend.database import Base
 class BitrixInboundEvent(Base):
     __tablename__ = "bitrix_inbound_events"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     trace_id = Column(String(64), index=True)
     portal_id = Column(Integer, ForeignKey("portals.id"), index=True)

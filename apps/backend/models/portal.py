@@ -1,4 +1,4 @@
-"""Модели порталов и токенов."""
+"""Portal and token models."""
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
@@ -15,11 +15,11 @@ class Portal(Base):
     application_token = Column(String(128), index=True)
     status = Column(String(32), default="pending")  # pending, active, error, suspended
     install_type = Column(String(16), default="unknown")  # local | market | unknown
-    local_client_id = Column(String(128), index=True)  # local.* для Local App, per-portal
-    local_client_secret_encrypted = Column(Text)  # ����������, �� � env
+    local_client_id = Column(String(128), index=True)  # local.* for Local App, per-portal
+    local_client_secret_encrypted = Column(Text)  # encrypted, stored in env
     admin_user_id = Column(Integer, nullable=True, index=True)  # Bitrix portal admin (installer)
     metadata_json = Column(Text)
-    welcome_message = Column(Text, nullable=False, default="Привет! Я Teachbase AI. Напишите «ping» — отвечу «pong».")
+    welcome_message = Column(Text, nullable=False, default="Hello! I am Teachbase AI. Type \"ping\" and I will reply \"pong\".")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

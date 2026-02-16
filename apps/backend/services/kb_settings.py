@@ -101,6 +101,8 @@ def get_bot_settings(db: Session) -> dict[str, Any]:
         "system_prompt_extra": (data.get("system_prompt_extra") or ""),
         "show_sources": bool(data.get("show_sources")) if data.get("show_sources") is not None else True,
         "sources_format": (data.get("sources_format") or "detailed"),
+        "collections_multi_assign": bool(data.get("collections_multi_assign")) if data.get("collections_multi_assign") is not None else True,
+        "smart_folder_threshold": int(data.get("smart_folder_threshold") or 5),
     }
 
 
@@ -137,6 +139,8 @@ def get_portal_bot_settings(db: Session, portal_id: int) -> dict[str, Any]:
             "use_history": None,
             "use_cache": None,
             "system_prompt_extra": None,
+            "collections_multi_assign": None,
+            "smart_folder_threshold": None,
         }
     return {
         "temperature": row.temperature,
@@ -154,6 +158,8 @@ def get_portal_bot_settings(db: Session, portal_id: int) -> dict[str, Any]:
         "use_history": row.use_history,
         "use_cache": row.use_cache,
         "system_prompt_extra": row.system_prompt_extra,
+        "collections_multi_assign": row.collections_multi_assign,
+        "smart_folder_threshold": row.smart_folder_threshold,
     }
 
 
@@ -167,6 +173,8 @@ def get_portal_kb_settings(db: Session, portal_id: int) -> dict[str, Any]:
             "prompt_preset": "auto",
             "show_sources": True,
             "sources_format": "detailed",
+            "collections_multi_assign": True,
+            "smart_folder_threshold": 5,
             **get_portal_bot_settings(db, portal_id),
         }
     return {
@@ -176,6 +184,8 @@ def get_portal_kb_settings(db: Session, portal_id: int) -> dict[str, Any]:
         "prompt_preset": row.prompt_preset or "auto",
         "show_sources": row.show_sources if row.show_sources is not None else True,
         "sources_format": row.sources_format or "detailed",
+        "collections_multi_assign": row.collections_multi_assign if row.collections_multi_assign is not None else True,
+        "smart_folder_threshold": row.smart_folder_threshold if row.smart_folder_threshold is not None else 5,
         **get_portal_bot_settings(db, portal_id),
     }
 
@@ -205,6 +215,8 @@ def set_portal_kb_settings(
     system_prompt_extra: str | None = None,
     show_sources: bool | None = None,
     sources_format: str | None = None,
+    collections_multi_assign: bool | None = None,
+    smart_folder_threshold: int | None = None,
 ) -> dict[str, Any]:
     row = db.get(PortalKBSetting, portal_id)
     if not row:
@@ -252,6 +264,10 @@ def set_portal_kb_settings(
         row.show_sources = bool(show_sources)
     if sources_format is not None:
         row.sources_format = (sources_format or "").strip() or None
+    if collections_multi_assign is not None:
+        row.collections_multi_assign = bool(collections_multi_assign)
+    if smart_folder_threshold is not None:
+        row.smart_folder_threshold = int(smart_folder_threshold)
     from datetime import datetime
     row.updated_at = datetime.utcnow()
     db.commit()
@@ -297,6 +313,8 @@ def get_effective_gigachat_settings(db: Session, portal_id: int) -> dict[str, An
         "system_prompt_extra",
         "show_sources",
         "sources_format",
+        "collections_multi_assign",
+        "smart_folder_threshold",
     ):
         if p.get(k) is not None:
             base[k] = p.get(k)
@@ -308,13 +326,13 @@ def set_gigachat_settings(
     db: Session,
     api_base: str | None,
     model: str | None,
-    embedding_model: str | None,
-    chat_model: str | None,
-    client_id: str | None,
-    auth_key: str | None,
-    scope: str | None,
-    client_secret: str | None,
-    access_token: str | None,
+    embedding_model: str | None = None,
+    chat_model: str | None = None,
+    client_id: str | None = None,
+    auth_key: str | None = None,
+    scope: str | None = None,
+    client_secret: str | None = None,
+    access_token: str | None = None,
     access_token_expires_at: int | None = None,
 ) -> dict[str, Any]:
     row = db.get(AppSetting, SETTINGS_KEY)

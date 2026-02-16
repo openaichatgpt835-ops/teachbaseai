@@ -15,7 +15,7 @@ from apps.backend.auth import get_current_admin
 from apps.backend.models.portal import Portal, PortalUsersAccess, PortalToken
 from apps.backend.models.event import Event
 from apps.backend.models.bitrix_log import BitrixHttpLog
-from apps.backend.services.portal_tokens import BitrixAuthError, ensure_fresh_access_token
+from apps.backend.services.portal_tokens import BitrixAuthError, ensure_fresh_access_token, refresh_portal_tokens
 from apps.backend.services.token_crypto import encrypt_token
 from apps.backend.config import get_settings
 from apps.backend.services.bitrix_auth import rest_call_with_refresh
@@ -458,8 +458,8 @@ def admin_portal_refresh_bitrix_token(
     """Принудительное обновление Bitrix OAuth токенов (для диагностики)."""
     trace_id = str(uuid.uuid4())[:16]
     try:
-        token = ensure_fresh_access_token(db, portal_id, trace_id=trace_id, force=True)
-        _ = token  # token is not returned
+        refreshed = refresh_portal_tokens(db, portal_id, trace_id=trace_id)
+        expires_in = refreshed.get("expires_in") if isinstance(refreshed, dict) else None
     except BitrixAuthError as e:
         return {
             "ok": False,
@@ -468,6 +468,12 @@ def admin_portal_refresh_bitrix_token(
             "error_code": e.code,
             "notes": e.detail,
         }
+    return {
+        "ok": True,
+        "trace_id": trace_id,
+        "portal_id": portal_id,
+        "expires_in": expires_in,
+    }
     row = db.execute(select(PortalToken).where(PortalToken.portal_id == portal_id)).scalar_one_or_none()
     expires_in = int((row.expires_at - row.updated_at).total_seconds()) if row and row.expires_at and row.updated_at else 0
     expires_at = row.expires_at.isoformat() if row and row.expires_at else None
@@ -504,6 +510,8 @@ def admin_portal_auth_status(
     using_global_env = bool(s.bitrix_client_id and s.bitrix_client_secret)
     return {
         "portal_id": portal_id,
+        "has_client_id": has_client_id,
+        "has_client_secret": has_client_secret,
         "has_local_client_id": has_client_id,
         "has_local_client_secret": has_client_secret,
         "using_global_env": using_global_env,
@@ -542,6 +550,16 @@ def admin_portal_set_bitrix_credentials(
         "client_secret_len": len(client_secret),
         "client_secret_sha256": hashlib.sha256(client_secret.encode()).hexdigest()[:12],
     }
+
+
+@router.post("/{portal_id}/auth/set-bitrix-credentials")
+def admin_portal_set_bitrix_credentials_alias(
+    portal_id: int,
+    data: BitrixCredentialsBody,
+    db: Session = Depends(get_db),
+    admin: dict = Depends(get_current_admin),
+):
+    return admin_portal_set_bitrix_credentials(portal_id, data, db, admin)
 
 
 @router.post("/{portal_id}/bot/reset")

@@ -38,6 +38,10 @@ class KBFile(Base):
     sha256 = Column(String(64), nullable=True, index=True)
     status = Column(String(32), nullable=False, default="uploaded")  # uploaded|queued|processing|ready|error
     error_message = Column(Text, nullable=True)
+    uploaded_by_type = Column(String(32), nullable=True)  # web|bitrix|telegram|system
+    uploaded_by_id = Column(String(64), nullable=True)
+    uploaded_by_name = Column(String(128), nullable=True)
+    query_count = Column(Integer, nullable=False, default=0)
     processed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -107,3 +111,36 @@ class KBJob(Base):
     __table_args__ = (
         Index("ix_kb_jobs_portal_status", "portal_id", "status"),
     )
+
+
+class KBCollection(Base):
+    __tablename__ = "kb_collections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    color = Column(String(32), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class KBCollectionFile(Base):
+    __tablename__ = "kb_collection_files"
+
+    collection_id = Column(Integer, ForeignKey("kb_collections.id"), primary_key=True)
+    file_id = Column(Integer, ForeignKey("kb_files.id"), primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_kb_collection_files_file", "file_id"),
+    )
+
+
+class KBSmartFolder(Base):
+    __tablename__ = "kb_smart_folders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    system_tag = Column(String(64), nullable=True)  # auto topic id if system
+    rules_json = Column(JSONB, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

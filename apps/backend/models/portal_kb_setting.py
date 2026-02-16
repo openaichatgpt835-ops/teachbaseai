@@ -31,4 +31,6 @@ class PortalKBSetting(Base):
     system_prompt_extra = Column(Text, nullable=True)
     show_sources = Column(Boolean, nullable=True)
     sources_format = Column(String(16), nullable=True)
+    collections_multi_assign = Column(Boolean, nullable=True)
+    smart_folder_threshold = Column(Integer, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)

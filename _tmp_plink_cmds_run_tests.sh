@@ -1,0 +1,1 @@
+cd /opt/teachbaseai; . .venv/bin/activate; pytest; if [ -f scripts/smoke_botflow_ui_simplified.sh ]; then bash scripts/smoke_botflow_ui_simplified.sh; elif [ -f scripts/smoke.sh ]; then bash scripts/smoke.sh; else echo  NO_SMOKE_SCRIPT; fi

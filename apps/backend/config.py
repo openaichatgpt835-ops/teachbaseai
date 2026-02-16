@@ -36,6 +36,8 @@ class Settings(BaseSettings):
 
     debug_endpoints_enabled: bool = False
     kb_storage_path: str = "/app/storage/kb"
+    token_refresh_enabled: bool = True
+    token_refresh_interval_minutes: int = 30
 
 
 @lru_cache

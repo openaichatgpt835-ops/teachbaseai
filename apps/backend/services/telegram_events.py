@@ -184,6 +184,9 @@ def process_telegram_update(
             storage_path=dst_path,
             sha256="",
             status="uploaded",
+            uploaded_by_type="telegram",
+            uploaded_by_id=str(chat_id),
+            uploaded_by_name=sender_username or (access_row.display_name if access_row else None),
         )
         db.add(rec)
         db.commit()

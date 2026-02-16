@@ -7,10 +7,13 @@ export function WebLoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [resendBusy, setResendBusy] = useState(false);
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setInfo("");
     if (!email || !password) {
       setError("Укажите email и пароль.");
       return;
@@ -23,6 +26,10 @@ export function WebLoginPage() {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
+        if (data?.detail === "email_not_verified") {
+          setError("Подтвердите email. Мы отправили письмо при регистрации.");
+          return;
+        }
         setError(data?.detail || "Неверный email или пароль.");
         return;
       }
@@ -37,11 +44,42 @@ export function WebLoginPage() {
     }
   };
 
+  const resendConfirm = async () => {
+    if (!email) {
+      setError("Введите email для повторной отправки.");
+      return;
+    }
+    setResendBusy(true);
+    setError("");
+    setInfo("");
+    try {
+      const res = await fetch("/v1/web/auth/resend-confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        setError(data?.detail || "Не удалось отправить письмо.");
+        return;
+      }
+      if (data?.status === "already_verified") {
+        setInfo("Email уже подтверждён. Попробуйте войти.");
+        return;
+      }
+      setInfo("Письмо отправлено повторно. Проверьте почту.");
+    } catch {
+      setError("Сервис временно недоступен.");
+    } finally {
+      setResendBusy(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-sky-50 flex items-center justify-center px-6">
       <div className="w-full max-w-md bg-white rounded-3xl shadow-lg border border-slate-100 p-8">
         <h1 className="text-2xl font-semibold text-slate-900">Вход в кабинет</h1>
-        <p className="text-xs text-slate-500 mt-1">Email + пароль. Пока без подтверждения.</p>
+        <p className="text-xs text-slate-500 mt-1">Email + пароль. Подтвердите email для входа.</p>
         <form className="mt-6 space-y-4" onSubmit={onSubmit}>
           <div>
             <label className="text-xs text-slate-600">Email</label>
@@ -68,8 +106,21 @@ export function WebLoginPage() {
               {error}
             </div>
           )}
+          {info && (
+            <div className="rounded-xl bg-emerald-50 text-emerald-700 text-xs px-3 py-2">
+              {info}
+            </div>
+          )}
           <button className="w-full rounded-xl bg-sky-600 text-white py-2 text-sm font-semibold hover:bg-sky-700">
             Войти
+          </button>
+          <button
+            type="button"
+            className="w-full rounded-xl border border-slate-200 bg-white py-2 text-xs font-semibold text-slate-600"
+            onClick={resendConfirm}
+            disabled={resendBusy}
+          >
+            {resendBusy ? "Отправка..." : "Отправить письмо ещё раз"}
           </button>
         </form>
         <div className="mt-4 text-xs text-slate-500">

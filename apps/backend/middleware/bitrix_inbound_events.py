@@ -1,7 +1,7 @@
 """Middleware: blackbox logging for POST /v1/bitrix/events only. ASGI: reads body once, logs, replays body to handler."""
 import logging
 
-from apps.backend.database import get_session_factory
+from apps.backend import database
 from apps.backend.middleware.trace_id import ensure_trace_id
 from apps.backend.services.bitrix_inbound_log import (
     build_inbound_event_record,
@@ -79,7 +79,7 @@ class BitrixInboundEventsMiddleware:
         body_bytes = b"".join(body_chunks)
 
         try:
-            factory = get_session_factory()
+            factory = database.get_session_factory()
             with factory() as db:
                 settings = get_inbound_settings(db)
                 if not settings.get("enabled", True):

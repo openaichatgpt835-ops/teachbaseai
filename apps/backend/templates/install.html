@@ -270,6 +270,26 @@
   let allUsers = [];
   let accessUserIds = new Set();
 
+  function getQueryParams() {
+    try {
+      const params = new URLSearchParams(window.location.search || '');
+      const out = {};
+      params.forEach(function(value, key) {
+        if (key && value != null && value !== '') out[key] = value;
+      });
+      return out;
+    } catch (e) {
+      return {};
+    }
+  }
+
+  const queryParams = getQueryParams();
+
+  function mergeAuthWithQuery(auth) {
+    if (!auth || typeof auth !== 'object') auth = {};
+    return Object.assign({}, queryParams, auth);
+  }
+
   function renderUsers(filter) {
     const q = (filter || '').toLowerCase();
     const filtered = q
@@ -406,7 +426,7 @@
   }
 
   function installStepComplete(selectedIds) {
-    const payload = { user_ids: selectedIds, auth: authData };
+    const payload = { user_ids: selectedIds, auth: mergeAuthWithQuery(authData) };
     return apiPost('/install/complete', payload).then(function(r) {
       return parseJsonOrThrow(r).then(function(data){ return { r: r, data: data }; });
     });
@@ -445,7 +465,7 @@
     b24Instance = $b24;
     if ($b24.auth && typeof $b24.auth.getAuthData === 'function') {
       const auth = $b24.auth.getAuthData() || {};
-      authData = auth;
+      authData = mergeAuthWithQuery(auth);
       setStatus('Получение списка сотрудников...');
       apiPost('/session/start', { auth: authData }).then(function(r){ return parseJsonOrThrow(r); })
         .then(function(session) {
@@ -470,7 +490,7 @@
     $b24.callMethod('app.info', {}, function(appInfo) {
       $b24.callMethod('user.current', {}, function(userInfo) {
         const auth = Object.assign({}, appInfo, userInfo);
-        authData = auth;
+        authData = mergeAuthWithQuery(auth);
         setStatus('Получение списка сотрудников...');
         apiPost('/session/start', { auth: authData }).then(function(r){ return parseJsonOrThrow(r); })
           .then(function(session) {

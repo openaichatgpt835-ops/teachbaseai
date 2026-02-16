@@ -1,0 +1,331 @@
+﻿:root {
+  --tb-ink: #0f172a;
+  --tb-muted: #5c6b84;
+  --tb-accent: #2563eb;
+  --tb-accent-2: #14b8a6;
+  --tb-accent-3: #f59e0b;
+  --tb-surface: #ffffff;
+  --tb-surface-2: #f6f8ff;
+  --tb-border: #d6e2ff;
+  --tb-shadow: 0 14px 30px rgba(15, 23, 42, 0.1);
+  --tb-grid-dot: rgba(37, 99, 235, 0.16);
+}
+
+.tb-flow {
+  grid-column: 1 / -1;
+}
+
+.tb-flow-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.tb-flow-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+  border: 1px dashed #cbd5f5;
+  border-radius: 10px;
+}
+
+.tb-flow-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.tb-flow-canvas {
+  position: relative;
+  min-height: 320px;
+  border: 1px dashed #cbd5f5;
+  border-radius: 14px;
+  background: radial-gradient(circle at 12px 12px, var(--tb-grid-dot) 1.4px, transparent 1.4px) 0 0/26px 26px;
+  margin-bottom: 10px;
+  overflow: auto;
+  cursor: grab;
+}
+
+.tb-flow-canvas:active {
+  cursor: grabbing;
+}
+
+.tb-flow-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 14px;
+}
+
+.tb-flow-panel {
+  border-left: 1px solid #e2e8f0;
+  padding-left: 12px;
+}
+
+.tb-flow-zoom-stage {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
+  width: 2500px;
+  height: 1600px;
+}
+
+.tb-flow-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: auto;
+  z-index: 1;
+}
+
+.tb-flow-lines path {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tb-flow-edge-line,
+.tb-flow-edge-halo {
+  fill: none;
+  pointer-events: none;
+}
+
+.tb-flow-edge-line {
+  stroke: #94a3b8;
+  stroke-width: 2.2;
+  transition: stroke 0.15s ease, stroke-width 0.15s ease;
+}
+
+.tb-flow-edge-line.is-selected {
+  stroke: #0b5ed7;
+  stroke-width: 3;
+}
+
+.tb-flow-edge-line.is-hover {
+  stroke: #3b82f6;
+  stroke-width: 2.6;
+}
+
+.tb-flow-edge-halo {
+  stroke: rgba(37, 99, 235, 0.18);
+  stroke-width: 10;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.tb-flow-edge-halo.is-selected {
+  opacity: 1;
+  stroke: rgba(11, 94, 215, 0.25);
+}
+
+.tb-flow-edge-halo.is-hover {
+  opacity: 1;
+  stroke: rgba(59, 130, 246, 0.28);
+}
+
+.tb-flow-edge-hit {
+  stroke: transparent;
+  stroke-width: 26px;
+  fill: none;
+  cursor: pointer;
+}
+
+.tb-flow-node {
+  position: absolute;
+  min-width: 140px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid #c8d9f4;
+  background: #ffffff;
+  box-shadow: 0 8px 16px rgba(15, 23, 42, 0.08);
+  cursor: pointer;
+  z-index: 2;
+  font-size: calc(12px / var(--flow-scale, 1));
+  user-select: none;
+}
+
+.tb-flow-node * {
+  user-select: none;
+}
+
+.tb-flow-node-icon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  margin-right: 6px;
+  color: var(--tb-ink);
+}
+
+.tb-flow-node-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.tb-flow-port-stub {
+  position: absolute;
+  right: -48px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tb-flow-port-line {
+  width: 18px;
+  height: 2px;
+  background: #94a3b8;
+  border-radius: 999px;
+}
+
+.tb-flow-plus {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid #cbd5f5;
+  background: #ffffff;
+  font-size: 14px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.tb-flow-node-header {
+  cursor: grab;
+}
+
+.tb-flow-node-ports {
+  position: absolute;
+  top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.tb-flow-node-ports-in {
+  left: -10px;
+}
+
+.tb-flow-node-ports-out {
+  right: -10px;
+}
+
+.tb-flow-port {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 2px solid #ffffff;
+  background: #0b5ed7;
+  cursor: crosshair;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.2);
+}
+
+.tb-flow-port.is-hover {
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25);
+}
+
+.tb-flow-port-in {
+  background: #22c55e;
+}
+
+.tb-flow-port-out {
+  background: #0b5ed7;
+}
+
+.tb-flow-node-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 6px;
+}
+
+.tb-mini {
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  border: 1px solid #c8d9f4;
+  background: #f8fbff;
+  cursor: pointer;
+}
+
+.tb-mini-danger {
+  border-color: #fecdd3;
+  background: #fff1f2;
+  color: #b42318;
+}
+
+.tb-flow-edge {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.tb-flow-cond {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+}
+
+.tb-flow-cond-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.tb-flow-node.is-selected {
+  border-color: var(--tb-accent);
+  box-shadow: 0 10px 18px rgba(11, 94, 215, 0.18);
+}
+
+.tb-flow-chat {
+  display: grid;
+  gap: 10px;
+}
+
+.tb-flow-chat-log {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.tb-flow-chat-msg {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+}
+
+.tb-flow-chat-msg.is-user {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+.tb-flow-chat-trace {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.tb-flow-node-title {
+  font-size: calc(13px / var(--flow-scale, 1));
+  font-weight: 600;
+}
+
+.tb-flow-node-type {
+  font-size: calc(11px / var(--flow-scale, 1));
+  color: #64748b;
+}
+
+@media (max-width: 1100px) {
+  .tb-flow-layout {
+    grid-template-columns: 1fr;
+  }
+  .tb-flow-panel {
+    border-left: 0;
+    padding-left: 0;
+  }
+}
