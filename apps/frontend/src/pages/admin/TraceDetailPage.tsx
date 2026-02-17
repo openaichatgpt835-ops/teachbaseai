@@ -1,18 +1,46 @@
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { api } from "../../api/client";
 
 export function TraceDetailPage() {
+  const [copiedKey, setCopiedKey] = useState<string>("");
   const { traceId } = useParams<{ traceId: string }>();
   const { data, isLoading, error } = useQuery({
     queryKey: ["trace", traceId],
     queryFn: () => api.get(`/v1/admin/traces/${traceId}`),
     enabled: !!traceId,
   });
+  const timelineQ = useQuery({
+    queryKey: ["trace-timeline", traceId],
+    queryFn: () => api.get(`/v1/admin/traces/${traceId}/timeline`) as Promise<{
+      trace_id: string;
+      items: Array<{
+        source: string;
+        id: number;
+        created_at: string | null;
+        portal_id: number | null;
+        kind: string | null;
+        status: string | number | null;
+        summary: string | null;
+      }>;
+    }>,
+    enabled: !!traceId,
+  });
 
   if (isLoading) return <div>...</div>;
   if (error) return <div className="text-red-600">: {String(error)}</div>;
   if (!data) return null;
+
+  const copyJson = async (key: string, value: unknown) => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(value, null, 2));
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(""), 1200);
+    } catch {
+      setCopiedKey("");
+    }
+  };
 
   const payload = data as {
     trace_id: string;
@@ -35,6 +63,9 @@ export function TraceDetailPage() {
       top_level_name_enabled?: boolean;
       api_prefix_used?: string;
       event_urls_sent?: string[];
+      request_json?: unknown;
+      response_json?: unknown;
+      headers_min?: Record<string, unknown>;
       summary?: Record<string, unknown>;
     }>;
   };
@@ -45,6 +76,22 @@ export function TraceDetailPage() {
         <Link to="/admin/traces" className="text-blue-600 hover:underline">  Bitrix</Link>
       </div>
       <h1 className="text-xl font-bold mb-4"> : {payload.trace_id}</h1>
+      {timelineQ.data?.items?.length ? (
+        <div className="mb-6 bg-white shadow rounded-lg p-4 border">
+          <h2 className="text-sm font-semibold mb-2">Timeline</h2>
+          <div className="space-y-2">
+            {timelineQ.data.items.map((t) => (
+              <div key={`${t.source}-${t.id}`} className="text-sm text-gray-700 border rounded px-3 py-2">
+                <span className="font-mono text-xs text-gray-500 mr-2">{t.created_at?.slice(0, 19) ?? ""}</span>
+                <span className="font-medium mr-2">{t.source}</span>
+                <span className="mr-2">{t.kind ?? ""}</span>
+                <span className="text-gray-500 mr-2">status: {String(t.status ?? "")}</span>
+                <span className="text-gray-500">{t.summary ?? ""}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
       <div className="space-y-6">
         {payload.items.map((r) => (
           <div key={r.id} className="bg-white shadow rounded-lg p-4 border">
@@ -141,6 +188,63 @@ export function TraceDetailPage() {
                       </dd>
                     </>
                   ) : null}
+                </>
+              )}
+              {r.headers_min != null && (
+                <>
+                  <dt className="text-gray-500">headers_min</dt>
+                  <dd>
+                    <div className="mb-1">
+                      <button
+                        type="button"
+                        onClick={() => copyJson(`headers-${r.id}`, r.headers_min)}
+                        className="text-xs px-2 py-1 border rounded hover:bg-gray-50"
+                      >
+                        {copiedKey === `headers-${r.id}` ? "Скопировано" : "Скопировать JSON"}
+                      </button>
+                    </div>
+                    <pre className="text-xs bg-gray-50 border rounded p-2 overflow-x-auto">
+                      {JSON.stringify(r.headers_min, null, 2)}
+                    </pre>
+                  </dd>
+                </>
+              )}
+              {r.request_json != null && (
+                <>
+                  <dt className="text-gray-500">request_json</dt>
+                  <dd>
+                    <div className="mb-1">
+                      <button
+                        type="button"
+                        onClick={() => copyJson(`request-${r.id}`, r.request_json)}
+                        className="text-xs px-2 py-1 border rounded hover:bg-gray-50"
+                      >
+                        {copiedKey === `request-${r.id}` ? "Скопировано" : "Скопировать JSON"}
+                      </button>
+                    </div>
+                    <pre className="text-xs bg-gray-50 border rounded p-2 overflow-x-auto">
+                      {JSON.stringify(r.request_json, null, 2)}
+                    </pre>
+                  </dd>
+                </>
+              )}
+              {r.response_json != null && (
+                <>
+                  <dt className="text-gray-500">response_json</dt>
+                  <dd>
+                    <div className="mb-1">
+                      <button
+                        type="button"
+                        onClick={() => copyJson(`response-${r.id}`, r.response_json)}
+                        className="text-xs px-2 py-1 border rounded hover:bg-gray-50"
+                      >
+                        {copiedKey === `response-${r.id}` ? "Скопировано" : "Скопировать JSON"}
+                      </button>
+                    </div>
+                    <pre className="text-xs bg-gray-50 border rounded p-2 overflow-x-auto">
+                      {JSON.stringify(r.response_json, null, 2)}
+                    </pre>
+                  </dd>
                 </>
               )}
             </dl>

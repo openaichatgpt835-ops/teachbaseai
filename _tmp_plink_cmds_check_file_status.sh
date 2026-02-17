@@ -1,0 +1,1 @@
+docker exec teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select id, portal_id, filename, status, error_message, uploaded_by_type, uploaded_by_name, created_at, updated_at from kb_files where filename ilike '%эволюц%' order by updated_at desc limit 20;"

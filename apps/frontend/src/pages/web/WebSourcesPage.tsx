@@ -8,9 +8,11 @@ type KbSource = {
   created_at?: string;
 };
 
+const sourcesCache = new Map<number, KbSource[]>();
+
 export function WebSourcesPage() {
   const { portalId, portalToken } = getWebPortalInfo();
-  const [sources, setSources] = useState<KbSource[]>([]);
+  const [sources, setSources] = useState<KbSource[]>(() => (portalId ? sourcesCache.get(portalId) || [] : []));
   const [url, setUrl] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
@@ -23,6 +25,7 @@ export function WebSourcesPage() {
       const data = await res.json().catch(() => null);
       if (res.ok && data?.items) {
         setSources(data.items);
+        sourcesCache.set(portalId, data.items);
       }
     } finally {
       setLoading(false);
@@ -30,6 +33,10 @@ export function WebSourcesPage() {
   };
 
   useEffect(() => {
+    if (portalId) {
+      const cached = sourcesCache.get(portalId);
+      if (cached) setSources(cached);
+    }
     loadSources();
   }, [portalId, portalToken]);
 

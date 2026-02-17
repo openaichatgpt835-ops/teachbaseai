@@ -1,6 +1,8 @@
 """RQ jobs."""
 import json
 import logging
+from datetime import timedelta
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +159,7 @@ def process_outbox(outbox_id: int) -> bool:
 
 
 def process_kb_job(job_id: int) -> bool:
-    """Process KB job (ingest)."""
+    """Process KB job (ingest/source) with safe lifecycle and dedup."""
     from apps.backend.database import get_session_factory
     from apps.backend.models.kb import KBJob
     from apps.backend.models.outbox import Outbox
@@ -169,96 +171,140 @@ def process_kb_job(job_id: int) -> bool:
         job = db.get(KBJob, job_id)
         if not job or job.status not in ("queued", "processing"):
             return False
+
+        def _set_job(status: str, error: str | None = None) -> None:
+            db.refresh(job)
+            job.status = status
+            job.error_message = (error or "")[:200] or None
+            db.add(job)
+            db.commit()
+
         job.status = "processing"
+        job.error_message = None
         db.add(job)
         db.commit()
         payload = job.payload_json or {}
-        if job.job_type == "source":
-            source_id = payload.get("source_id")
-            if not source_id:
-                job.status = "error"
-                job.error_message = "missing_source_id"
-                db.add(job)
-                db.commit()
+
+        try:
+            if job.job_type == "source":
+                source_id = payload.get("source_id")
+                if not source_id:
+                    _set_job("error", "missing_source_id")
+                    return False
+                result = process_url_source(db, int(source_id))
+                if not result.get("ok"):
+                    _set_job("error", (result.get("error") or "source_failed")[:200])
+                    return False
+                _set_job("done")
+                return True
+
+            if job.job_type != "ingest":
+                _set_job("error", "unsupported_job_type")
                 return False
-            result = process_url_source(db, int(source_id))
-            if not result.get("ok"):
-                job.status = "error"
-                job.error_message = (result.get("error") or "source_failed")[:200]
-                db.add(job)
-                db.commit()
+
+            file_id_raw = payload.get("file_id")
+            if not file_id_raw:
+                _set_job("error", "missing_file_id")
                 return False
-            job.status = "done"
-            db.add(job)
-            db.commit()
-            return True
-        if job.job_type != "ingest":
-            job.status = "error"
-            job.error_message = "unsupported_job_type"
-            db.add(job)
-            db.commit()
-            return False
-        file_id = payload.get("file_id")
-        if not file_id:
-            job.status = "error"
-            job.error_message = "missing_file_id"
-            db.add(job)
-            db.commit()
-            return False
-        result = ingest_file(db, int(file_id), trace_id=job.trace_id)
-        if not result.get("ok"):
-            err = (result.get("error") or "ingest_failed")[:200]
-            if err == "rate_limited":
-                job.status = "queued"
-                job.error_message = "rate_limited"
-                db.add(job)
-                db.commit()
+            file_id = int(file_id_raw)
+
+            # Skip duplicate active jobs for the same file.
+            active_jobs = db.execute(
+                select(KBJob).where(
+                    KBJob.job_type == "ingest",
+                    KBJob.status.in_(("queued", "processing")),
+                    KBJob.id != job.id,
+                )
+            ).scalars().all()
+            duplicate_job_id = None
+            for other in active_jobs:
+                other_file_id = (other.payload_json or {}).get("file_id")
+                if other_file_id is None:
+                    continue
                 try:
+                    if int(other_file_id) == file_id:
+                        duplicate_job_id = other.id
+                        break
+                except Exception:
+                    continue
+            if duplicate_job_id:
+                _set_job("done", f"duplicate_skipped:{duplicate_job_id}")
+                return True
+
+            result = ingest_file(db, file_id, trace_id=job.trace_id)
+            if not result.get("ok"):
+                err = (result.get("error") or "ingest_failed")[:200]
+                if err == "rate_limited":
+                    _set_job("queued", "rate_limited")
+                    try:
+                        from redis import Redis
+                        from rq import Queue
+                        from apps.backend.config import get_settings
+                        s = get_settings()
+                        r = Redis(host=s.redis_host, port=s.redis_port)
+                        q = Queue("default", connection=r)
+                        q.enqueue_in(timedelta(seconds=30), "apps.worker.jobs.process_kb_job", job.id)
+                    except Exception:
+                        pass
+                    return False
+                _set_job("error", err)
+                return False
+
+            _set_job("done")
+
+            # Telegram notify uploader when ingestion finished.
+            try:
+                chat_id = payload.get("tg_chat_id")
+                kind = payload.get("tg_kind") or "staff"
+                fname = payload.get("tg_filename")
+                if chat_id:
+                    body = (
+                        f"\u0418\u0437\u0443\u0447\u0438\u043b \u0432\u0430\u0448 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442 {fname}, "
+                        f"\u0437\u0430\u0434\u0430\u0432\u0430\u0439\u0442\u0435 \u0432\u043e\u043f\u0440\u043e\u0441\u044b! \u2705"
+                    ) if fname else (
+                        "\u0418\u0437\u0443\u0447\u0438\u043b \u0432\u0430\u0448 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442, "
+                        "\u0437\u0430\u0434\u0430\u0432\u0430\u0439\u0442\u0435 \u0432\u043e\u043f\u0440\u043e\u0441\u044b! \u2705"
+                    )
+                    outbox = Outbox(
+                        portal_id=job.portal_id,
+                        message_id=None,
+                        status="created",
+                        payload_json=json.dumps(
+                            {
+                                "provider": "telegram",
+                                "kind": kind,
+                                "chat_id": chat_id,
+                                "body": body,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                    db.add(outbox)
+                    db.commit()
                     from redis import Redis
                     from rq import Queue
-                    from datetime import timedelta
                     from apps.backend.config import get_settings
                     s = get_settings()
                     r = Redis(host=s.redis_host, port=s.redis_port)
                     q = Queue("default", connection=r)
-                    q.enqueue_in(timedelta(seconds=30), "apps.worker.jobs.process_kb_job", job.id)
-                except Exception:
-                    pass
-                return False
-            job.status = "error"
-            job.error_message = err
-            db.add(job)
-            db.commit()
+                    q.enqueue("apps.worker.jobs.process_outbox", outbox.id)
+            except Exception:
+                pass
+            return True
+        except Exception as exc:
+            logger.exception("process_kb_job_failed job_id=%s", job_id)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            try:
+                job_fresh = db.get(KBJob, job_id)
+                if job_fresh:
+                    job_fresh.status = "error"
+                    job_fresh.error_message = ("worker_exception:" + str(exc))[:200]
+                    db.add(job_fresh)
+                    db.commit()
+            except Exception:
+                pass
             return False
-        job.status = "done"
-        db.add(job)
-        db.commit()
-        try:
-            chat_id = payload.get("tg_chat_id")
-            kind = payload.get("tg_kind") or "staff"
-            fname = payload.get("tg_filename")
-            if chat_id:
-                body = f"Изучил ваш документ {fname}, задавайте вопросы! ✅" if fname else "Изучил ваш документ, задавайте вопросы! ✅"
-                outbox = Outbox(
-                    portal_id=job.portal_id,
-                    message_id=None,
-                    status="created",
-                    payload_json=json.dumps({
-                        "provider": "telegram",
-                        "kind": kind,
-                        "chat_id": chat_id,
-                        "body": body,
-                    }, ensure_ascii=False),
-                )
-                db.add(outbox)
-                db.commit()
-                from redis import Redis
-                from rq import Queue
-                from apps.backend.config import get_settings
-                s = get_settings()
-                r = Redis(host=s.redis_host, port=s.redis_port)
-                q = Queue("default", connection=r)
-                q.enqueue("apps.worker.jobs.process_outbox", outbox.id)
-        except Exception:
-            pass
-        return True
+

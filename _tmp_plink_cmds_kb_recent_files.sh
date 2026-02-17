@@ -1,0 +1,1 @@
+docker exec teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select id, portal_id, left(filename,80) as filename, status, coalesce(error_message,''), created_at, updated_at from kb_files order by created_at desc limit 30;"

@@ -5,20 +5,42 @@ type UserItem = { id: number; name: string };
 type AccessItem = { user_id: string | number; telegram_username?: string | null; display_name?: string | null; kind?: string | null };
 
 type WebUserItem = { id: string; name: string; telegram_username?: string | null };
+type UsersCacheState = {
+  users: UserItem[];
+  selectedUsers: number[];
+  telegramMap: Record<number, string>;
+  webUsers: WebUserItem[];
+  accessWarning: string;
+};
+
+const usersCache = new Map<number, UsersCacheState>();
 
 export function WebUsersPage() {
   const { portalId, portalToken } = getWebPortalInfo();
-  const [users, setUsers] = useState<UserItem[]>([]);
+  const cached = portalId ? usersCache.get(portalId) : null;
+  const [users, setUsers] = useState<UserItem[]>(cached?.users || []);
   const [userSearch, setUserSearch] = useState("");
-  const [selectedUsers, setSelectedUsers] = useState<number[]>([]);
-  const [telegramMap, setTelegramMap] = useState<Record<number, string>>({});
-  const [accessWarning, setAccessWarning] = useState("");
+  const [selectedUsers, setSelectedUsers] = useState<number[]>(cached?.selectedUsers || []);
+  const [telegramMap, setTelegramMap] = useState<Record<number, string>>(cached?.telegramMap || {});
+  const [accessWarning, setAccessWarning] = useState(cached?.accessWarning || "");
   const [saveStatus, setSaveStatus] = useState("");
   const [saving, setSaving] = useState(false);
-  const [webUsers, setWebUsers] = useState<WebUserItem[]>([]);
+  const [webUsers, setWebUsers] = useState<WebUserItem[]>(cached?.webUsers || []);
   const [newWebUserName, setNewWebUserName] = useState("");
   const [newWebUserTelegram, setNewWebUserTelegram] = useState("");
   const [webUserMessage, setWebUserMessage] = useState("");
+
+  const patchCache = (patch: Partial<UsersCacheState>) => {
+    if (!portalId) return;
+    const prev = usersCache.get(portalId) || {
+      users: [],
+      selectedUsers: [],
+      telegramMap: {},
+      webUsers: [],
+      accessWarning: "",
+    };
+    usersCache.set(portalId, { ...prev, ...patch });
+  };
 
   const filteredUsers = useMemo(() => {
     const q = userSearch.trim().toLowerCase();
@@ -28,7 +50,6 @@ export function WebUsersPage() {
 
   const loadUsers = async () => {
     if (!portalId || !portalToken) return;
-    setAccessWarning("");
     try {
       const res = await fetchPortal(`/api/v1/bitrix/users?portal_id=${portalId}`);
       const data = await res.json().catch(() => null);
@@ -53,9 +74,14 @@ export function WebUsersPage() {
             .filter((u: UserItem) => Number.isFinite(u.id));
           setUsers(mapped);
           setAccessWarning(`${errText} Показан последний сохранённый список.`);
+          patchCache({
+            users: mapped,
+            accessWarning: `${errText} Показан последний сохранённый список.`,
+          });
           return;
         }
         setAccessWarning(errText || "Не удалось загрузить пользователей.");
+        patchCache({ accessWarning: errText || "Не удалось загрузить пользователей." });
         return;
       }
       const list = (data?.users || []).map((u: any) => ({
@@ -63,8 +89,11 @@ export function WebUsersPage() {
         name: `${u.name || ""} ${u.last_name || ""}`.trim() || u.email || `ID ${u.id}`,
       }));
       setUsers(list);
+      setAccessWarning("");
+      patchCache({ users: list, accessWarning: "" });
     } catch {
       setAccessWarning("Не удалось загрузить пользователей.");
+      patchCache({ accessWarning: "Не удалось загрузить пользователей." });
     }
   };
 
@@ -88,21 +117,41 @@ export function WebUsersPage() {
       tgMap[id] = raw ? `@${raw}` : "";
     });
     setTelegramMap(tgMap);
-    setWebUsers(
+    const nextWebUsers =
       items
         .filter((it) => it.kind === "web")
         .map((it) => ({
           id: String(it.user_id),
           name: it.display_name || String(it.user_id),
           telegram_username: it.telegram_username || "",
-        }))
-    );
+        }));
+    setWebUsers(nextWebUsers);
+    patchCache({
+      selectedUsers: bitrixIds,
+      telegramMap: tgMap,
+      webUsers: nextWebUsers,
+    });
   };
 
   useEffect(() => {
+    if (portalId) {
+      const s = usersCache.get(portalId);
+      if (s) {
+        setUsers(s.users || []);
+        setSelectedUsers(s.selectedUsers || []);
+        setTelegramMap(s.telegramMap || {});
+        setWebUsers(s.webUsers || []);
+        setAccessWarning(s.accessWarning || "");
+      }
+    }
     loadUsers();
     loadAllowlist();
   }, [portalId, portalToken]);
+
+  useEffect(() => {
+    if (!portalId) return;
+    patchCache({ selectedUsers, telegramMap, webUsers, users, accessWarning });
+  }, [portalId, selectedUsers, telegramMap, webUsers, users, accessWarning]);
 
   const toggleUser = (id: number) => {
     setSelectedUsers((prev) =>

@@ -17,9 +17,12 @@ from apps.backend.routers import health, admin_auth, admin_portals
 from apps.backend.routers import admin_dialogs, admin_events, admin_outbox
 from apps.backend.routers import admin_system, admin_logs, admin_traces, admin_debug
 from apps.backend.routers import admin_settings, admin_inbound_events, admin_billing, admin_registrations
-from apps.backend.routers import bitrix, portal, debug, admin_kb, telegram, web_auth
+from apps.backend.routers import admin_errors
+from apps.backend.routers import bitrix, bitrix_botflow, bitrix_dialogs, portal, debug, admin_kb, telegram, web_auth
 from apps.backend.services.token_refresh_daemon import refresh_tokens_once
+from apps.backend.services.kb_job_watchdog import run_kb_watchdog_cycle
 from apps.backend.config import get_settings
+from apps.backend.utils.api_errors import error_envelope
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +40,20 @@ def _is_xhr_request(request: Request) -> bool:
     return False
 
 
-def _is_bitrix_xhr_path(path: str) -> bool:
-    return path.startswith("/v1/bitrix/") or path.startswith("/api/v1/bitrix/")
+def _is_xhr_api_path(path: str) -> bool:
+    prefixes = (
+        "/v1/bitrix/",
+        "/api/v1/bitrix/",
+        "/v1/telegram/",
+        "/api/v1/telegram/",
+        "/v1/web/",
+        "/api/v1/web/",
+        "/v1/portal/",
+        "/api/v1/portal/",
+        "/v1/admin/",
+        "/api/v1/admin/",
+    )
+    return any(path.startswith(p) for p in prefixes)
 
 
 @asynccontextmanager
@@ -58,6 +73,18 @@ async def lifespan(app: FastAPI):
         t = threading.Thread(target=_loop, name="token_refresh_daemon", daemon=True)
         t.start()
         app.state.token_refresh_thread = t
+    if s.kb_watchdog_enabled and not (bool(os.environ.get("PYTEST_CURRENT_TEST")) or os.environ.get("TESTING") == "1"):
+        interval_sec = max(60, int(s.kb_watchdog_interval_seconds or 120))
+
+        def _kb_watchdog_loop():
+            time.sleep(10)
+            while not stop_event.is_set():
+                run_kb_watchdog_cycle()
+                stop_event.wait(interval_sec)
+
+        t2 = threading.Thread(target=_kb_watchdog_loop, name="kb_watchdog_daemon", daemon=True)
+        t2.start()
+        app.state.kb_watchdog_thread = t2
     yield
     stop_event.set()
 
@@ -94,7 +121,10 @@ app.include_router(admin_inbound_events.router, prefix="/v1/admin", tags=["Admin
 app.include_router(admin_kb.router, prefix="/v1/admin/kb", tags=["Admin KB"])
 app.include_router(admin_billing.router, prefix="/v1/admin/billing", tags=["Admin Billing"])
 app.include_router(admin_registrations.router, prefix="/v1/admin", tags=["Admin Registrations"])
+app.include_router(admin_errors.router, prefix="/v1/admin", tags=["Admin Errors"])
 app.include_router(bitrix.router, prefix="/v1/bitrix", tags=["Bitrix"])
+app.include_router(bitrix_botflow.router, prefix="/v1/bitrix", tags=["Bitrix"])
+app.include_router(bitrix_dialogs.router, prefix="/v1/bitrix", tags=["Bitrix"])
 app.include_router(telegram.router, prefix="/v1/telegram", tags=["Telegram"])
 app.include_router(portal.router, prefix="/v1/portal", tags=["Portal"])
 app.include_router(web_auth.router, prefix="/v1/web", tags=["Web"])
@@ -102,17 +132,20 @@ app.include_router(debug.router, prefix="/v1/debug", tags=["Debug"])
 
 
 def _xhr_error_payload(trace_id: str, error: str, message: str, detail: str | None = None) -> dict:
-    out = {"error": error, "trace_id": trace_id, "message": message}
-    if detail:
-        out["detail"] = detail
-    return out
+    return error_envelope(
+        code=error,
+        message=message,
+        trace_id=trace_id,
+        detail=detail,
+        legacy_error=True,
+    )
 
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    """For XHR to /v1/bitrix/* always return JSON with trace_id."""
+    """For XHR API requests always return JSON envelope with trace_id."""
     path = request.url.path
-    if _is_bitrix_xhr_path(path) and _is_xhr_request(request):
+    if _is_xhr_api_path(path) and _is_xhr_request(request):
         trace_id = getattr(request.state, "trace_id", None) or str(uuid.uuid4())[:16]
         payload = _xhr_error_payload(
             trace_id,
@@ -131,11 +164,11 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """For XHR to /v1/bitrix/* never return HTML — always JSON with trace_id."""
+    """For XHR API requests never return HTML — always JSON envelope with trace_id."""
     path = request.url.path
     trace_id = getattr(request.state, "trace_id", None) or str(uuid.uuid4())[:16]
     logger.exception("Unhandled exception trace_id=%s path=%s", trace_id, path)
-    if _is_bitrix_xhr_path(path) and _is_xhr_request(request):
+    if _is_xhr_api_path(path) and _is_xhr_request(request):
         detail_safe = str(exc)[:200].replace("'", "")  # safe, no secrets in repr
         payload = _xhr_error_payload(
             trace_id,

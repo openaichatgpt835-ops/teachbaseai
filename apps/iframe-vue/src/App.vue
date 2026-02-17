@@ -133,8 +133,8 @@
 
         <div class="tb-card">
           <h2 class="tb-card-title">Фокус запросов</h2>
-          <div class="tb-list" v-if="topicSummaries.length">
-            <div v-for="(s, idx) in topicSummaries" :key="idx" class="tb-row">
+          <div class="tb-list" v-if="sortedTopicSummaries.length">
+            <div v-for="(s, idx) in sortedTopicSummaries" :key="idx" class="tb-row">
               <div class="tb-row-body">
                 <div class="tb-row-text">{{ s.topic }}</div>
                 <div class="tb-muted" v-if="s.score">оценка: {{ s.score }}</div>
@@ -1431,6 +1431,12 @@ const sortedKbFiles = computed(() => {
     items.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
   }
   return items;
+});
+
+const sortedTopicSummaries = computed(() => {
+  return topicSummaries.value
+    .slice()
+    .sort((a, b) => Number(b.score ?? -1) - Number(a.score ?? -1));
 });
 
 const recentKbFiles = computed(() => sortedKbFiles.value.slice(0, 5));

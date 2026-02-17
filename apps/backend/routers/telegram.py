@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from apps.backend.deps import get_db
+from apps.backend.utils.api_errors import error_envelope
 from apps.backend.services.telegram_settings import (
     get_portal_telegram_secret,
     get_portal_telegram_token_plain,
@@ -18,6 +19,23 @@ from apps.backend.clients.telegram import telegram_send_message
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _trace_id(request: Request) -> str:
+    return getattr(request.state, "trace_id", "") or ""
+
+
+def _err(request: Request, code: str, message: str, status_code: int, detail: str | None = None) -> JSONResponse:
+    return JSONResponse(
+        error_envelope(
+            code=code,
+            message=message,
+            trace_id=_trace_id(request),
+            detail=detail,
+            legacy_error=True,
+        ),
+        status_code=status_code,
+    )
 
 
 def _check_secret(request: Request, portal_id: int, kind: str, secret: str, db: Session) -> bool:
@@ -32,7 +50,7 @@ def _check_secret(request: Request, portal_id: int, kind: str, secret: str, db: 
 
 async def _handle_update(request: Request, portal_id: int, kind: str, secret: str, db: Session) -> JSONResponse:
     if not _check_secret(request, portal_id, kind, secret, db):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
+        return _err(request, "forbidden", "forbidden", 403)
     settings = get_portal_telegram_settings(db, portal_id)
     if kind == "staff" and not settings.get("staff", {}).get("enabled"):
         return JSONResponse({"ok": True, "disabled": True})

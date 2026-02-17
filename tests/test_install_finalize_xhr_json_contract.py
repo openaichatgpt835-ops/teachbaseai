@@ -34,6 +34,7 @@ def test_install_finalize_xhr_always_json_on_error():
     assert "application/json" in ct
     data = r.json()
     assert "trace_id" in data
+    assert data.get("code") in ("internal_error", "http_error")
     assert data.get("error") in ("internal_error", "http_error")
     assert r.headers.get("X-Trace-Id") or data.get("trace_id")
 

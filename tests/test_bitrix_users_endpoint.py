@@ -93,3 +93,38 @@ def test_bitrix_users_missing_scope_returns_403(test_db_session, override_get_db
     assert r.status_code == 403
     data = r.json()
     assert data.get("error") == "missing_scope_user"
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_users_retry_after_refresh_succeeds(test_db_session, override_get_db):
+    portal = Portal(domain="test.bitrix24.ru", status="active")
+    test_db_session.add(portal)
+    test_db_session.commit()
+    test_db_session.refresh(portal)
+
+    save_tokens(test_db_session, portal.id, "access-3", "refresh-3", 3600)
+    portal_token = create_portal_token_with_user(portal.id, user_id=1, expires_minutes=10)
+
+    calls = {"n": 0}
+
+    def fake_user_get(domain, access_token, start=0, limit=100):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ([], "missing_scope_user")
+        return ([{"ID": "11", "NAME": "Anna", "LAST_NAME": "Ivanova", "EMAIL": "anna@example.com", "ACTIVE": True}], None)
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with patch("apps.backend.routers.bitrix.user_get", side_effect=fake_user_get), \
+             patch("apps.backend.routers.bitrix.refresh_portal_tokens", return_value={"ok": True}):
+            r = client.get(
+                f"/v1/bitrix/users?portal_id={portal.id}&limit=200",
+                headers={"Authorization": f"Bearer {portal_token}"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total"] == 1
+    assert data["users"][0]["id"] == "11"

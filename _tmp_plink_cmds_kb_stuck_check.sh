@@ -1,0 +1,2 @@
+docker exec teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select id, portal_id, filename, status, updated_at from kb_files where status='processing' order by updated_at asc limit 20;"
+docker exec teachbaseai-postgres-1 psql -U teachbaseai -d teachbaseai -c "select id, portal_id, status, payload_json, error_message, updated_at from kb_jobs where status='processing' order by updated_at asc limit 20;"

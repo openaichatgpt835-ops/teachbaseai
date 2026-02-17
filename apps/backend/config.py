@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     kb_storage_path: str = "/app/storage/kb"
     token_refresh_enabled: bool = True
     token_refresh_interval_minutes: int = 30
+    kb_watchdog_enabled: bool = True
+    kb_watchdog_interval_seconds: int = 120
+    kb_processing_stale_seconds: int = 600
+    kb_watchdog_batch_limit: int = 200
 
 
 @lru_cache

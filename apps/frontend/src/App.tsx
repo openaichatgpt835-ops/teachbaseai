@@ -13,6 +13,7 @@ import { InboundEventDetailPage } from "./pages/admin/InboundEventDetailPage";
 import { KnowledgeBasePage } from "./pages/admin/KnowledgeBasePage";
 import { BotSettingsPage } from "./pages/admin/BotSettingsPage";
 import { RegistrationsPage } from "./pages/admin/RegistrationsPage";
+import { ErrorsPage } from "./pages/admin/ErrorsPage";
 import { B24AppPage } from "./pages/b24/B24AppPage";
 import { RegisterPage } from "./pages/web/RegisterPage";
 import { WebLoginPage } from "./pages/web/WebLoginPage";
@@ -65,6 +66,7 @@ export default function App() {
         <Route path="knowledge-base" element={<KnowledgeBasePage />} />
         <Route path="bot-settings" element={<BotSettingsPage />} />
         <Route path="registrations" element={<RegistrationsPage />} />
+        <Route path="errors" element={<ErrorsPage />} />
         <Route index element={<Navigate to="portals" replace />} />
       </Route>
       <Route path="/b24/app" element={<B24AppPage />} />

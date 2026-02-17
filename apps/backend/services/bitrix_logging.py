@@ -43,6 +43,9 @@ def log_inbound(
     response_content_type: str | None = None,
     response_length: int | None = None,
     response_is_json: bool | None = None,
+    request_json: dict | list | None = None,
+    response_json: dict | list | None = None,
+    headers_min: dict | None = None,
 ) -> None:
     summary = {
         "query_keys": query_keys,
@@ -55,6 +58,12 @@ def log_inbound(
         "response_length": response_length,
         "response_is_json": response_is_json,
     }
+    if request_json is not None:
+        summary["request_json"] = request_json
+    if response_json is not None:
+        summary["response_json"] = response_json
+    if headers_min is not None:
+        summary["headers_min"] = headers_min
     row = BitrixHttpLog(
         trace_id=trace_id,
         portal_id=portal_id,

@@ -2,6 +2,7 @@
 import json
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 from sqlalchemy import select
@@ -21,9 +22,21 @@ from apps.backend.services.billing import (
 logger = logging.getLogger(__name__)
 
 
+def _normalize_domain(domain: str) -> str:
+    raw = (domain or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    host = (parsed.netloc or parsed.path or "").strip().lower()
+    host = host.split("/")[0].strip().rstrip(".")
+    return host
+
+
 def _get_portal_by_domain(db: Session, domain: str) -> Portal | None:
-    d = domain.replace("https://", "").replace("http://", "").split(".")[0]
-    return db.execute(select(Portal).where(Portal.domain.ilike(f"%{d}%"))).scalar_one_or_none()
+    d = _normalize_domain(domain)
+    if not d:
+        return None
+    return db.execute(select(Portal).where(Portal.domain == d)).scalar_one_or_none()
 
 
 def _get_portal_by_member(db: Session, member_id: str) -> Portal | None:
@@ -35,7 +48,7 @@ def _get_portal_by_app_token(db: Session, application_token: str) -> Portal | No
 
 
 def _ensure_portal(db: Session, domain: str, member_id: str | None) -> Portal:
-    domain_clean = domain.replace("https://", "").replace("http://", "").rstrip("/")
+    domain_clean = _normalize_domain(domain)
     p = db.execute(select(Portal).where(Portal.domain == domain_clean)).scalar_one_or_none()
     if p:
         if member_id and not p.member_id:
@@ -107,6 +120,7 @@ def process_imbot_message(db: Session, data: dict, auth: dict) -> dict:
         access_token = auth.get("access_token", "") or auth.get("ACCESS_TOKEN", "") or auth.get("AUTH_ID", "")
     if not member_id:
         member_id = auth.get("member_id", "") or auth.get("MEMBER_ID", "")
+    domain = _normalize_domain(domain)
     portal = None
     if member_id:
         portal = _get_portal_by_member(db, member_id)
@@ -116,6 +130,8 @@ def process_imbot_message(db: Session, data: dict, auth: dict) -> dict:
         portal = _get_portal_by_app_token(db, app_token)
         if portal and not domain:
             domain = portal.domain
+    if not portal and domain:
+        portal = _get_portal_by_domain(db, domain)
     if not domain:
         return {"error": "no domain"}
     if not portal:

@@ -27,6 +27,12 @@ type KbSettings = {
   frequency_penalty: number | "";
 };
 
+type SettingsCacheState = {
+  kbSettings: KbSettings;
+  embedModels: string[];
+  chatModels: string[];
+};
+
 const defaultSettings: KbSettings = {
   embedding_model: "",
   chat_model: "",
@@ -51,6 +57,8 @@ const defaultSettings: KbSettings = {
   presence_penalty: "",
   frequency_penalty: "",
 };
+
+const settingsCache = new Map<number, SettingsCacheState>();
 
 function toOptionalNumber(v: number | "") {
   if (v === "" || v === null || v === undefined) return null;
@@ -77,14 +85,22 @@ function HelpTip({ text }: { text: string }) {
 
 export function WebSettingsPage() {
   const { portalId, portalToken } = getWebPortalInfo();
-  const [kbSettings, setKbSettings] = useState<KbSettings>(defaultSettings);
-  const [embedModels, setEmbedModels] = useState<string[]>([]);
-  const [chatModels, setChatModels] = useState<string[]>([]);
+  const cached = portalId ? settingsCache.get(portalId) : null;
+  const [kbSettings, setKbSettings] = useState<KbSettings>(cached?.kbSettings || defaultSettings);
+  const [embedModels, setEmbedModels] = useState<string[]>(cached?.embedModels || []);
+  const [chatModels, setChatModels] = useState<string[]>(cached?.chatModels || []);
   const [settingsMessage, setSettingsMessage] = useState("");
-  const [loadingSettings, setLoadingSettings] = useState(false);
+  const [loadingSettings, setLoadingSettings] = useState(!cached);
 
   useEffect(() => {
     if (!portalId || !portalToken) return;
+    const cachedState = settingsCache.get(portalId);
+    if (cachedState) {
+      setKbSettings(cachedState.kbSettings);
+      setEmbedModels(cachedState.embedModels);
+      setChatModels(cachedState.chatModels);
+      setLoadingSettings(false);
+    }
     const loadModels = async () => {
       try {
         const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/models`);
@@ -93,8 +109,12 @@ export function WebSettingsPage() {
           const names = data.items
             .map((m: any) => String(m.id || m.name || m.model || ""))
             .filter(Boolean);
-          setEmbedModels(names.filter((n: string) => n.toLowerCase().includes("embed")));
-          setChatModels(names.filter((n: string) => !n.toLowerCase().includes("embed")));
+          const nextEmbed = names.filter((n: string) => n.toLowerCase().includes("embed"));
+          const nextChat = names.filter((n: string) => !n.toLowerCase().includes("embed"));
+          setEmbedModels(nextEmbed);
+          setChatModels(nextChat);
+          const prev = settingsCache.get(portalId) || { kbSettings: cachedState?.kbSettings || defaultSettings, embedModels: [], chatModels: [] };
+          settingsCache.set(portalId, { ...prev, embedModels: nextEmbed, chatModels: nextChat });
         }
       } catch {
         // ignore
@@ -135,6 +155,8 @@ export function WebSettingsPage() {
             next.sources_format = "none";
           }
           setKbSettings(next);
+          const prev = settingsCache.get(portalId) || { kbSettings: defaultSettings, embedModels: cachedState?.embedModels || [], chatModels: cachedState?.chatModels || [] };
+          settingsCache.set(portalId, { ...prev, kbSettings: next });
         }
       } finally {
         setLoadingSettings(false);
@@ -144,6 +166,12 @@ export function WebSettingsPage() {
     loadModels();
     loadSettings();
   }, [portalId, portalToken]);
+
+  useEffect(() => {
+    if (!portalId) return;
+    const prev = settingsCache.get(portalId) || { kbSettings: defaultSettings, embedModels: [], chatModels: [] };
+    settingsCache.set(portalId, { ...prev, kbSettings, embedModels, chatModels });
+  }, [portalId, kbSettings, embedModels, chatModels]);
 
   const saveSettings = async () => {
     if (!portalId || !portalToken) return;

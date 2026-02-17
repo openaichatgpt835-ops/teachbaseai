@@ -1,5 +1,5 @@
-import { WebStubPage } from "./WebStubPage";
+ï»¿import { WebStubPage } from "./WebStubPage";
 
 export function WebAiRopPage() {
-  return <WebStubPage title="AI ÐÎÏ" />;
+  return <WebStubPage title="AI Ð ÐžÐŸ" />;
 }

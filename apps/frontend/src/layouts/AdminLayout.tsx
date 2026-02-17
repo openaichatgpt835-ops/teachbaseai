@@ -1,4 +1,4 @@
-import { Outlet, Link, useNavigate } from "react-router-dom";
+﻿import { Outlet, Link, useNavigate } from "react-router-dom";
 import { useEffect } from "react";
 import { clearAuthToken, getAuthToken } from "../api/client";
 
@@ -28,6 +28,9 @@ export function AdminLayout() {
               </Link>
               <Link to="/admin/traces" className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-100">
                 Трейсы Bitrix
+              </Link>
+              <Link to="/admin/errors" className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-100">
+                Ошибки API
               </Link>
               <Link to="/admin/inbound-events" className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-100">
                 Inbound events

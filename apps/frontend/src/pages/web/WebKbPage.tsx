@@ -19,6 +19,23 @@ type KbSmartFolder = { id: number; name: string; system_tag?: string; rules?: an
 type KbTopic = { id: string; name: string; count: number; file_ids: number[] };
 type SearchMatch = { file_id: number; filename?: string; snippet?: string };
 type Filter = { kind: "all" | "collection" | "smart" | "topic"; id?: number | string };
+type KbPageCacheState = {
+  kbFiles: KbFile[];
+  kbCollections: KbCollection[];
+  kbCollectionFiles: Record<number, number[]>;
+  kbSmartFolders: KbSmartFolder[];
+  kbTopics: KbTopic[];
+  kbTopicSuggestions: { id: string; name: string; count: number }[];
+  kbFilter: Filter;
+  smartFoldersOpen: boolean;
+  kbSort: "new" | "name" | "status";
+  kbTypeFilter: string;
+  kbPeopleFilter: string;
+  kbLocationFilter: string;
+  kbViewMode: "table" | "grid";
+};
+
+const kbPageCache = new Map<number, KbPageCacheState>();
 
 function fileTypeCategory(filename: string | undefined) {
   const name = (filename || "").toLowerCase();
@@ -63,20 +80,21 @@ function fileOwnerLabel(file: KbFile) {
 
 export function WebKbPage() {
   const { portalId, portalToken } = getWebPortalInfo();
+  const cached = portalId ? kbPageCache.get(portalId) : null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const searchTimerRef = useRef<number | null>(null);
   const tableRef = useRef<HTMLDivElement | null>(null);
   const rowRefs = useRef<Map<number, HTMLDivElement | null>>(new Map());
 
-  const [kbFiles, setKbFiles] = useState<KbFile[]>([]);
-  const [kbCollections, setKbCollections] = useState<KbCollection[]>([]);
-  const [kbCollectionFiles, setKbCollectionFiles] = useState<Record<number, number[]>>({});
-  const [kbSmartFolders, setKbSmartFolders] = useState<KbSmartFolder[]>([]);
-  const [kbTopics, setKbTopics] = useState<KbTopic[]>([]);
-  const [kbTopicSuggestions, setKbTopicSuggestions] = useState<{ id: string; name: string; count: number }[]>([]);
-  const [kbFilter, setKbFilter] = useState<Filter>({ kind: "all" });
+  const [kbFiles, setKbFiles] = useState<KbFile[]>(cached?.kbFiles || []);
+  const [kbCollections, setKbCollections] = useState<KbCollection[]>(cached?.kbCollections || []);
+  const [kbCollectionFiles, setKbCollectionFiles] = useState<Record<number, number[]>>(cached?.kbCollectionFiles || {});
+  const [kbSmartFolders, setKbSmartFolders] = useState<KbSmartFolder[]>(cached?.kbSmartFolders || []);
+  const [kbTopics, setKbTopics] = useState<KbTopic[]>(cached?.kbTopics || []);
+  const [kbTopicSuggestions, setKbTopicSuggestions] = useState<{ id: string; name: string; count: number }[]>(cached?.kbTopicSuggestions || []);
+  const [kbFilter, setKbFilter] = useState<Filter>(cached?.kbFilter || { kind: "all" });
   const [newCollectionName, setNewCollectionName] = useState("");
-  const [smartFoldersOpen, setSmartFoldersOpen] = useState(true);
+  const [smartFoldersOpen, setSmartFoldersOpen] = useState(cached?.smartFoldersOpen ?? true);
   const [smartFolderMessage, setSmartFolderMessage] = useState("");
 
   const [kbSearch, setKbSearch] = useState("");
@@ -91,11 +109,11 @@ export function WebKbPage() {
   const [smartSearchLoading, setSmartSearchLoading] = useState(false);
   const [smartSearchError, setSmartSearchError] = useState("");
 
-  const [kbSort, setKbSort] = useState<"new" | "name" | "status">("new");
-  const [kbTypeFilter, setKbTypeFilter] = useState("all");
-  const [kbPeopleFilter, setKbPeopleFilter] = useState("all");
-  const [kbLocationFilter, setKbLocationFilter] = useState("all");
-  const [kbViewMode, setKbViewMode] = useState<"table" | "grid">("table");
+  const [kbSort, setKbSort] = useState<"new" | "name" | "status">(cached?.kbSort || "new");
+  const [kbTypeFilter, setKbTypeFilter] = useState(cached?.kbTypeFilter || "all");
+  const [kbPeopleFilter, setKbPeopleFilter] = useState(cached?.kbPeopleFilter || "all");
+  const [kbLocationFilter, setKbLocationFilter] = useState(cached?.kbLocationFilter || "all");
+  const [kbViewMode, setKbViewMode] = useState<"table" | "grid">(cached?.kbViewMode || "table");
 
   const [selectedFileIds, setSelectedFileIds] = useState<number[]>([]);
   const [dragOverCollectionId, setDragOverCollectionId] = useState<number | null>(null);
@@ -149,11 +167,63 @@ export function WebKbPage() {
   };
 
   useEffect(() => {
+    if (portalId) {
+      const state = kbPageCache.get(portalId);
+      if (state) {
+        setKbFiles(state.kbFiles || []);
+        setKbCollections(state.kbCollections || []);
+        setKbCollectionFiles(state.kbCollectionFiles || {});
+        setKbSmartFolders(state.kbSmartFolders || []);
+        setKbTopics(state.kbTopics || []);
+        setKbTopicSuggestions(state.kbTopicSuggestions || []);
+        setKbFilter(state.kbFilter || { kind: "all" });
+        setSmartFoldersOpen(state.smartFoldersOpen ?? true);
+        setKbSort(state.kbSort || "new");
+        setKbTypeFilter(state.kbTypeFilter || "all");
+        setKbPeopleFilter(state.kbPeopleFilter || "all");
+        setKbLocationFilter(state.kbLocationFilter || "all");
+        setKbViewMode(state.kbViewMode || "table");
+      }
+    }
     loadFiles();
     loadCollections();
     loadSmartFolders();
     loadTopics();
   }, [portalId, portalToken]);
+
+  useEffect(() => {
+    if (!portalId) return;
+    kbPageCache.set(portalId, {
+      kbFiles,
+      kbCollections,
+      kbCollectionFiles,
+      kbSmartFolders,
+      kbTopics,
+      kbTopicSuggestions,
+      kbFilter,
+      smartFoldersOpen,
+      kbSort,
+      kbTypeFilter,
+      kbPeopleFilter,
+      kbLocationFilter,
+      kbViewMode,
+    });
+  }, [
+    portalId,
+    kbFiles,
+    kbCollections,
+    kbCollectionFiles,
+    kbSmartFolders,
+    kbTopics,
+    kbTopicSuggestions,
+    kbFilter,
+    smartFoldersOpen,
+    kbSort,
+    kbTypeFilter,
+    kbPeopleFilter,
+    kbLocationFilter,
+    kbViewMode,
+  ]);
 
   const filteredKbFiles = useMemo(() => {
     const query = kbSearch.trim().toLowerCase();
@@ -191,11 +261,22 @@ export function WebKbPage() {
     }
     if (kbFilter.kind === "smart" && kbFilter.id) {
       const folder = kbSmartFolders.find((s) => s.id === Number(kbFilter.id));
-      const topicId = (folder?.system_tag || folder?.rules?.topic_id || folder?.rules?.topicId || "").toString();
+      const topicId = (
+        folder?.system_tag ||
+        folder?.rules?.topic_id ||
+        folder?.rules?.topicId ||
+        folder?.rules?.topic ||
+        folder?.rules?.id ||
+        ""
+      ).toString();
       if (topicId) {
-        const topic = kbTopics.find((t) => t.id === topicId);
-        const ids = topic?.file_ids || [];
-        items = items.filter((x) => ids.includes(x.id));
+        const topic = kbTopics.find((t) => String(t.id) === topicId);
+        const ids = (topic?.file_ids || []).map((id) => Number(id));
+        items = items.filter((x) => ids.includes(Number(x.id)));
+      } else if (folder?.name) {
+        const topic = kbTopics.find((t) => t.name.toLowerCase() === folder.name.toLowerCase());
+        const ids = (topic?.file_ids || []).map((id) => Number(id));
+        items = items.filter((x) => ids.includes(Number(x.id)));
       }
     }
     return items;
@@ -450,7 +531,7 @@ export function WebKbPage() {
   const selectKbFilter = (kind: Filter["kind"], id?: number | string) => {
     setKbFilter({ kind, id });
     if (kind === "collection" && id) setKbLocationFilter(String(id));
-    if (kind === "all") setKbLocationFilter("all");
+    if (kind !== "collection") setKbLocationFilter("all");
   };
 
   const createCollection = async () => {
@@ -838,22 +919,23 @@ export function WebKbPage() {
         )}
 
         <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold text-slate-900">Файлы</div>
-          </div>
-          <div className="mt-3 min-h-[46px]">
-            {selectedFileIds.length > 0 && (
-              <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-sm">
-                <div>Выбрано: {selectedFileIds.length}</div>
-                <select className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" onChange={bulkMoveToCollection}>
-                  <option value="">Переместить в папку</option>
-                  {kbCollections.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-                <button className="rounded-xl border border-slate-200 px-3 py-2 text-sm" onClick={bulkReindexFiles}>Переиндексировать</button>
-                <button className="rounded-xl border border-rose-200 px-3 py-2 text-sm text-rose-600" onClick={bulkDeleteFiles}>Удалить</button>
-                <button className="rounded-xl border border-slate-200 px-3 py-2 text-sm" onClick={() => setSelectedFileIds([])}>Снять выделение</button>
-              </div>
-            )}
+          <div className="h-[56px]">
+            <div className="flex h-full items-center rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-sm">
+              {selectedFileIds.length > 0 ? (
+                <div className="flex min-w-0 flex-nowrap items-center gap-2">
+                  <div className="shrink-0">Выбрано: {selectedFileIds.length}</div>
+                  <select className="shrink-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" onChange={bulkMoveToCollection}>
+                    <option value="">Переместить в папку</option>
+                    {kbCollections.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                  <button className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" onClick={bulkReindexFiles}>Переиндексировать</button>
+                  <button className="shrink-0 rounded-xl border border-rose-200 px-3 py-2 text-sm text-rose-600" onClick={bulkDeleteFiles}>Удалить</button>
+                  <button className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" onClick={() => setSelectedFileIds([])}>Снять выделение</button>
+                </div>
+              ) : (
+                <div className="text-sm font-semibold text-slate-900">Файлы</div>
+              )}
+            </div>
           </div>
 
           {kbViewMode === "table" && (
@@ -864,7 +946,11 @@ export function WebKbPage() {
                 tabIndex={0}
                 onKeyDown={handleTableKey}
                 onClick={(e) => {
-                  tableRef.current?.focus();
+                  const target = e.target as HTMLElement;
+                  const isInteractive = !!target.closest("button, input, select, a, textarea");
+                  if (!isInteractive) {
+                    tableRef.current?.focus({ preventScroll: true });
+                  }
                   if (!(e.target as HTMLElement).closest("[data-row='kb']")) {
                     setSelectedFileIds([]);
                     setFocusedRowId(null);

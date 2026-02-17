@@ -11,6 +11,49 @@ from apps.backend.services.bitrix_logging import log_inbound
 
 logger = logging.getLogger("uvicorn.error")
 
+
+_MAX_JSON_FIELD_CHARS = 16_000
+
+
+def _mask_payload(value):
+    """Mask sensitive fields recursively for trace-safe diagnostics."""
+    secret_keys = {
+        "access_token",
+        "refresh_token",
+        "token",
+        "auth",
+        "authorization",
+        "password",
+        "client_secret",
+        "secret",
+        "webhook_secret",
+    }
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            kl = str(k).lower()
+            if kl in secret_keys or "token" in kl or "secret" in kl or "password" in kl or "authorization" in kl:
+                out[k] = "[MASKED]" if v else None
+            else:
+                out[k] = _mask_payload(v)
+        return out
+    if isinstance(value, list):
+        return [_mask_payload(v) for v in value]
+    return value
+
+
+def _truncate_payload(value):
+    """Bound payload size to keep DB rows compact."""
+    try:
+        raw = json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return value
+    if len(raw) <= _MAX_JSON_FIELD_CHARS:
+        return value
+    clipped = raw[:_MAX_JSON_FIELD_CHARS]
+    return {"_truncated": True, "preview": clipped}
+
+
 class BitrixLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if not (request.url.path.startswith("/v1/bitrix") or request.url.path.startswith("/api/v1/bitrix")):
@@ -22,6 +65,22 @@ class BitrixLogMiddleware(BaseHTTPMiddleware):
         latency_ms = int((time.perf_counter() - start) * 1000)
         query_keys = list(request.query_params.keys())
         body_keys = []
+        request_json = None
+        response_json = None
+        headers_min = {
+            "accept": (request.headers.get("accept", "") or "")[:256],
+            "content_type": (request.headers.get("content-type", "") or "")[:128],
+            "x_requested_with": (request.headers.get("x-requested-with", "") or "")[:64],
+        }
+        try:
+            ct = (request.headers.get("content-type", "") or "").lower()
+            if "application/json" in ct:
+                body_bytes = await request.body()
+                if body_bytes:
+                    parsed = json.loads(body_bytes.decode("utf-8", errors="replace"))
+                    request_json = _truncate_payload(_mask_payload(parsed))
+        except Exception:
+            request_json = {"_parse_error": True}
         accept = request.headers.get("accept", "")
         sec_fetch_dest = request.headers.get("sec-fetch-dest", "")
         sec_fetch_mode = request.headers.get("sec-fetch-mode", "")
@@ -37,10 +96,22 @@ class BitrixLogMiddleware(BaseHTTPMiddleware):
                     response_length = len(body)
                     prefix = body[:1].decode(errors="ignore") if body else ""
                     response_is_json = prefix in ("{", "[")
+                    if response_is_json:
+                        try:
+                            parsed_resp = json.loads(body.decode("utf-8", errors="replace"))
+                            response_json = _truncate_payload(_mask_payload(parsed_resp))
+                        except Exception:
+                            response_json = {"_parse_error": True}
                 else:
                     text = str(body)
                     response_length = len(text.encode("utf-8"))
                     response_is_json = text.lstrip().startswith("{") or text.lstrip().startswith("[")
+                    if response_is_json:
+                        try:
+                            parsed_resp = json.loads(text)
+                            response_json = _truncate_payload(_mask_payload(parsed_resp))
+                        except Exception:
+                            response_json = {"_parse_error": True}
             else:
                 clen = response.headers.get("content-length", "") if hasattr(response, "headers") else ""
                 response_length = int(clen) if str(clen).isdigit() else None
@@ -67,6 +138,9 @@ class BitrixLogMiddleware(BaseHTTPMiddleware):
                     response_content_type=response_content_type,
                     response_length=response_length,
                     response_is_json=response_is_json,
+                    request_json=request_json,
+                    response_json=response_json,
+                    headers_min=headers_min,
                 )
         except Exception:
             pass

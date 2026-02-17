@@ -8,6 +8,13 @@ type TelegramConfig = {
   webhook_url: string;
 };
 
+type IntegrationsCacheState = {
+  integrationTab: "telegram" | "bitrix" | "amocrm";
+  staffConfig: TelegramConfig;
+  clientConfig: TelegramConfig;
+  bitrixMasked: string;
+};
+
 const refreshErrorMap: Record<string, string> = {
   missing_refresh_token: "нет refresh_token",
   missing_client_credentials: "не заданы креды",
@@ -15,16 +22,19 @@ const refreshErrorMap: Record<string, string> = {
   missing_auth: "нет сохранённых токенов",
 };
 
+const integrationsCache = new Map<number, IntegrationsCacheState>();
+
 export function WebIntegrationsPage() {
   const { portalId, portalToken } = getWebPortalInfo();
-  const [integrationTab, setIntegrationTab] = useState<"telegram" | "bitrix" | "amocrm">("telegram");
-  const [staffConfig, setStaffConfig] = useState<TelegramConfig>({
+  const cached = portalId ? integrationsCache.get(portalId) : null;
+  const [integrationTab, setIntegrationTab] = useState<"telegram" | "bitrix" | "amocrm">(cached?.integrationTab || "telegram");
+  const [staffConfig, setStaffConfig] = useState<TelegramConfig>(cached?.staffConfig || {
     enabled: false,
     allow_uploads: false,
     token_masked: "",
     webhook_url: "",
   });
-  const [clientConfig, setClientConfig] = useState<TelegramConfig>({
+  const [clientConfig, setClientConfig] = useState<TelegramConfig>(cached?.clientConfig || {
     enabled: false,
     allow_uploads: false,
     token_masked: "",
@@ -38,10 +48,17 @@ export function WebIntegrationsPage() {
   const [bitrixClientId, setBitrixClientId] = useState("");
   const [bitrixClientSecret, setBitrixClientSecret] = useState("");
   const [bitrixStatus, setBitrixStatus] = useState("");
-  const [bitrixMasked, setBitrixMasked] = useState("");
+  const [bitrixMasked, setBitrixMasked] = useState(cached?.bitrixMasked || "");
 
   useEffect(() => {
     if (!portalId || !portalToken) return;
+    const state = integrationsCache.get(portalId);
+    if (state) {
+      setIntegrationTab(state.integrationTab);
+      setStaffConfig(state.staffConfig);
+      setClientConfig(state.clientConfig);
+      setBitrixMasked(state.bitrixMasked);
+    }
     const loadTelegram = async (kind: "staff" | "client") => {
       try {
         const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/telegram/${kind}`);
@@ -75,6 +92,11 @@ export function WebIntegrationsPage() {
     loadTelegram("client");
     loadBitrixMask();
   }, [portalId, portalToken]);
+
+  useEffect(() => {
+    if (!portalId) return;
+    integrationsCache.set(portalId, { integrationTab, staffConfig, clientConfig, bitrixMasked });
+  }, [portalId, integrationTab, staffConfig, clientConfig, bitrixMasked]);
 
   const saveTelegram = async (kind: "staff" | "client") => {
     if (!portalId || !portalToken) return;

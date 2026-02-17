@@ -20,7 +20,6 @@ from apps.backend.deps import get_db
 from apps.backend.config import get_settings
 from apps.backend.models.portal import Portal, PortalUsersAccess
 from apps.backend.models.dialog import Dialog, Message
-from apps.backend.models.bitrix_inbound_event import BitrixInboundEvent
 from apps.backend.models.kb import (
     KBFile,
     KBJob,
@@ -46,11 +45,8 @@ from apps.backend.services.kb_storage import ensure_portal_dir, save_upload
 from apps.backend.services.kb_settings import get_portal_kb_settings, set_portal_kb_settings
 from apps.backend.services.kb_sources import create_url_source
 from apps.backend.services.kb_rag import answer_from_kb
-from apps.backend.services.billing import get_portal_usage_summary
 from apps.backend.services.gigachat_client import list_models, DEFAULT_API_BASE
-from apps.backend.services.kb_settings import get_effective_gigachat_settings, get_valid_gigachat_access_token
-from apps.backend.services.gigachat_client import chat_complete
-from apps.backend.models.topic_summary import PortalTopicSummary
+from apps.backend.services.kb_settings import get_valid_gigachat_access_token
 from apps.backend.services.portal_tokens import get_access_token
 from apps.backend.services.bot_provisioning import ensure_bot_registered
 from apps.backend.services.finalize_install import step_provision_chats, _now_trace_id
@@ -65,13 +61,13 @@ from apps.backend.services.telegram_settings import (
     get_portal_telegram_secret,
     get_portal_telegram_token_plain,
 )
-from apps.backend.models.portal_bot_flow import PortalBotFlow
 from apps.backend.models.web_user import WebUser
 from apps.backend.models.portal_link_request import PortalLinkRequest
-from apps.backend.services.bot_flow_engine import execute_client_flow_preview
 from apps.backend.services.activity import log_activity
 from apps.backend.clients.telegram import telegram_get_me, telegram_set_webhook
 from apps.backend.services.web_email import create_email_token, send_registration_email
+from apps.backend.utils.api_errors import error_envelope
+from apps.backend.utils.api_schema import is_schema_v2
 
 router = APIRouter()
 
@@ -117,6 +113,19 @@ def _domain_clean(domain: str) -> str:
 
 def _trace_id(request: Request) -> str:
     return getattr(request.state, "trace_id", "") or ""
+
+
+def _err(request: Request | None, code: str, message: str, status_code: int, detail: str | None = None):
+    return JSONResponse(
+        error_envelope(
+            code=code,
+            message=message,
+            trace_id=_trace_id(request) if request else "",
+            detail=detail,
+            legacy_error=True,
+        ),
+        status_code=status_code,
+    )
 
 
 def _portal_user_id_from_token(request: Request) -> int | None:
@@ -746,23 +755,38 @@ async def bitrix_users(
 ):
     """Список сотрудников портала (user.get). Требует scope user."""
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden", "detail": "portal_id mismatch"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403, detail="portal_id mismatch")
     portal = db.execute(select(Portal).where(Portal.id == portal_id)).scalar_one_or_none()
     if not portal:
-        return JSONResponse({"error": "Portal not found"}, status_code=404)
+        return _err(request, "portal_not_found", "Portal not found", 404)
     try:
         access_token = get_valid_access_token(db, portal_id, trace_id=_trace_id(request))
     except BitrixAuthError as e:
-        return JSONResponse({"error": e.code, "detail": e.detail}, status_code=400)
+        return _err(request, e.code, e.code, 400, detail=e.detail)
     domain_full = f"https://{portal.domain}"
     users_list, err = user_get(domain_full, access_token, start=start, limit=limit)
     if err == "missing_scope_user":
-        return JSONResponse(
-            {"error": "missing_scope_user", "detail": "Не хватает права user. Добавьте право user в приложении Bitrix24 и переустановите."},
-            status_code=403,
+        # After reinstall/scope update Bitrix may still answer with stale token context.
+        # Try one forced refresh + one retry before returning missing_scope.
+        try:
+            try:
+                refresh_portal_tokens(db, portal_id, trace_id=_trace_id(request))
+            except BitrixAuthError:
+                pass
+            access_token_retry = get_valid_access_token(db, portal_id, trace_id=_trace_id(request))
+            users_list, err = user_get(domain_full, access_token_retry, start=start, limit=limit)
+        except BitrixAuthError:
+            pass
+    if err == "missing_scope_user":
+        return _err(
+            request,
+            "missing_scope_user",
+            "missing_scope_user",
+            403,
+            detail="Не хватает права user. Добавьте право user в приложении Bitrix24 и переустановите.",
         )
     if err:
-        return JSONResponse({"error": err}, status_code=502)
+        return _err(request, "bitrix_users_failed", "bitrix_users_failed", 502, detail=err)
     out = [
         {
             "id": u.get("ID"),
@@ -796,16 +820,6 @@ class TelegramBotSettingsBody(BaseModel):
 class WebAccessUserBody(BaseModel):
     name: str
     telegram_username: str | None = None
-
-
-class BotFlowBody(BaseModel):
-    draft_json: dict | None = None
-
-
-class BotFlowTestBody(BaseModel):
-    text: str
-    draft_json: dict | None = None
-    state_json: dict | None = None
 
 
 class FinalizeInstallBody(BaseModel):
@@ -1094,12 +1108,13 @@ def _telegram_webhook_url(kind: str, portal_id: int, secret: str) -> str | None:
 @router.get("/portals/{portal_id}/access/users")
 async def get_portal_access_users(
     portal_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     pid: int = Depends(require_portal_access),
 ):
     """Список разрешённых user_id портала."""
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     rows = db.execute(
         select(PortalUsersAccess).where(PortalUsersAccess.portal_id == portal_id)
     ).scalars().all()
@@ -1121,7 +1136,7 @@ async def get_portal_kb_files(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     q = select(KBFile).where(KBFile.portal_id == portal_id).order_by(KBFile.id.desc()).limit(200)
     files = db.execute(q).scalars().all()
@@ -1154,14 +1169,21 @@ async def get_portal_kb_files(
 async def search_portal_kb(
     portal_id: int,
     q: str,
+    request: Request,
     limit: int = 50,
     audience: str | None = None,
     db: Session = Depends(get_db),
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     if not q:
+        if is_schema_v2(request):
+            return JSONResponse({
+                "ok": True,
+                "data": {"file_ids": [], "matches": []},
+                "meta": {"schema": "v2"},
+            })
         return JSONResponse({"file_ids": [], "matches": []})
     aud = (audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
@@ -1191,6 +1213,18 @@ async def search_portal_kb(
         if len(snippet) > 160:
             snippet = snippet[:160] + "..."
         matches.append({"file_id": int(fid), "filename": fname, "snippet": snippet})
+    if is_schema_v2(request):
+        return JSONResponse({
+            "ok": True,
+            "data": {
+                "file_ids": file_ids,
+                "matches": matches,
+            },
+            "meta": {
+                "schema": "v2",
+                "audience": aud,
+            },
+        })
     return JSONResponse({"file_ids": file_ids, "matches": matches})
 
 
@@ -1198,20 +1232,33 @@ async def search_portal_kb(
 async def ask_portal_kb(
     portal_id: int,
     body: KBAskBody,
+    request: Request,
     db: Session = Depends(get_db),
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     query = (body.query or "").strip()
     if not query:
-        return JSONResponse({"error": "empty_query"}, status_code=400)
+        return _err(request, "empty_query", "empty_query", 400)
     aud = (body.audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
     answer, err, _usage = answer_from_kb(db, portal_id, query, audience=aud)
     if err:
-        return JSONResponse({"error": err}, status_code=400)
+        return _err(request, "kb_ask_failed", "kb_ask_failed", 400, detail=err)
+    if is_schema_v2(request):
+        return JSONResponse({
+            "ok": True,
+            "data": {
+                "answer": answer,
+                "sources": [],
+            },
+            "meta": {
+                "schema": "v2",
+                "audience": aud,
+            },
+        })
     return JSONResponse({"answer": answer})
 
 
@@ -1225,7 +1272,7 @@ async def upload_portal_kb_file(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     if not file.filename:
         raise HTTPException(status_code=400, detail="Файл не задан")
@@ -1284,7 +1331,7 @@ async def reindex_portal_kb(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     files = db.execute(
         select(KBFile).where(
@@ -1333,11 +1380,11 @@ async def reindex_kb_file(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     rec = db.execute(select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)).scalar_one_or_none()
     if not rec:
-        return JSONResponse({"error": "not_found"}, status_code=404)
+        return _err(request, "not_found", "not_found", 404)
     rec.status = "queued"
     rec.error_message = None
     db.add(rec)
@@ -1370,11 +1417,11 @@ async def delete_kb_file(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     rec = db.execute(select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)).scalar_one_or_none()
     if not rec:
-        return JSONResponse({"error": "not_found"}, status_code=404)
+        return _err(request, "not_found", "not_found", 404)
     chunk_ids = db.execute(
         select(KBChunk.id).where(KBChunk.file_id == rec.id)
     ).scalars().all()
@@ -1400,7 +1447,7 @@ async def list_kb_collections(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     rows = db.execute(
         select(KBCollection).where(KBCollection.portal_id == portal_id).order_by(KBCollection.id.desc())
@@ -1436,11 +1483,11 @@ async def create_kb_collection(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     name = (body.name or "").strip()
     if not name:
-        return JSONResponse({"error": "missing_name"}, status_code=400)
+        return _err(request, "missing_name", "missing_name", 400)
     rec = KBCollection(
         portal_id=portal_id,
         name=name[:128],
@@ -1463,13 +1510,13 @@ async def update_kb_collection(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     rec = db.execute(
         select(KBCollection).where(KBCollection.id == collection_id, KBCollection.portal_id == portal_id)
     ).scalar_one_or_none()
     if not rec:
-        return JSONResponse({"error": "not_found"}, status_code=404)
+        return _err(request, "not_found", "not_found", 404)
     if body.name is not None:
         name = (body.name or "").strip()
         if name:
@@ -1490,7 +1537,7 @@ async def delete_kb_collection(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     db.execute(
         delete(KBCollectionFile).where(KBCollectionFile.collection_id == collection_id)
@@ -1512,18 +1559,18 @@ async def add_file_to_collection(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     rec = db.execute(
         select(KBCollection).where(KBCollection.id == collection_id, KBCollection.portal_id == portal_id)
     ).scalar_one_or_none()
     if not rec:
-        return JSONResponse({"error": "collection_not_found"}, status_code=404)
+        return _err(request, "collection_not_found", "collection_not_found", 404)
     file_rec = db.execute(
         select(KBFile).where(KBFile.id == body.file_id, KBFile.portal_id == portal_id)
     ).scalar_one_or_none()
     if not file_rec:
-        return JSONResponse({"error": "file_not_found"}, status_code=404)
+        return _err(request, "file_not_found", "file_not_found", 404)
     settings = get_portal_kb_settings(db, portal_id)
     multi = bool(settings.get("collections_multi_assign")) if settings.get("collections_multi_assign") is not None else True
     if not multi:
@@ -1549,7 +1596,7 @@ async def list_collection_files(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     rows = db.execute(
         select(KBCollectionFile.file_id)
@@ -1568,7 +1615,7 @@ async def remove_file_from_collection(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     db.execute(
         delete(KBCollectionFile).where(
@@ -1588,7 +1635,7 @@ async def list_kb_smart_folders(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     rows = db.execute(
         select(KBSmartFolder).where(KBSmartFolder.portal_id == portal_id).order_by(KBSmartFolder.id.desc())
@@ -1616,11 +1663,11 @@ async def create_kb_smart_folder(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     name = (body.name or "").strip()
     if not name:
-        return JSONResponse({"error": "missing_name"}, status_code=400)
+        return _err(request, "missing_name", "missing_name", 400)
     rec = KBSmartFolder(
         portal_id=portal_id,
         name=name[:128],
@@ -1643,7 +1690,7 @@ async def delete_kb_smart_folder(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     db.execute(
         delete(KBSmartFolder).where(KBSmartFolder.id == folder_id, KBSmartFolder.portal_id == portal_id)
@@ -1660,7 +1707,7 @@ async def get_kb_topics(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     files = db.execute(
         select(KBFile.id, KBFile.filename)
@@ -1712,7 +1759,7 @@ async def get_portal_kb_settings_api(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     return JSONResponse(get_portal_kb_settings(db, portal_id))
 
@@ -1758,7 +1805,7 @@ async def set_portal_kb_settings_api(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     out = set_portal_kb_settings(
         db,
@@ -1798,7 +1845,7 @@ async def get_portal_telegram_staff_settings(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     settings = get_portal_telegram_settings(db, portal_id)
     secret = get_portal_telegram_secret(db, portal_id, "staff") or ""
@@ -1815,7 +1862,7 @@ async def set_portal_telegram_staff_settings(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     if body.clear_token:
         body.enabled = False
@@ -1859,7 +1906,7 @@ async def get_portal_telegram_client_settings(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     settings = get_portal_telegram_settings(db, portal_id)
     secret = get_portal_telegram_secret(db, portal_id, "client") or ""
@@ -1876,7 +1923,7 @@ async def set_portal_telegram_client_settings(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     if body.clear_token:
         body.enabled = False
@@ -1921,12 +1968,12 @@ async def set_portal_bitrix_credentials(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     portal = _require_portal_admin(db, portal_id, request)
     client_id = (body.client_id or "").strip()
     client_secret = (body.client_secret or "").strip()
     if not client_id or not client_secret:
-        return JSONResponse({"error": "client_id/client_secret required"}, status_code=400)
+        return _err(request, "missing_credentials", "client_id/client_secret required", 400)
     s = get_settings()
     enc = s.token_encryption_key or s.secret_key
     portal.local_client_id = client_id
@@ -1952,92 +1999,16 @@ async def get_portal_bitrix_credentials(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     portal = db.get(Portal, portal_id)
     if not portal:
-        return JSONResponse({"error": "portal_not_found"}, status_code=404)
+        return _err(request, "portal_not_found", "portal_not_found", 404)
     client_id = portal.local_client_id or ""
     if not client_id:
         return JSONResponse({"ok": True, "client_id_masked": ""})
     masked = f"{client_id[:6]}...{client_id[-4:]}" if len(client_id) > 10 else f"{client_id[:2]}...{client_id[-2:]}"
     return JSONResponse({"ok": True, "client_id_masked": masked})
-
-
-@router.get("/portals/{portal_id}/botflow/client")
-async def get_portal_botflow_client(
-    portal_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-    pid: int = Depends(require_portal_access),
-):
-    if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-    _require_portal_admin(db, portal_id, request)
-    row = db.get(PortalBotFlow, {"portal_id": portal_id, "kind": "client"})
-    return JSONResponse({
-        "draft": row.draft_json if row else None,
-        "published": row.published_json if row else None,
-    })
-
-
-@router.post("/portals/{portal_id}/botflow/client")
-async def set_portal_botflow_client(
-    portal_id: int,
-    body: BotFlowBody,
-    request: Request,
-    db: Session = Depends(get_db),
-    pid: int = Depends(require_portal_access),
-):
-    if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-    _require_portal_admin(db, portal_id, request)
-    row = db.get(PortalBotFlow, {"portal_id": portal_id, "kind": "client"})
-    if not row:
-        row = PortalBotFlow(portal_id=portal_id, kind="client", draft_json=body.draft_json)
-        db.add(row)
-    else:
-        row.draft_json = body.draft_json
-    db.commit()
-    return JSONResponse({"status": "ok"})
-
-
-@router.post("/portals/{portal_id}/botflow/client/publish")
-async def publish_portal_botflow_client(
-    portal_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-    pid: int = Depends(require_portal_access),
-):
-    if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-    _require_portal_admin(db, portal_id, request)
-    row = db.get(PortalBotFlow, {"portal_id": portal_id, "kind": "client"})
-    if not row or not row.draft_json:
-        return JSONResponse({"error": "missing_draft"}, status_code=400)
-    row.published_json = row.draft_json
-    db.commit()
-    return JSONResponse({"status": "ok"})
-
-
-@router.post("/portals/{portal_id}/botflow/client/test")
-async def test_portal_botflow_client(
-    portal_id: int,
-    body: BotFlowTestBody,
-    request: Request,
-    db: Session = Depends(get_db),
-    pid: int = Depends(require_portal_access),
-):
-    if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-    _require_portal_admin(db, portal_id, request)
-    row = db.get(PortalBotFlow, {"portal_id": portal_id, "kind": "client"})
-    flow = body.draft_json or (row.draft_json if row else None)
-    if not flow:
-        return JSONResponse({"error": "missing_draft"}, status_code=400)
-    # preview uses dialog_id=0 (no state saved)
-    text, state, trace = execute_client_flow_preview(db, portal_id, 0, body.text, flow, state_override=body.state_json)
-    return JSONResponse({"text": text, "state": state, "trace": trace})
 
 
 @router.get("/portals/{portal_id}/kb/models")
@@ -2048,7 +2019,7 @@ async def get_portal_kb_models(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     # use global token/settings
     from apps.backend.services.kb_settings import get_gigachat_settings, get_gigachat_access_token_plain, get_valid_gigachat_access_token
@@ -2056,10 +2027,10 @@ async def get_portal_kb_models(
     api_base = settings.get("api_base") or DEFAULT_API_BASE
     token, err = get_valid_gigachat_access_token(db)
     if err or not token:
-        return JSONResponse({"error": err or "missing_access_token"}, status_code=400)
+        return _err(request, err or "missing_access_token", err or "missing_access_token", 400)
     items, err2 = list_models(api_base, token)
     if err2:
-        return JSONResponse({"error": err2}, status_code=400)
+        return _err(request, err2, err2, 400)
     return JSONResponse({"items": items})
 
 
@@ -2072,14 +2043,15 @@ async def add_portal_kb_url_source(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     aud = (body.audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
     result = create_url_source(db, portal_id, body.url, body.title, audience=aud)
     if not result.get("ok"):
-        return JSONResponse({"error": result.get("error")}, status_code=400)
+        err = str(result.get("error") or "source_create_failed")
+        return _err(request, err, err, 400)
     # enqueue job
     try:
         from redis import Redis
@@ -2101,7 +2073,7 @@ async def list_portal_kb_sources(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     q = select(KBSource).where(KBSource.portal_id == portal_id).order_by(KBSource.id.desc()).limit(200)
     rows = db.execute(q).scalars().all()
@@ -2126,250 +2098,6 @@ async def list_portal_kb_sources(
     return JSONResponse({"items": items})
 
 
-@router.get("/portals/{portal_id}/dialogs/recent")
-async def get_recent_dialog_messages(
-    portal_id: int,
-    limit: int = 30,
-    db: Session = Depends(get_db),
-    pid: int = Depends(require_portal_access),
-):
-    """Recent dialog messages for portal (rx/tx) for iframe status page."""
-    if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-    if limit < 1:
-        limit = 1
-    if limit > 100:
-        limit = 100
-    q = (
-        select(Message, Dialog)
-        .join(Dialog, Dialog.id == Message.dialog_id)
-        .where(Dialog.portal_id == portal_id)
-        .order_by(Message.created_at.desc())
-        .limit(limit)
-    )
-    rows = db.execute(q).all()
-    items = []
-    for msg, dialog in rows:
-        body = (msg.body or "")
-        if len(body) > 200:
-            body = body[:200] + "…"
-        items.append({
-            "dialog_id": dialog.provider_dialog_id,
-            "direction": msg.direction,
-            "body": body,
-            "created_at": msg.created_at.isoformat() if msg.created_at else None,
-        })
-    return JSONResponse({"items": items, "count": len(items)})
-
-
-@router.get("/portals/{portal_id}/dialogs/summary")
-async def get_dialogs_summary(
-    portal_id: int,
-    limit: int = 120,
-    db: Session = Depends(get_db),
-    pid: int = Depends(require_portal_access),
-):
-    """Semantic 3-topic summary for recent portal dialogs (iframe analytics widget)."""
-    if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-    if limit < 10:
-        limit = 10
-    if limit > 300:
-        limit = 300
-
-    from datetime import datetime, timedelta, date
-    import json
-
-    today = datetime.utcnow().date()
-    latest = (
-        db.query(PortalTopicSummary)
-        .filter(PortalTopicSummary.portal_id == portal_id)
-        .filter(PortalTopicSummary.day == today)
-        .order_by(PortalTopicSummary.created_at.desc())
-        .first()
-    )
-    if latest:
-        return JSONResponse(
-            {
-                "items": latest.items or [],
-                "day": latest.day.isoformat(),
-                "count": len(latest.items or []),
-                "stale": False,
-            }
-        )
-
-    day_start = datetime.combine(today, datetime.min.time())
-    day_end = day_start + timedelta(days=1)
-    q = (
-        select(Message.body)
-        .join(Dialog, Dialog.id == Message.dialog_id)
-        .where(Dialog.portal_id == portal_id)
-        .where(Message.direction == "rx")
-        .where(Message.body.isnot(None))
-        .where(Message.created_at >= day_start)
-        .where(Message.created_at < day_end)
-        .order_by(Message.created_at.desc())
-        .limit(limit)
-    )
-    rows = db.execute(q).scalars().all()
-    texts = [str(t).strip() for t in rows if t and str(t).strip()]
-
-    source_from = day_start
-    source_to = day_end
-    if len(texts) < 10:
-        week_start = datetime.utcnow() - timedelta(days=7)
-        q = (
-            select(Message.body)
-            .join(Dialog, Dialog.id == Message.dialog_id)
-            .where(Dialog.portal_id == portal_id)
-            .where(Message.direction == "rx")
-            .where(Message.body.isnot(None))
-            .where(Message.created_at >= week_start)
-            .order_by(Message.created_at.desc())
-            .limit(limit)
-        )
-        rows = db.execute(q).scalars().all()
-        texts = [str(t).strip() for t in rows if t and str(t).strip()]
-        source_from = week_start
-        source_to = datetime.utcnow()
-
-    if len(texts) < 8:
-        last = (
-            db.query(PortalTopicSummary)
-            .filter(PortalTopicSummary.portal_id == portal_id)
-            .order_by(PortalTopicSummary.day.desc())
-            .first()
-        )
-        if last:
-            return JSONResponse(
-                {
-                    "items": last.items or [],
-                    "day": last.day.isoformat(),
-                    "count": len(last.items or []),
-                    "stale": True,
-                }
-            )
-        return JSONResponse({"items": [], "count": len(texts)}, status_code=200)
-
-    settings = get_effective_gigachat_settings(db, portal_id)
-    token, err = get_valid_gigachat_access_token(db)
-    if err:
-        return JSONResponse({"error": "gigachat_unavailable"}, status_code=503)
-
-    sample = "\n".join(texts[:160])
-    system = (
-        "Ты аналитик запросов. На входе список пользовательских сообщений. "
-        "Сгруппируй по смыслу в 3 главные темы. Для каждой темы верни одно "
-        "осмысленное предложение на русском и оценку частоты (score) от 1 до 100 "
-        "по относительной популярности. Формат строго JSON массив из 3 объектов "
-        "с полями: topic, score."
-    )
-    user = (
-        "Сообщения:\n" + sample + "\n\n"
-        "Верни JSON массив из 3 объектов. Никакого текста вокруг JSON."
-    )
-    content, err2, _usage = chat_complete(
-        settings.get("api_base") or DEFAULT_API_BASE,
-        token,
-        settings.get("chat_model") or "GigaChat-2-Pro",
-        [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.2,
-        max_tokens=260,
-    )
-    items: list[dict] = []
-    if not err2 and content:
-        try:
-            data = json.loads(str(content).strip())
-            if isinstance(data, list):
-                for it in data:
-                    topic = str(it.get("topic", "")).strip()
-                    score = it.get("score")
-                    if topic:
-                        try:
-                            score_int = int(score)
-                        except Exception:
-                            score_int = None
-                        items.append({"topic": topic, "score": score_int})
-        except Exception:
-            items = []
-
-    if len(items) >= 3:
-        rec = PortalTopicSummary(
-            portal_id=portal_id,
-            day=today,
-            source_from=source_from,
-            source_to=source_to,
-            items=items,
-        )
-        db.add(rec)
-        db.commit()
-        return JSONResponse(
-            {
-                "items": items,
-                "day": today.isoformat(),
-                "count": len(items),
-                "stale": False,
-            }
-        )
-
-    last = (
-        db.query(PortalTopicSummary)
-        .filter(PortalTopicSummary.portal_id == portal_id)
-        .order_by(PortalTopicSummary.day.desc())
-        .first()
-    )
-    if last:
-        return JSONResponse(
-            {
-                "items": last.items or [],
-                "day": last.day.isoformat(),
-                "count": len(last.items or []),
-                "stale": True,
-            }
-        )
-    return JSONResponse({"items": [], "error": "summary_failed"}, status_code=200)
-
-
-@router.get("/portals/{portal_id}/users/stats")
-async def get_portal_user_stats(
-    portal_id: int,
-    hours: int = 24,
-    db: Session = Depends(get_db),
-    pid: int = Depends(require_portal_access),
-):
-    if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-    if hours < 1:
-        hours = 1
-    if hours > 168:
-        hours = 168
-    from datetime import datetime, timedelta
-    since = datetime.utcnow() - timedelta(hours=hours)
-    q = (
-        db.query(BitrixInboundEvent.user_id, func.count(BitrixInboundEvent.id))
-        .filter(BitrixInboundEvent.portal_id == portal_id)
-        .filter(BitrixInboundEvent.event_name == "ONIMBOTMESSAGEADD")
-        .filter(BitrixInboundEvent.created_at >= since)
-        .group_by(BitrixInboundEvent.user_id)
-    )
-    stats = {str(uid): int(cnt) for uid, cnt in q.all() if uid is not None}
-    return JSONResponse({"hours": hours, "stats": stats})
-
-
-@router.get("/portals/{portal_id}/billing/summary")
-async def get_portal_billing_summary(
-    portal_id: int,
-    db: Session = Depends(get_db),
-    pid: int = Depends(require_portal_access),
-):
-    if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-    return JSONResponse(get_portal_usage_summary(db, portal_id))
-
-
 @router.put("/portals/{portal_id}/access/users")
 async def put_portal_access_users(
     portal_id: int,
@@ -2379,7 +2107,7 @@ async def put_portal_access_users(
 ):
     """Bulk replace allowlist. user_ids — список Bitrix user ID."""
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     prev_rows = db.execute(
         select(PortalUsersAccess.user_id).where(
             PortalUsersAccess.portal_id == portal_id,
@@ -2402,7 +2130,7 @@ async def put_portal_access_users(
         uname = normalize_telegram_username(it.telegram_username)
         if uname:
             if uname in seen_tg:
-                return JSONResponse({"error": "duplicate_telegram_username", "detail": uname}, status_code=400)
+                return _err(request, "duplicate_telegram_username", "duplicate_telegram_username", 400, detail=uname)
             seen_tg.add(uname)
         db.add(PortalUsersAccess(
             portal_id=portal_id,
@@ -2476,7 +2204,7 @@ async def add_portal_web_user(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     name = (body.name or "").strip()
     if not name:
@@ -2503,7 +2231,7 @@ async def delete_portal_web_user(
     pid: int = Depends(require_portal_access),
 ):
     if pid != portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     rec = db.execute(
         select(PortalUsersAccess).where(
@@ -2599,7 +2327,15 @@ async def bitrix_install_finalize(
     if not _is_json_api_request(request):
         return RedirectResponse(url=_install_redirect_url(request), status_code=303)
     if pid != body.portal_id:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return JSONResponse(
+            error_envelope(
+                code="forbidden",
+                message="Forbidden",
+                trace_id=_trace_id(request),
+                legacy_error=True,
+            ),
+            status_code=403,
+        )
     trace_id = _trace_id(request)
     try:
         result = finalize_install(
@@ -2623,7 +2359,13 @@ async def bitrix_install_finalize(
             err_code="internal_error", safe_err=safe_err,
         )
         resp = JSONResponse(
-            {"error": "internal_error", "trace_id": trace_id},
+            error_envelope(
+                code="internal_error",
+                message="Внутренняя ошибка сервера",
+                trace_id=trace_id,
+                detail=safe_err,
+                legacy_error=True,
+            ),
             status_code=500,
         )
         resp.headers["X-Trace-Id"] = trace_id

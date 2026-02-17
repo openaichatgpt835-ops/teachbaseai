@@ -4,30 +4,55 @@ import { fetchPortal, getWebPortalInfo } from "./auth";
 type KbFile = { id: number; status: string; created_at?: string };
 type KbSource = { id: number };
 type TopicSummary = { topic: string; score?: number };
+type OverviewState = {
+  kbFiles: KbFile[];
+  kbSources: KbSource[];
+  usersCount: number;
+  selectedUsersCount: number;
+  activeUsers: number;
+  topicSummaries: TopicSummary[];
+  lastUpdated: string;
+};
+
+const OVERVIEW_DEFAULT: OverviewState = {
+  kbFiles: [],
+  kbSources: [],
+  usersCount: 0,
+  selectedUsersCount: 0,
+  activeUsers: 0,
+  topicSummaries: [],
+  lastUpdated: "—",
+};
+
+const overviewCache = new Map<number, OverviewState>();
 
 export function WebOverviewPage() {
   const { portalId, portalToken } = getWebPortalInfo();
-  const [kbFiles, setKbFiles] = useState<KbFile[]>([]);
-  const [kbSources, setKbSources] = useState<KbSource[]>([]);
-  const [usersCount, setUsersCount] = useState(0);
-  const [selectedUsersCount, setSelectedUsersCount] = useState(0);
-  const [activeUsers, setActiveUsers] = useState(0);
-  const [topicSummaries, setTopicSummaries] = useState<TopicSummary[]>([]);
-  const [lastUpdated, setLastUpdated] = useState("—");
+  const [overview, setOverview] = useState<OverviewState>(() => {
+    if (!portalId) return OVERVIEW_DEFAULT;
+    return overviewCache.get(portalId) || OVERVIEW_DEFAULT;
+  });
 
   const kbCounts = useMemo(() => {
     const counts = { ready: 0, queued: 0, error: 0 };
-    for (const f of kbFiles) {
+    for (const f of overview.kbFiles) {
       const st = (f.status || "").toLowerCase();
       if (st === "ready") counts.ready += 1;
       else if (st === "queued" || st === "processing" || st === "uploaded") counts.queued += 1;
       else if (st === "error") counts.error += 1;
     }
     return counts;
-  }, [kbFiles]);
+  }, [overview.kbFiles]);
+
+  const sortedTopicSummaries = useMemo(() => {
+    return [...overview.topicSummaries].sort((a, b) => Number(b.score ?? -1) - Number(a.score ?? -1));
+  }, [overview.topicSummaries]);
 
   useEffect(() => {
     if (!portalId || !portalToken) return;
+    const cached = overviewCache.get(portalId);
+    if (cached) setOverview(cached);
+
     const load = async () => {
       try {
         const [filesRes, sourcesRes, usersRes, accessRes, statsRes, summaryRes] = await Promise.all([
@@ -45,17 +70,40 @@ export function WebOverviewPage() {
         const stats = await statsRes.json().catch(() => null);
         const summary = await summaryRes.json().catch(() => null);
 
-        if (filesRes.ok && files?.items) setKbFiles(files.items);
-        if (sourcesRes.ok && sources?.items) setKbSources(sources.items);
-        if (usersRes.ok && users?.items) setUsersCount(users.items.length);
-        if (accessRes.ok && access?.user_ids) setSelectedUsersCount(access.user_ids.length);
-        if (statsRes.ok && stats?.stats) setActiveUsers(Object.keys(stats.stats || {}).length);
-        if (summaryRes.ok && summary?.items) setTopicSummaries(summary.items);
-        setLastUpdated(new Date().toLocaleString("ru-RU"));
+        setOverview((prev) => {
+          const accessItems = Array.isArray(access?.items) ? access.items : [];
+          const bitrixFromUsers = usersRes.ok && Array.isArray(users?.items) ? users.items.length : null;
+          const bitrixFromAccess = new Set(
+            accessItems
+              .filter((it: any) => (it?.kind || "bitrix") === "bitrix")
+              .map((it: any) => String(it?.user_id || ""))
+              .filter(Boolean)
+          ).size;
+          const nonBitrixCount = new Set(
+            accessItems
+              .filter((it: any) => (it?.kind || "bitrix") !== "bitrix")
+              .map((it: any) => `${String(it?.kind || "other")}:${String(it?.user_id || "")}`)
+              .filter((v: string) => !v.endsWith(":"))
+          ).size;
+          const totalUsers = (bitrixFromUsers ?? bitrixFromAccess) + nonBitrixCount;
+
+          const next: OverviewState = {
+            kbFiles: filesRes.ok && files?.items ? files.items : prev.kbFiles,
+            kbSources: sourcesRes.ok && sources?.items ? sources.items : prev.kbSources,
+            usersCount: Number.isFinite(totalUsers) ? totalUsers : prev.usersCount,
+            selectedUsersCount: accessRes.ok && accessItems.length ? accessItems.length : prev.selectedUsersCount,
+            activeUsers: statsRes.ok && stats?.stats ? Object.keys(stats.stats || {}).length : prev.activeUsers,
+            topicSummaries: summaryRes.ok && summary?.items ? summary.items : prev.topicSummaries,
+            lastUpdated: new Date().toLocaleString("ru-RU"),
+          };
+          overviewCache.set(portalId, next);
+          return next;
+        });
       } catch {
-        // ignore
+        // keep previous snapshot
       }
     };
+
     load();
   }, [portalId, portalToken]);
 
@@ -70,9 +118,9 @@ export function WebOverviewPage() {
         <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
           <h2 className="text-sm font-semibold text-slate-900">База знаний</h2>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <Metric label="Файлов" value={kbFiles.length} />
-            <Metric label="URL‑источников" value={kbSources.length} />
-            <Metric label="Последнее обновление" value={lastUpdated} />
+            <Metric label="Файлов" value={overview.kbFiles.length} />
+            <Metric label="URL‑источников" value={overview.kbSources.length} />
+            <Metric label="Последнее обновление" value={overview.lastUpdated} />
             <Metric label="Статус" value={kbCounts.error > 0 ? "Есть ошибки" : "Актуальна"} />
           </div>
         </div>
@@ -80,9 +128,9 @@ export function WebOverviewPage() {
         <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
           <h2 className="text-sm font-semibold text-slate-900">Использование</h2>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <Metric label="Активные сегодня" value={activeUsers} />
-            <Metric label="Всего сотрудников" value={usersCount} />
-            <Metric label="Доступ разрешён" value={selectedUsersCount} />
+            <Metric label="Активные сегодня" value={overview.activeUsers} />
+            <Metric label="Всего сотрудников" value={overview.usersCount} />
+            <Metric label="Доступ разрешён" value={overview.selectedUsersCount} />
             <Metric label="Ошибки индексации" value={kbCounts.error} />
           </div>
         </div>
@@ -90,9 +138,9 @@ export function WebOverviewPage() {
 
       <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
         <h2 className="text-sm font-semibold text-slate-900">Фокус запросов</h2>
-        {topicSummaries.length ? (
+        {sortedTopicSummaries.length ? (
           <div className="mt-4 space-y-3">
-            {topicSummaries.map((t, idx) => (
+            {sortedTopicSummaries.map((t, idx) => (
               <div key={`${t.topic}-${idx}`} className="flex items-center justify-between rounded-xl border border-slate-100 px-4 py-3">
                 <div>
                   <div className="text-sm text-slate-900">{t.topic}</div>

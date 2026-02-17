@@ -7,8 +7,76 @@ from sqlalchemy import select, desc
 from apps.backend.auth import get_current_admin
 from apps.backend.deps import get_db
 from apps.backend.models.bitrix_log import BitrixHttpLog
+from apps.backend.models.bitrix_inbound_event import BitrixInboundEvent
+from apps.backend.models.outbox import Outbox
 
 router = APIRouter(dependencies=[Depends(get_current_admin)])
+
+
+@router.get("/{trace_id}/timeline")
+def get_trace_timeline(trace_id: str, db: Session = Depends(get_db)):
+    items: list[dict] = []
+
+    log_rows = db.execute(
+        select(BitrixHttpLog)
+        .where(BitrixHttpLog.trace_id == trace_id)
+        .order_by(BitrixHttpLog.created_at)
+    ).scalars().all()
+    for r in log_rows:
+        items.append({
+            "source": "bitrix_http",
+            "id": r.id,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "portal_id": r.portal_id,
+            "kind": r.kind,
+            "status": r.status_code,
+            "summary": r.path or "",
+        })
+
+    inbound_rows = db.execute(
+        select(BitrixInboundEvent)
+        .where(BitrixInboundEvent.trace_id == trace_id)
+        .order_by(BitrixInboundEvent.created_at)
+    ).scalars().all()
+    for r in inbound_rows:
+        items.append({
+            "source": "inbound",
+            "id": int(r.id),
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "portal_id": r.portal_id,
+            "kind": r.event_name,
+            "status": r.status_hint,
+            "summary": r.path or "",
+        })
+
+    outbox_rows = db.execute(select(Outbox).order_by(Outbox.created_at.desc()).limit(1000)).scalars().all()
+    for r in outbox_rows:
+        payload = {}
+        if r.payload_json:
+            try:
+                payload = json.loads(r.payload_json) if isinstance(r.payload_json, str) else (r.payload_json or {})
+            except Exception:
+                payload = {}
+        if str(payload.get("trace_id") or "") != trace_id:
+            continue
+        items.append({
+            "source": "outbox",
+            "id": r.id,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "portal_id": r.portal_id,
+            "kind": payload.get("kind") or "outbox",
+            "status": r.status,
+            "summary": (r.error_message or "")[:200],
+        })
+
+    if not items:
+        raise HTTPException(status_code=404, detail="Трейс не найден")
+
+    def _sort_key(x: dict):
+        return x.get("created_at") or ""
+
+    items.sort(key=_sort_key)
+    return {"trace_id": trace_id, "items": items}
 
 
 @router.get("/{trace_id}")
@@ -32,6 +100,9 @@ def get_trace_detail(trace_id: str, db: Session = Depends(get_db)):
                 pass
         req = summary.get("request_shape_json") or {}
         resp = summary.get("response_shape_json") or {}
+        request_json = summary.get("request_json")
+        response_json = summary.get("response_json")
+        headers_min = summary.get("headers_min")
         items.append({
             "id": r.id,
             "trace_id": r.trace_id,
@@ -51,6 +122,9 @@ def get_trace_detail(trace_id: str, db: Session = Depends(get_db)):
             "top_level_name_enabled": req.get("has_NAME_top_level"),
             "api_prefix_used": req.get("api_prefix_used"),
             "event_urls_sent": summary.get("event_urls_sent"),
+            "request_json": request_json,
+            "response_json": response_json,
+            "headers_min": headers_min,
             "summary": summary,
         })
     return {"trace_id": trace_id, "items": items}
