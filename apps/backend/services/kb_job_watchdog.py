@@ -57,6 +57,7 @@ def recover_stuck_kb_jobs_once(
         "stuck_jobs_failed": 0,
         "files_requeued": 0,
         "jobs_created": 0,
+        "queued_jobs_enqueued": 0,
     }
 
     with factory() as db:
@@ -128,18 +129,60 @@ def recover_stuck_kb_jobs_once(
             result["files_requeued"] += 1
             result["jobs_created"] += 1
 
+        # Recover files stuck in uploaded state (job enqueue missed/faulted).
+        stale_uploaded_files = db.execute(
+            select(KBFile).where(
+                KBFile.status == "uploaded",
+                KBFile.updated_at < cutoff,
+            ).limit(batch_limit)
+        ).scalars().all()
+        for file_rec in stale_uploaded_files:
+            if file_rec.id in active_file_ids:
+                continue
+            file_rec.status = "queued"
+            file_rec.error_message = None
+            db.add(file_rec)
+            new_job = KBJob(
+                portal_id=file_rec.portal_id,
+                job_type="ingest",
+                status="queued",
+                payload_json={"file_id": file_rec.id},
+            )
+            db.add(new_job)
+            db.flush()
+            requeued_ids.append(new_job.id)
+            active_file_ids.add(file_rec.id)
+            result["files_requeued"] += 1
+            result["jobs_created"] += 1
+
         db.commit()
 
-    if requeued_ids:
+    enqueue_ids: list[int] = list(requeued_ids)
+
+    # Safety net: ensure queued ingest jobs are present in Redis queue.
+    with factory() as db:
+        queued_ids = db.execute(
+            select(KBJob.id).where(
+                KBJob.job_type == "ingest",
+                KBJob.status == "queued",
+            ).order_by(KBJob.created_at.asc()).limit(batch_limit)
+        ).scalars().all()
+        for qid in queued_ids:
+            if int(qid) not in enqueue_ids:
+                enqueue_ids.append(int(qid))
+        result["queued_jobs_enqueued"] = len(queued_ids)
+
+    if enqueue_ids:
         try:
             from redis import Redis
             from rq import Queue
 
             s = get_settings()
             r = Redis(host=s.redis_host, port=s.redis_port)
-            q = Queue("default", connection=r)
-            for job_id in requeued_ids:
-                q.enqueue("apps.worker.jobs.process_kb_job", job_id, job_timeout=1800)
+            q = Queue(s.rq_ingest_queue_name or "ingest", connection=r)
+            job_timeout = max(300, int(s.kb_job_timeout_seconds or 3600))
+            for job_id in enqueue_ids:
+                q.enqueue("apps.worker.jobs.process_kb_job", job_id, job_timeout=job_timeout)
         except Exception:
             logger.exception("kb_watchdog_enqueue_failed")
 

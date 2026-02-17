@@ -1,0 +1,2 @@
+cd /opt/teachbaseai
+docker compose -f docker-compose.prod.yml exec -T backend python -c 'from redis import Redis; from rq import Queue; from apps.backend.config import get_settings; s=get_settings(); r=Redis(host=s.redis_host, port=s.redis_port); q=Queue(s.rq_ingest_queue_name, connection=r); q.enqueue("apps.worker.jobs.process_kb_job", 115, job_timeout=max(300,int(s.kb_job_timeout_seconds or 3600))); print("enqueued",115)'

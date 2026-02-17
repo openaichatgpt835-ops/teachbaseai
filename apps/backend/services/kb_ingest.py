@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import os
 import subprocess
 import tempfile
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session
 from apps.backend.models.kb import KBFile, KBChunk, KBEmbedding
 from apps.backend.services.kb_settings import get_effective_gigachat_settings, get_valid_gigachat_access_token
 from apps.backend.services.gigachat_client import create_embeddings
+from apps.backend.services.kb_pgvector import write_vector_column
 from apps.backend.services.billing import get_pricing, calc_cost_rub, record_usage
 
 
@@ -140,6 +142,30 @@ def _ocr_pdf_file(path: str, lang: str = "rus+eng") -> str:
 
 
 _VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+_MEDIA_CHUNK_SECONDS = max(60, int(os.getenv("MEDIA_CHUNK_SECONDS") or 600))
+_MEDIA_CHUNK_OVERLAP_SECONDS = max(0, int(os.getenv("MEDIA_CHUNK_OVERLAP_SECONDS") or 2))
+
+_CHUNK_PROFILES: dict[str, tuple[int, int]] = {
+    # default narrative text
+    "default": (1200, 200),
+    # tables/spreadsheets/rows
+    "tabular": (700, 120),
+    # scanned/ocr pages benefit from shorter windows
+    "ocr": (900, 140),
+    # media transcript chunks
+    "media": (1000, 120),
+}
+
+
+def _chunk_profile_for_ext(ext: str) -> tuple[int, int]:
+    ext = (ext or "").lower()
+    if ext in (".csv", ".xls", ".xlsx"):
+        return _CHUNK_PROFILES["tabular"]
+    if ext in (".png", ".jpg", ".jpeg"):
+        return _CHUNK_PROFILES["ocr"]
+    if ext in _VIDEO_EXTS:
+        return _CHUNK_PROFILES["media"]
+    return _CHUNK_PROFILES["default"]
 
 
 @dataclass
@@ -162,6 +188,24 @@ def _extract_audio_to_wav(src_path: str, dst_path: str) -> None:
         dst_path,
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _media_duration_seconds(src_path: str) -> int:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        src_path,
+    ]
+    out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore").strip()
+    try:
+        return max(1, int(float(out)))
+    except Exception:
+        return 1
 
 
 _WHISPER_MODEL = None
@@ -189,6 +233,100 @@ def _transcribe_media(path: str) -> list[_Segment]:
         end_ms = int((seg.end or 0) * 1000)
         out.append(_Segment(text=text, start_ms=start_ms, end_ms=end_ms))
     return out
+
+
+def _transcribe_media_window(path: str, start_sec: int, duration_sec: int) -> list[_Segment]:
+    with tempfile.TemporaryDirectory() as td:
+        chunk_wav = os.path.join(td, "chunk.wav")
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(max(0, start_sec)),
+            "-i",
+            path,
+            "-t",
+            str(max(1, duration_sec)),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            chunk_wav,
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return _transcribe_media(chunk_wav)
+
+
+def _read_transcript_segments_jsonl(path: str) -> list[_Segment]:
+    if not os.path.exists(path):
+        return []
+    out: list[_Segment] = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+                txt = str(row.get("text") or "").strip()
+                if not txt:
+                    continue
+                out.append(
+                    _Segment(
+                        text=txt,
+                        start_ms=int(row.get("start_ms") or 0),
+                        end_ms=int(row.get("end_ms") or 0),
+                    )
+                )
+            except Exception:
+                continue
+    return out
+
+
+def _append_transcript_segment_jsonl(path: str, seg: _Segment) -> None:
+    row = {"start_ms": seg.start_ms, "end_ms": seg.end_ms, "text": seg.text}
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _transcribe_media_resumable(
+    src_path: str,
+    transcript_jsonl_path: str,
+    progress_cb=None,
+) -> list[_Segment]:
+    segments = _read_transcript_segments_jsonl(transcript_jsonl_path)
+    last_end_ms = segments[-1].end_ms if segments else 0
+    total_sec = _media_duration_seconds(src_path)
+    overlap_ms = _MEDIA_CHUNK_OVERLAP_SECONDS * 1000
+    start_sec = max(0, int(max(0, last_end_ms - overlap_ms) / 1000))
+    if start_sec >= total_sec:
+        if progress_cb:
+            progress_cb(100)
+        return segments
+
+    pos = start_sec
+    while pos < total_sec:
+        win = min(_MEDIA_CHUNK_SECONDS, total_sec - pos)
+        win_segments = _transcribe_media_window(src_path, pos, win)
+        for seg in win_segments:
+            shifted = _Segment(
+                text=seg.text,
+                start_ms=seg.start_ms + pos * 1000,
+                end_ms=seg.end_ms + pos * 1000,
+            )
+            # Skip overlap duplicates on resume/chunk boundaries.
+            if shifted.end_ms <= last_end_ms:
+                continue
+            segments.append(shifted)
+            _append_transcript_segment_jsonl(transcript_jsonl_path, shifted)
+            last_end_ms = max(last_end_ms, shifted.end_ms)
+        pos += max(1, _MEDIA_CHUNK_SECONDS - _MEDIA_CHUNK_OVERLAP_SECONDS)
+        if progress_cb and total_sec > 0:
+            progress_cb(min(99, int((min(pos, total_sec) / total_sec) * 100)))
+
+    if progress_cb:
+        progress_cb(100)
+    return segments
 
 
 def _chunk_segments(segments: list[_Segment], max_chars: int = 1200) -> list[_Segment]:
@@ -289,14 +427,26 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
 
     if not chunk_rows:
         ext = os.path.splitext(rec.filename.lower())[1]
+        max_chars, overlap = _chunk_profile_for_ext(ext)
         ocr_enabled = (os.getenv("OCR_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
         if ext in _VIDEO_EXTS:
             try:
+                transcript_jsonl_path = rec.storage_path + ".transcript.jsonl"
+
+                def _set_progress(pct: int) -> None:
+                    rec.error_message = f"transcribe_progress:{max(0, min(100, int(pct)))}"
+                    db.add(rec)
+                    db.commit()
+
                 with tempfile.TemporaryDirectory() as td:
                     wav_path = os.path.join(td, "audio.wav")
                     _extract_audio_to_wav(rec.storage_path, wav_path)
-                    segments = _transcribe_media(wav_path)
-                chunks = _chunk_segments(segments)
+                    segments = _transcribe_media_resumable(
+                        wav_path,
+                        transcript_jsonl_path=transcript_jsonl_path,
+                        progress_cb=_set_progress,
+                    )
+                chunks = _chunk_segments(segments, max_chars=max_chars)
                 transcript_path = rec.storage_path + ".transcript.txt"
                 with open(transcript_path, "w", encoding="utf-8") as tf:
                     for seg in segments:
@@ -313,7 +463,7 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
                     page_texts = _read_pdf_pages(rec.storage_path)
                     chunks = []
                     for page_num, page_text in page_texts:
-                        chunks.extend(chunk_text_with_page(page_text, page_num))
+                        chunks.extend(chunk_text_with_page(page_text, page_num, max_chars=max_chars, overlap=overlap))
                     if not chunks:
                         text = ""
                     else:
@@ -327,16 +477,13 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
                 db.commit()
                 return {"ok": False, "error": "extract_failed", "detail": rec.error_message}
             if ext != ".pdf":
-                if ext in (".csv", ".xls", ".xlsx"):
-                    chunks = chunk_text(text, max_chars=600, overlap=100)
-                else:
-                    chunks = chunk_text(text)
+                chunks = chunk_text(text, max_chars=max_chars, overlap=overlap)
 
         if not chunks and ext == ".pdf":
             if ocr_enabled:
                 try:
                     text = _ocr_pdf_file(rec.storage_path)
-                    chunks = chunk_text(text)
+                    chunks = chunk_text(text, max_chars=max_chars, overlap=overlap)
                 except Exception as e:
                     rec.status = "error"
                     rec.error_message = ("ocr_failed:" + str(e))[:200]
@@ -499,6 +646,11 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
             created_at=datetime.utcnow(),
         ))
     db.add_all(emb_rows)
+    db.flush()
+    for emb_row, vec in zip(emb_rows, vectors):
+        if emb_row.id:
+            write_vector_column(db, int(emb_row.id), vec)
+    db.commit()
     # record embedding usage (portal-level, no user)
     try:
         pricing = get_pricing(db)
@@ -521,6 +673,7 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
     except Exception:
         pass
     rec.status = "ready"
+    rec.error_message = None
     rec.processed_at = datetime.utcnow()
     db.add(rec)
     db.commit()

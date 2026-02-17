@@ -242,7 +242,7 @@ def process_kb_job(job_id: int) -> bool:
                         from apps.backend.config import get_settings
                         s = get_settings()
                         r = Redis(host=s.redis_host, port=s.redis_port)
-                        q = Queue("default", connection=r)
+                        q = Queue(s.rq_ingest_queue_name or "ingest", connection=r)
                         q.enqueue_in(timedelta(seconds=30), "apps.worker.jobs.process_kb_job", job.id)
                     except Exception:
                         pass
@@ -286,7 +286,7 @@ def process_kb_job(job_id: int) -> bool:
                     from apps.backend.config import get_settings
                     s = get_settings()
                     r = Redis(host=s.redis_host, port=s.redis_port)
-                    q = Queue("default", connection=r)
+                    q = Queue(s.rq_outbox_queue_name or "outbox", connection=r)
                     q.enqueue("apps.worker.jobs.process_outbox", outbox.id)
             except Exception:
                 pass

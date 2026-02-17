@@ -3,13 +3,16 @@ import json
 import logging
 import os
 import uuid
+import time
+import hmac
+from urllib.parse import quote
 from pathlib import Path
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Request, Depends, UploadFile, File, HTTPException, Form
-from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse, PlainTextResponse, FileResponse
 
 from pydantic import BaseModel, EmailStr
 
@@ -113,6 +116,24 @@ def _domain_clean(domain: str) -> str:
 
 def _trace_id(request: Request) -> str:
     return getattr(request.state, "trace_id", "") or ""
+
+
+def _file_sig_payload(portal_id: int, file_id: int, exp: int, inline: int) -> str:
+    return f"{int(portal_id)}:{int(file_id)}:{int(exp)}:{int(inline)}"
+
+
+def _make_file_sig(portal_id: int, file_id: int, exp: int, inline: int) -> str:
+    s = get_settings()
+    key = (s.jwt_secret or s.secret_key or "dev-secret-change-in-production").encode("utf-8")
+    payload = _file_sig_payload(portal_id, file_id, exp, inline).encode("utf-8")
+    return hmac.new(key, payload, digestmod="sha256").hexdigest()
+
+
+def _content_disposition(filename: str, inline: bool) -> str:
+    disp = "inline" if inline else "attachment"
+    ascii_fallback = "".join(ch if ord(ch) < 128 else "_" for ch in (filename or "file"))
+    encoded = quote(filename or "file")
+    return f"{disp}; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
 def _err(request: Request | None, code: str, message: str, status_code: int, detail: str | None = None):
@@ -866,6 +887,8 @@ class SmartFolderBody(BaseModel):
 class KBAskBody(BaseModel):
     query: str
     audience: str | None = None
+    show_sources: bool | None = None
+    sources_format: str | None = None
 
 
 def _require_portal_admin(db: Session, portal_id: int, request: Request) -> Portal:
@@ -884,6 +907,19 @@ def _require_portal_admin(db: Session, portal_id: int, request: Request) -> Port
             return portal
     raise HTTPException(status_code=403, detail="Доступ только для администратора портала")
     return portal
+
+
+def _strip_sources_block(answer: str | None) -> str:
+    text = (answer or "").strip()
+    marker = "\n\nИсточники:"
+    idx = text.find(marker)
+    if idx >= 0:
+        return text[:idx].rstrip()
+    marker2 = "\nИсточники:"
+    idx2 = text.find(marker2)
+    if idx2 >= 0:
+        return text[:idx2].rstrip()
+    return text
 
 
 def _resolve_uploader(db: Session, portal_id: int, request: Request) -> tuple[str | None, str | None, str | None]:
@@ -1138,12 +1174,18 @@ async def get_portal_kb_files(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    q = select(KBFile).where(KBFile.portal_id == portal_id).order_by(KBFile.id.desc()).limit(200)
-    files = db.execute(q).scalars().all()
+    q = (
+        select(KBFile, KBSource.source_type, KBSource.url)
+        .join(KBSource, KBSource.id == KBFile.source_id, isouter=True)
+        .where(KBFile.portal_id == portal_id)
+        .order_by(KBFile.id.desc())
+        .limit(200)
+    )
+    rows = db.execute(q).all()
     # show only the latest entry per filename to hide stale errors
     seen: set[str] = set()
     items = []
-    for f in files:
+    for f, source_type, source_url in rows:
         key = (f.filename or f.storage_path or str(f.id)).lower()
         if key in seen:
             continue
@@ -1152,6 +1194,8 @@ async def get_portal_kb_files(
             "id": f.id,
             "filename": f.filename,
             "mime_type": f.mime_type,
+            "source_type": source_type,
+            "source_url": source_url,
             "size_bytes": f.size_bytes,
             "audience": f.audience or "staff",
             "status": f.status,
@@ -1244,15 +1288,20 @@ async def ask_portal_kb(
     aud = (body.audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
-    answer, err, _usage = answer_from_kb(db, portal_id, query, audience=aud)
+    overrides = {
+        "show_sources": body.show_sources,
+        "sources_format": body.sources_format,
+    }
+    answer, err, usage = answer_from_kb(db, portal_id, query, audience=aud, model_overrides=overrides)
     if err:
         return _err(request, "kb_ask_failed", "kb_ask_failed", 400, detail=err)
     if is_schema_v2(request):
+        sources = usage.get("sources") if isinstance(usage, dict) else []
         return JSONResponse({
             "ok": True,
             "data": {
-                "answer": answer,
-                "sources": [],
+                "answer": _strip_sources_block(answer),
+                "sources": sources if isinstance(sources, list) else [],
             },
             "meta": {
                 "schema": "v2",
@@ -1310,14 +1359,20 @@ async def upload_portal_kb_file(
         payload_json={"file_id": rec.id},
     )
     db.add(job)
+    rec.status = "queued"
+    db.add(rec)
     db.commit()
     try:
         from redis import Redis
         from rq import Queue
         s = get_settings()
         r = Redis(host=s.redis_host, port=s.redis_port)
-        q = Queue("default", connection=r)
-        q.enqueue("apps.worker.jobs.process_kb_job", job.id, job_timeout=1800)
+        q = Queue(s.rq_ingest_queue_name or "ingest", connection=r)
+        q.enqueue(
+            "apps.worker.jobs.process_kb_job",
+            job.id,
+            job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
+        )
     except Exception:
         pass
     return JSONResponse({"id": rec.id, "status": rec.status, "job_id": job.id})
@@ -1347,7 +1402,7 @@ async def reindex_portal_kb(
         from rq import Queue
         s = get_settings()
         r = Redis(host=s.redis_host, port=s.redis_port)
-        q = Queue("default", connection=r)
+        q = Queue(s.rq_ingest_queue_name or "ingest", connection=r)
     except Exception:
         q = None
     for f in files:
@@ -1364,7 +1419,11 @@ async def reindex_portal_kb(
         queued += 1
         if q:
             try:
-                q.enqueue("apps.worker.jobs.process_kb_job", job_id, job_timeout=1800)
+                q.enqueue(
+                    "apps.worker.jobs.process_kb_job",
+                    job_id,
+                    job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
+                )
             except Exception:
                 pass
     db.commit()
@@ -1401,8 +1460,12 @@ async def reindex_kb_file(
         from rq import Queue
         s = get_settings()
         r = Redis(host=s.redis_host, port=s.redis_port)
-        q = Queue("default", connection=r)
-        q.enqueue("apps.worker.jobs.process_kb_job", job.id, job_timeout=1800)
+        q = Queue(s.rq_ingest_queue_name or "ingest", connection=r)
+        q.enqueue(
+            "apps.worker.jobs.process_kb_job",
+            job.id,
+            job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
+        )
     except Exception:
         pass
     return JSONResponse({"status": "ok", "job_id": job.id})
@@ -1437,6 +1500,131 @@ async def delete_kb_file(
     db.execute(delete(KBFile).where(KBFile.id == rec.id))
     db.commit()
     return JSONResponse({"status": "ok"})
+
+
+@router.get("/portals/{portal_id}/kb/files/{file_id}/download")
+async def download_kb_file(
+    portal_id: int,
+    file_id: int,
+    request: Request,
+    inline: int = 1,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    rec = db.execute(
+        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
+    ).scalar_one_or_none()
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    if not rec.storage_path or not os.path.exists(rec.storage_path):
+        return _err(request, "file_missing", "file_missing", 404)
+    is_inline = int(inline or 0) == 1
+    filename = rec.filename or os.path.basename(rec.storage_path)
+    return FileResponse(
+        rec.storage_path,
+        media_type=rec.mime_type or "application/octet-stream",
+        filename=filename,
+        headers={"Content-Disposition": _content_disposition(filename, is_inline)},
+    )
+
+
+@router.get("/portals/{portal_id}/kb/files/{file_id}/signed-url")
+async def get_kb_file_signed_url(
+    portal_id: int,
+    file_id: int,
+    request: Request,
+    inline: int = 1,
+    ttl_seconds: int = 300,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    rec = db.execute(
+        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
+    ).scalar_one_or_none()
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    ttl = max(30, min(int(ttl_seconds or 300), 3600))
+    exp = int(time.time()) + ttl
+    inl = 1 if int(inline or 0) == 1 else 0
+    sig = _make_file_sig(portal_id, file_id, exp, inl)
+    url = f"/api/v1/bitrix/portals/{portal_id}/kb/files/{file_id}/content?exp={exp}&inline={inl}&sig={sig}"
+    return JSONResponse({"url": url, "expires_at": exp})
+
+
+@router.get("/portals/{portal_id}/kb/files/{file_id}/content")
+async def get_kb_file_content(
+    portal_id: int,
+    file_id: int,
+    request: Request,
+    exp: int,
+    sig: str,
+    inline: int = 1,
+    db: Session = Depends(get_db),
+):
+    now = int(time.time())
+    inl = 1 if int(inline or 0) == 1 else 0
+    expected = _make_file_sig(portal_id, file_id, int(exp), inl)
+    if int(exp) < now or not hmac.compare_digest(expected, str(sig or "")):
+        return _err(request, "forbidden", "Forbidden", 403)
+    rec = db.execute(
+        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
+    ).scalar_one_or_none()
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    if not rec.storage_path or not os.path.exists(rec.storage_path):
+        return _err(request, "file_missing", "file_missing", 404)
+    filename = rec.filename or os.path.basename(rec.storage_path)
+    return FileResponse(
+        rec.storage_path,
+        media_type=rec.mime_type or "application/octet-stream",
+        filename=filename,
+        headers={
+            "Content-Disposition": _content_disposition(filename, inl == 1),
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "private, max-age=60",
+        },
+    )
+
+
+@router.get("/portals/{portal_id}/kb/files/{file_id}/chunks")
+async def get_kb_file_chunks(
+    portal_id: int,
+    file_id: int,
+    request: Request,
+    limit: int = 1500,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    rec = db.execute(
+        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
+    ).scalar_one_or_none()
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    lim = max(1, min(int(limit or 1500), 4000))
+    rows = db.execute(
+        select(KBChunk)
+        .where(KBChunk.portal_id == portal_id, KBChunk.file_id == file_id)
+        .order_by(KBChunk.chunk_index.asc())
+        .limit(lim)
+    ).scalars().all()
+    items = [
+        {
+            "id": r.id,
+            "chunk_index": r.chunk_index,
+            "text": r.text or "",
+            "start_ms": r.start_ms,
+            "end_ms": r.end_ms,
+            "page_num": r.page_num,
+        }
+        for r in rows
+    ]
+    return JSONResponse({"items": items})
 
 
 @router.get("/portals/{portal_id}/kb/collections")
@@ -2058,8 +2246,12 @@ async def add_portal_kb_url_source(
         from rq import Queue
         s = get_settings()
         r = Redis(host=s.redis_host, port=s.redis_port)
-        q = Queue("default", connection=r)
-        q.enqueue("apps.worker.jobs.process_kb_job", result.get("job_id"), job_timeout=1800)
+        q = Queue(s.rq_ingest_queue_name or "ingest", connection=r)
+        q.enqueue(
+            "apps.worker.jobs.process_kb_job",
+            result.get("job_id"),
+            job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
+        )
     except Exception:
         pass
     return JSONResponse(result)

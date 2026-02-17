@@ -29,6 +29,7 @@ import { WebFlowPage } from "./pages/web/WebFlowPage";
 import { ConfirmEmailPage } from "./pages/web/ConfirmEmailPage";
 import { WebAiRopPage } from "./pages/web/WebAiRopPage";
 import { WebAiRopAccessPage } from "./pages/web/WebAiRopAccessPage";
+import { WebChatPage } from "./pages/web/WebChatPage";
 
 export default function App() {
   return (
@@ -40,6 +41,7 @@ export default function App() {
       <Route path="/app" element={<WebLayout />}>
         <Route index element={<Navigate to="/app/overview" replace />} />
         <Route path="overview" element={<WebOverviewPage />} />
+        <Route path="chat" element={<WebChatPage />} />
         <Route path="kb" element={<WebKbPage />} />
         <Route path="sources" element={<WebSourcesPage />} />
         <Route path="users" element={<WebUsersPage />} />

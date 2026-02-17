@@ -9,11 +9,12 @@ from typing import Iterable, Any
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from apps.backend.models.kb import KBChunk, KBEmbedding, KBFile
+from apps.backend.models.kb import KBChunk, KBEmbedding, KBFile, KBSource
 from apps.backend.models.dialog import Message
 from apps.backend.models.dialog_rag_cache import DialogRagCache
 from apps.backend.services.kb_settings import get_effective_gigachat_settings, get_valid_gigachat_access_token
 from apps.backend.services.gigachat_client import create_embeddings, chat_complete
+from apps.backend.services.kb_pgvector import query_top_chunks_by_pgvector
 
 try:
     import pymorphy3  # type: ignore
@@ -308,6 +309,10 @@ def answer_from_kb(
         extra_override = str(overrides.get("system_prompt_extra") or "").strip()
         if extra_override:
             system_prompt_extra = (system_prompt_extra + " " + extra_override).strip() if system_prompt_extra else extra_override
+    if overrides.get("show_sources") is not None:
+        show_sources = bool(overrides.get("show_sources"))
+    if overrides.get("sources_format") is not None:
+        sources_format = str(overrides.get("sources_format") or "none").strip().lower()
     import logging
     logging.getLogger(__name__).warning(
         "kb_rag_models portal_id=%s embed=%s chat=%s api_base=%s",
@@ -338,63 +343,108 @@ def answer_from_kb(
     qv = q_vecs[0]
 
     aud = audience if audience in ("staff", "client") else "staff"
-    base_query = (
-        select(
-            KBEmbedding.vector_json,
-            KBChunk.text,
-            KBChunk.chunk_index,
-            KBChunk.start_ms,
-            KBChunk.end_ms,
-            KBChunk.page_num,
-            KBFile.filename,
-            KBChunk.id,
-            KBFile.id,
-        )
-        .join(KBChunk, KBChunk.id == KBEmbedding.chunk_id)
-        .join(KBFile, KBFile.id == KBChunk.file_id)
-        .where(
-            KBChunk.portal_id == portal_id,
-            KBFile.status == "ready",
-            KBFile.audience == aud,
-        )
-        .order_by(KBChunk.id.desc())
-        .limit(2000)
+    pg_rows = query_top_chunks_by_pgvector(
+        db,
+        portal_id=portal_id,
+        audience=aud,
+        model=embed_model,
+        query_vec=qv,
+        limit=max(50, retrieval_top_k * 6),
     )
-    rows = db.execute(
-        base_query.where(KBEmbedding.model == embed_model)
-    ).all()
-    if not rows:
-        rows = db.execute(
-            base_query.where(KBEmbedding.model.is_(None))
-        ).all()
-    if not rows:
-        return None, "kb_empty", None
 
-    keywords = _extract_keywords(query)
     scored: list[tuple[float, bool, dict[str, Any]]] = []
-    for vec, text, chunk_index, start_ms, end_ms, page_num, filename, chunk_id, file_id in rows:
-        if not isinstance(vec, list):
-            continue
-        txt = (text or "")
-        txt_low = txt.lower()
-        lex_match = any(k in txt_low for k in keywords) if keywords else False
-        score = _cosine(qv, vec)
-        if lex_match:
-            score += lex_boost
-        scored.append((
-            score,
-            lex_match,
-            {
-                "text": txt,
-                "chunk_index": chunk_index,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "page_num": page_num,
-                "filename": filename or "",
-                "chunk_id": chunk_id,
-                "file_id": file_id,
-            }
-        ))
+    if pg_rows:
+        keywords = _extract_keywords(query)
+        for r in pg_rows:
+            txt = (r.get("text") or "")
+            txt_low = txt.lower()
+            lex_match = any(k in txt_low for k in keywords) if keywords else False
+            score = float(r.get("score") or 0.0)
+            if lex_match:
+                score += lex_boost
+            scored.append(
+                (
+                    score,
+                    lex_match,
+                    {
+                        "text": txt,
+                        "chunk_index": r.get("chunk_index"),
+                        "start_ms": r.get("start_ms"),
+                        "end_ms": r.get("end_ms"),
+                        "page_num": r.get("page_num"),
+                        "filename": r.get("filename") or "",
+                        "mime_type": r.get("mime_type") or "",
+                        "chunk_id": r.get("chunk_id"),
+                        "file_id": r.get("file_id"),
+                        "source_type": r.get("source_type") or "",
+                        "source_url": r.get("source_url") or "",
+                    },
+                )
+            )
+    else:
+        base_query = (
+            select(
+                KBEmbedding.vector_json,
+                KBChunk.text,
+                KBChunk.chunk_index,
+                KBChunk.start_ms,
+                KBChunk.end_ms,
+                KBChunk.page_num,
+                KBFile.filename,
+                KBFile.mime_type,
+                KBChunk.id,
+                KBFile.id,
+                KBSource.source_type,
+                KBSource.url,
+            )
+            .join(KBChunk, KBChunk.id == KBEmbedding.chunk_id)
+            .join(KBFile, KBFile.id == KBChunk.file_id)
+            .join(KBSource, KBSource.id == KBFile.source_id, isouter=True)
+            .where(
+                KBChunk.portal_id == portal_id,
+                KBFile.status == "ready",
+                KBFile.audience == aud,
+            )
+            .order_by(KBChunk.id.desc())
+            .limit(2000)
+        )
+        rows = db.execute(
+            base_query.where(KBEmbedding.model == embed_model)
+        ).all()
+        if not rows:
+            rows = db.execute(
+                base_query.where(KBEmbedding.model.is_(None))
+            ).all()
+        if not rows:
+            return None, "kb_empty", None
+
+        keywords = _extract_keywords(query)
+        for vec, text, chunk_index, start_ms, end_ms, page_num, filename, mime_type, chunk_id, file_id, source_type, source_url in rows:
+            if not isinstance(vec, list):
+                continue
+            txt = (text or "")
+            txt_low = txt.lower()
+            lex_match = any(k in txt_low for k in keywords) if keywords else False
+            score = _cosine(qv, vec)
+            if lex_match:
+                score += lex_boost
+            scored.append((
+                score,
+                lex_match,
+                {
+                    "text": txt,
+                    "chunk_index": chunk_index,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "page_num": page_num,
+                    "filename": filename or "",
+                    "mime_type": mime_type or "",
+                    "chunk_id": chunk_id,
+                    "file_id": file_id,
+                    "source_type": source_type or "",
+                    "source_url": source_url or "",
+                }
+            ))
     if not scored:
         return None, "kb_empty", None
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -453,6 +503,8 @@ def answer_from_kb(
         "Если нужны шаги — используй нумерацию 1), 2), 3) в одну строку. "
         "Ссылки на источники не встраивай в текст, а вынеси отдельным блоком 'Источники:' в конце."
     )
+    if sources_format in ("none", "off", "false") or not show_sources:
+        system_text += " Не упоминай источники, книги, внешние базы и названия документов в ответе."
     if system_prompt_extra:
         system_text += " " + system_prompt_extra
     if mode == "summary":
@@ -510,6 +562,26 @@ def answer_from_kb(
             citations = _format_citations(used_chunks)
             if citations:
                 out = out + "\n\nИсточники:\n" + citations
+    source_items = [
+        {
+            "file_id": int(c.get("file_id")) if c.get("file_id") is not None else None,
+            "chunk_id": int(c.get("chunk_id")) if c.get("chunk_id") is not None else None,
+            "filename": c.get("filename") or "",
+            "mime_type": c.get("mime_type") or "",
+            "source_type": c.get("source_type") or "",
+            "source_url": c.get("source_url") or "",
+            "chunk_index": c.get("chunk_index"),
+            "start_ms": c.get("start_ms"),
+            "end_ms": c.get("end_ms"),
+            "page_num": c.get("page_num"),
+            "text": c.get("text") or "",
+        }
+        for c in used_chunks
+    ]
+    if usage is None:
+        usage = {}
+    if isinstance(usage, dict):
+        usage["sources"] = source_items
     if dialog_id and use_cache:
         used_ids = [int(c.get("chunk_id")) for c in used_chunks if c.get("chunk_id")]
         _save_rag_cache(db, dialog_id, portal_id, embed_model, used_ids, keywords)

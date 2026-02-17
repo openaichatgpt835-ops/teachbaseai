@@ -90,6 +90,7 @@ export function WebLayout() {
         <div className="text-lg font-semibold text-slate-900">Teachbase AI</div>
         <nav className="mt-6 space-y-1 text-sm">
           <Link className={`block rounded-xl px-3 py-2 ${location.pathname.includes("/overview") ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-50"}`} to="/app/overview" onClick={() => { setSettingsOpen(false); setAiRopOpen(false); }}>Обзор</Link>
+          <Link className={`block rounded-xl px-3 py-2 ${location.pathname.includes("/chat") ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-50"}`} to="/app/chat" onClick={() => { setSettingsOpen(false); setAiRopOpen(false); }}>Чат</Link>
           <Link className={`block rounded-xl px-3 py-2 ${location.pathname.includes("/kb") ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-50"}`} to="/app/kb" onClick={() => { setSettingsOpen(false); setAiRopOpen(false); }}>База знаний</Link>
           <Link className={`block rounded-xl px-3 py-2 ${location.pathname.includes("/sources") ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-50"}`} to="/app/sources" onClick={() => { setSettingsOpen(false); setAiRopOpen(false); }}>Источники данных</Link>
           <Link className={`block rounded-xl px-3 py-2 ${location.pathname.includes("/users") ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-50"}`} to="/app/users" onClick={() => { setSettingsOpen(false); setAiRopOpen(false); }}>Пользователи и доступы</Link>

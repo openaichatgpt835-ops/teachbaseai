@@ -1,0 +1,2 @@
+cd /opt/teachbaseai
+docker compose -f docker-compose.prod.yml exec -T backend python -c 'from redis import Redis; from rq import Queue, Worker; from apps.backend.config import get_settings; s=get_settings(); r=Redis(host=s.redis_host, port=s.redis_port); q=Queue("default", connection=r); print({"queue_len": q.count, "started": q.started_job_registry.count, "failed": q.failed_job_registry.count, "deferred": q.deferred_job_registry.count}); print("workers", [w.name for w in Worker.all(connection=r)])'

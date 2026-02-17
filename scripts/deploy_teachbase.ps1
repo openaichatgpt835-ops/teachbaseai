@@ -2,7 +2,9 @@ param(
     [string]$Session = "tgbot",
     [string]$RemoteHost = "109.73.193.61",
     [string]$RemoteUser = "root",
-    [string]$RemoteDir = "/opt/teachbaseai"
+    [string]$RemoteDir = "/opt/teachbaseai",
+    [int]$IngestWorkers = 8,
+    [int]$OutboxWorkers = 2
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,7 +52,7 @@ cp infra/nginx/necrogame-host.conf /etc/nginx/sites-available/necrogame.ru
 nginx -t && systemctl reload nginx
 
 docker compose -f docker-compose.prod.yml build
-docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml up -d --scale worker-ingest=$IngestWorkers --scale worker-outbox=$OutboxWorkers
 docker compose -f docker-compose.prod.yml restart nginx
 
 sleep 15

@@ -89,7 +89,7 @@ services:
     profiles:
       - tests
 
-  worker:
+  worker-ingest:
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.worker
@@ -99,6 +99,23 @@ services:
       REDIS_HOST: redis
     depends_on:
       - backend
+    command: ["rq", "worker", "--url", "redis://redis:6379", "ingest"]
+    volumes:
+      - ./storage:/app/storage
+    stop_grace_period: 120s
+    restart: unless-stopped
+
+  worker-outbox:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.worker
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    depends_on:
+      - backend
+    command: ["rq", "worker", "--url", "redis://redis:6379", "outbox"]
     volumes:
       - ./storage:/app/storage
     stop_grace_period: 120s

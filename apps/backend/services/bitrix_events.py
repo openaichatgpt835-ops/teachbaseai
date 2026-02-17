@@ -295,7 +295,7 @@ def process_imbot_message(db: Session, data: dict, auth: dict) -> dict:
         from apps.backend.config import get_settings
         s = get_settings()
         r = Redis(host=s.redis_host, port=s.redis_port)
-        q = Queue("default", connection=r)
+        q = Queue(s.rq_outbox_queue_name or "outbox", connection=r)
         q.enqueue("apps.worker.jobs.process_outbox", outbox.id)
     except Exception as e:
         logger.exception("Enqueue failed: %s", e)

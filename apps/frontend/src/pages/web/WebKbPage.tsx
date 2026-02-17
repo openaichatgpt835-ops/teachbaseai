@@ -1,10 +1,14 @@
 ﻿
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchPortal, getWebPortalInfo } from "./auth";
+import { useLocation } from "react-router-dom";
 
 type KbFile = {
   id: number;
   filename: string;
+  mime_type?: string;
+  source_type?: string;
+  source_url?: string;
   status: string;
   error_message?: string;
   created_at?: string;
@@ -37,7 +41,13 @@ type KbPageCacheState = {
 
 const kbPageCache = new Map<number, KbPageCacheState>();
 
-function fileTypeCategory(filename: string | undefined) {
+function fileTypeCategory(filename: string | undefined, mimeType?: string, sourceType?: string) {
+  const mt = (mimeType || "").toLowerCase();
+  const st = (sourceType || "").toLowerCase();
+  if (mt.startsWith("video/") || ["youtube", "rutube", "vk"].includes(st)) return "Видео";
+  if (mt.startsWith("audio/")) return "Аудио";
+  if (mt.startsWith("image/")) return "Изображения";
+  if (mt.includes("pdf")) return "Документы";
   const name = (filename || "").toLowerCase();
   const ext = name.includes(".") ? name.split(".").pop() || "" : "";
   if (["pdf", "doc", "docx", "txt", "rtf"].includes(ext)) return "Документы";
@@ -49,8 +59,8 @@ function fileTypeCategory(filename: string | undefined) {
   return "Другое";
 }
 
-function fileTypeIcon(filename: string | undefined) {
-  const type = fileTypeCategory(filename);
+function fileTypeIcon(filename: string | undefined, mimeType?: string, sourceType?: string) {
+  const type = fileTypeCategory(filename, mimeType, sourceType);
   const map: Record<string, { label: string; color: string }> = {
     Документы: { label: "DOC", color: "#3b82f6" },
     Таблицы: { label: "XLS", color: "#16a34a" },
@@ -60,6 +70,62 @@ function fileTypeIcon(filename: string | undefined) {
     Видео: { label: "VID", color: "#f97316" },
   };
   return map[type] || { label: "FILE", color: "#64748b" };
+}
+
+function fileExt(filename: string | undefined) {
+  const name = (filename || "").toLowerCase();
+  if (!name.includes(".")) return "";
+  return `.${name.split(".").pop() || ""}`;
+}
+
+function isInlinePreviewable(filename: string | undefined) {
+  const ext = fileExt(filename);
+  return [
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".mp4",
+    ".mov",
+    ".avi",
+    ".mkv",
+    ".webm",
+    ".mp3",
+    ".ogg",
+    ".wav",
+    ".m4a",
+    ".aac",
+  ].includes(ext);
+}
+
+function buildExternalEmbedUrl(sourceUrl?: string, startMs?: number | null) {
+  const raw = (sourceUrl || "").trim();
+  if (!raw) return "";
+  const sec = startMs ? Math.max(0, Math.floor(Number(startMs) / 1000)) : 0;
+  try {
+    const u = new URL(raw);
+    const h = u.hostname.toLowerCase();
+    if (h.includes("youtu.be") || h.includes("youtube.com")) {
+      let vid = "";
+      if (h.includes("youtu.be")) vid = u.pathname.replace("/", "");
+      else vid = u.searchParams.get("v") || "";
+      if (!vid) return "";
+      const qs = sec > 0 ? `?start=${sec}&autoplay=0` : "";
+      return `https://www.youtube.com/embed/${vid}${qs}`;
+    }
+    if (h.includes("rutube.ru")) {
+      const m = u.pathname.match(/\/video\/([a-zA-Z0-9_-]+)/);
+      const id = m?.[1] || "";
+      if (!id) return "";
+      const qs = sec > 0 ? `?t=${sec}` : "";
+      return `https://rutube.ru/play/embed/${id}/${qs}`;
+    }
+    return "";
+  } catch {
+    return "";
+  }
 }
 
 function fileStatusLabel(status: string | undefined) {
@@ -79,6 +145,7 @@ function fileOwnerLabel(file: KbFile) {
 }
 
 export function WebKbPage() {
+  const location = useLocation();
   const { portalId, portalToken } = getWebPortalInfo();
   const cached = portalId ? kbPageCache.get(portalId) : null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -124,6 +191,13 @@ export function WebKbPage() {
   const [lastSelectedId, setLastSelectedId] = useState<number | null>(null);
   const [dragSelectBox, setDragSelectBox] = useState<{ x: number; y: number; w: number; h: number; active: boolean } | null>(null);
   const [kbUploadMessage, setKbUploadMessage] = useState("");
+  const [focusApplied, setFocusApplied] = useState(false);
+  const [previewFileId, setPreviewFileId] = useState<number | null>(null);
+  const [previewStartMs, setPreviewStartMs] = useState<number | null>(null);
+  const [previewPage, setPreviewPage] = useState<number | null>(null);
+  const [previewInlineUrl, setPreviewInlineUrl] = useState<string | null>(null);
+  const [previewDownloadUrl, setPreviewDownloadUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const loadFiles = async () => {
     if (!portalId || !portalToken) return;
     const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files`);
@@ -192,6 +266,10 @@ export function WebKbPage() {
   }, [portalId, portalToken]);
 
   useEffect(() => {
+    setFocusApplied(false);
+  }, [location.search]);
+
+  useEffect(() => {
     if (!portalId) return;
     kbPageCache.set(portalId, {
       kbFiles,
@@ -237,7 +315,7 @@ export function WebKbPage() {
       );
     }
     if (kbTypeFilter !== "all") {
-      items = items.filter((x) => fileTypeCategory(x.filename) === kbTypeFilter);
+      items = items.filter((x) => fileTypeCategory(x.filename, x.mime_type, x.source_type) === kbTypeFilter);
     }
     if (kbPeopleFilter !== "all") {
       items = items.filter((x) => (x.uploaded_by_name || "") === kbPeopleFilter);
@@ -296,7 +374,7 @@ export function WebKbPage() {
 
   const kbTypeOptions = useMemo(() => {
     const types = new Set<string>();
-    kbFiles.forEach((f) => types.add(fileTypeCategory(f.filename)));
+    kbFiles.forEach((f) => types.add(fileTypeCategory(f.filename, f.mime_type, f.source_type)));
     return Array.from(types).sort();
   }, [kbFiles]);
 
@@ -463,6 +541,31 @@ export function WebKbPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [kbViewMode, focusedRowId, sortedKbFiles, selectedFileIds]);
 
+  useEffect(() => {
+    if (focusApplied) return;
+    const qs = new URLSearchParams(location.search || "");
+    const fid = Number(qs.get("focus_file_id") || 0);
+    const focusMs = Number(qs.get("focus_ms") || 0);
+    const focusPage = Number(qs.get("focus_page") || 0);
+    if (!Number.isFinite(fid) || fid <= 0) return;
+    const exists = kbFiles.some((f) => Number(f.id) === fid);
+    if (!exists) return;
+    setKbFilter({ kind: "all" });
+    setKbSearchResults([fid]);
+    setSelectedFileIds([fid]);
+    setFocusedRowId(fid);
+    setPreviewInlineUrl(null);
+    setPreviewDownloadUrl(null);
+    setPreviewFileId(fid);
+    setPreviewStartMs(Number.isFinite(focusMs) && focusMs > 0 ? focusMs : null);
+    setPreviewPage(Number.isFinite(focusPage) && focusPage > 0 ? focusPage : null);
+    if (portalId) void loadPreviewUrls(fid);
+    window.setTimeout(() => {
+      rowRefs.current.get(fid)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 0);
+    setFocusApplied(true);
+  }, [location.search, kbFiles, focusApplied]);
+
   const scheduleSearch = () => {
     if (searchTimerRef.current) {
       window.clearTimeout(searchTimerRef.current);
@@ -532,6 +635,35 @@ export function WebKbPage() {
     setKbFilter({ kind, id });
     if (kind === "collection" && id) setKbLocationFilter(String(id));
     if (kind !== "collection") setKbLocationFilter("all");
+  };
+
+  const loadPreviewUrls = async (fileId: number) => {
+    if (!portalId) return;
+    setPreviewLoading(true);
+    try {
+      const inlineRes = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${fileId}/signed-url?inline=1`);
+      const inlineData = await inlineRes.json().catch(() => null);
+      setPreviewInlineUrl(inlineRes.ok && inlineData?.url ? String(inlineData.url) : null);
+      const dlRes = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${fileId}/signed-url?inline=0`);
+      const dlData = await dlRes.json().catch(() => null);
+      setPreviewDownloadUrl(dlRes.ok && dlData?.url ? String(dlData.url) : null);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const openPreview = async (fileId: number, opts?: { page?: number | null; ms?: number | null }) => {
+    setPreviewInlineUrl(null);
+    setPreviewDownloadUrl(null);
+    setPreviewFileId(fileId);
+    setPreviewPage(opts?.page ?? null);
+    setPreviewStartMs(opts?.ms ?? null);
+    if (!portalId) return;
+    const fileRec = kbFiles.find((x) => x.id === fileId);
+    const sourceKind = (fileRec?.source_type || "").toLowerCase();
+    const isExternal = ["youtube", "rutube", "vk"].includes(sourceKind) && !!(fileRec?.source_url || "").trim();
+    if (isExternal) return;
+    await loadPreviewUrls(fileId);
   };
 
   const createCollection = async () => {
@@ -906,7 +1038,7 @@ export function WebKbPage() {
               {recommendedKbFiles.map((f) => (
                 <div key={f.id} className="grid grid-cols-[1.6fr_1fr_1fr_1fr] gap-3 text-sm text-slate-700">
                   <div className="flex items-center gap-2">
-                    <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-xs text-white" style={{ backgroundColor: fileTypeIcon(f.filename).color }}>{fileTypeIcon(f.filename).label}</span>
+                    <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-xs text-white" style={{ backgroundColor: fileTypeIcon(f.filename, f.mime_type, f.source_type).color }}>{fileTypeIcon(f.filename, f.mime_type, f.source_type).label}</span>
                     {f.filename}
                   </div>
                   <div>{(f.query_count || 0) > 0 ? `${f.query_count} запросов` : "Новый файл"}</div>
@@ -1002,11 +1134,21 @@ export function WebKbPage() {
                       />
                       <span
                         className="inline-flex h-6 w-6 items-center justify-center rounded-md text-[10px] font-semibold text-white"
-                        style={{ backgroundColor: fileTypeIcon(f.filename).color }}
+                        style={{ backgroundColor: fileTypeIcon(f.filename, f.mime_type, f.source_type).color }}
                       >
-                        {fileTypeIcon(f.filename).label}
+                        {fileTypeIcon(f.filename, f.mime_type, f.source_type).label}
                       </span>
-                      <span className="truncate text-slate-800" title={f.filename}>{f.filename}</span>
+                      <button
+                        type="button"
+                        className="truncate text-left text-slate-800 underline decoration-transparent transition hover:decoration-slate-400"
+                        title={f.filename}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void openPreview(f.id);
+                        }}
+                      >
+                        {f.filename}
+                      </button>
                     </label>
                     <div className="truncate text-slate-600">{fileOwnerLabel(f)}</div>
                     <div className="truncate text-slate-600">{fileCollections(f.id)[0]?.name || "Корень"}</div>
@@ -1083,10 +1225,18 @@ export function WebKbPage() {
                   className="rounded-2xl border border-slate-100 p-4 hover:bg-slate-50"
                 >
                   <div className="flex items-center justify-between">
-                    <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-xs text-white" style={{ backgroundColor: fileTypeIcon(f.filename).color }}>{fileTypeIcon(f.filename).label}</span>
+                    <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-xs text-white" style={{ backgroundColor: fileTypeIcon(f.filename, f.mime_type, f.source_type).color }}>{fileTypeIcon(f.filename, f.mime_type, f.source_type).label}</span>
                     <button className="text-slate-400" onClick={(e) => { e.stopPropagation(); toggleFileMenu(f.id); }}>⋮</button>
                   </div>
-                  <div className="mt-3 text-sm font-semibold text-slate-900">{f.filename}</div>
+                  <button
+                    type="button"
+                    className="mt-3 block text-left text-sm font-semibold text-slate-900 underline decoration-transparent transition hover:decoration-slate-400"
+                    onClick={() => {
+                      void openPreview(f.id);
+                    }}
+                  >
+                    {f.filename}
+                  </button>
                   <div className="mt-1 text-xs text-slate-500">{fileOwnerLabel(f)}</div>
                   <div className="mt-2 text-xs rounded-full px-2 py-1 bg-slate-100 w-fit">{fileStatusLabel(f.status)}</div>
                   {openFileMenuId === f.id && (
@@ -1125,6 +1275,115 @@ export function WebKbPage() {
             </button>
           </div>
         )}
+        {previewFileId && (() => {
+          const f = kbFiles.find((x) => x.id === previewFileId);
+          if (!f) return null;
+          const ext = fileExt(f.filename);
+          const baseSrc = previewInlineUrl || "";
+          const sourceKind = (f.source_type || "").toLowerCase();
+          const isExternal = ["youtube", "rutube", "vk"].includes(sourceKind) && !!(f.source_url || "").trim();
+          const externalEmbedUrl = buildExternalEmbedUrl(f.source_url, previewStartMs);
+          const pageSuffix = ext === ".pdf" && previewPage ? `#page=${previewPage}` : "";
+          const mediaSec = previewStartMs ? Math.max(0, Math.floor(previewStartMs / 1000)) : 0;
+          const mediaSuffix = mediaSec > 0 ? `#t=${mediaSec}` : "";
+          const src = `${baseSrc}${ext === ".pdf" ? pageSuffix : mediaSuffix}`;
+          const externalUrl = (() => {
+            const raw = (f.source_url || "").trim();
+            if (!raw) return "";
+            if (mediaSec <= 0) return raw;
+            try {
+              const u = new URL(raw);
+              u.searchParams.set("t", String(mediaSec));
+              return u.toString();
+            } catch {
+              return raw;
+            }
+          })();
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-6">
+              <div className="flex h-[85vh] w-[92vw] max-w-6xl flex-col rounded-2xl bg-white shadow-2xl">
+                <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+                  <div className="truncate text-sm font-semibold text-slate-900">{f.filename}</div>
+                  <div className="flex items-center gap-2">
+                    {previewDownloadUrl && (
+                      <a className="rounded-lg border border-slate-200 px-3 py-1 text-sm text-slate-700" href={previewDownloadUrl} target="_blank" rel="noreferrer">
+                        Скачать
+                      </a>
+                    )}
+                    <button
+                      className="rounded-lg border border-slate-200 px-3 py-1 text-sm"
+                      onClick={() => {
+                        setPreviewFileId(null);
+                        setPreviewInlineUrl(null);
+                        setPreviewDownloadUrl(null);
+                      }}
+                    >
+                      Закрыть
+                    </button>
+                  </div>
+                </div>
+                <div className="flex-1 overflow-auto bg-slate-50 p-3">
+                  {previewLoading && (
+                    <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">Загрузка файла...</div>
+                  )}
+                  {!previewLoading && isExternal && (
+                    <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
+                      {externalEmbedUrl ? (
+                        <iframe
+                          title={f.filename || "external-video"}
+                          src={externalEmbedUrl}
+                          className="h-[64vh] w-full rounded-xl border border-slate-200 bg-white"
+                          allow="autoplay; encrypted-media; picture-in-picture"
+                          allowFullScreen
+                        />
+                      ) : (
+                        <div>Встроенный плеер недоступен для этого источника.</div>
+                      )}
+                      <a className="mt-3 inline-block rounded-lg border border-slate-200 px-3 py-1 text-sm text-slate-700" href={externalUrl} target="_blank" rel="noreferrer">
+                        Открыть источник
+                      </a>
+                    </div>
+                  )}
+                  {!previewLoading && !isExternal && !baseSrc && (
+                    <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
+                      Не удалось получить файл для предпросмотра. Повтори попытку.
+                      <button
+                        className="ml-3 rounded-lg border border-slate-200 px-3 py-1 text-sm"
+                        onClick={() => {
+                          void openPreview(f.id, { ms: previewStartMs, page: previewPage });
+                        }}
+                      >
+                        Повторить
+                      </button>
+                    </div>
+                  )}
+                  {!previewLoading && !!baseSrc && ext === ".pdf" && (
+                    <iframe title={f.filename} src={src} className="h-full w-full rounded-xl border border-slate-200 bg-white" />
+                  )}
+                  {!previewLoading && !!baseSrc && [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext) && (
+                    <img src={baseSrc} alt={f.filename} className="mx-auto max-h-full max-w-full rounded-xl border border-slate-200 bg-white" />
+                  )}
+                  {!previewLoading && !!baseSrc && [".mp4", ".mov", ".avi", ".mkv", ".webm"].includes(ext) && (
+                    <video key={src} src={src} controls autoPlay className="h-full w-full rounded-xl border border-slate-200 bg-black" />
+                  )}
+                  {!previewLoading && !!baseSrc && [".mp3", ".ogg", ".wav", ".m4a", ".aac"].includes(ext) && (
+                    <div className="rounded-xl border border-slate-200 bg-white p-6">
+                      <audio key={src} src={src} controls autoPlay className="w-full" />
+                    </div>
+                  )}
+                  {!previewLoading && !!baseSrc && !isInlinePreviewable(f.filename) && (
+                    <div className="rounded-xl border border-slate-200 bg-white p-6">
+                      <div className="text-sm text-slate-600">Для этого типа файла предпросмотр недоступен.</div>
+                      <a className="mt-3 inline-block rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700" href={previewDownloadUrl || "#"} target="_blank" rel="noreferrer">
+                        Скачать файл
+                      </a>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </section>
     </div>
   );

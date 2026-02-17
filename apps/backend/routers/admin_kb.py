@@ -423,8 +423,12 @@ def kb_process_file(
         from apps.backend.config import get_settings
         s = get_settings()
         r = Redis(host=s.redis_host, port=s.redis_port)
-        q = Queue("default", connection=r)
-        q.enqueue("apps.worker.jobs.process_kb_job", job.id, job_timeout=1800)
+        q = Queue(s.rq_ingest_queue_name or "ingest", connection=r)
+        q.enqueue(
+            "apps.worker.jobs.process_kb_job",
+            job.id,
+            job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
+        )
     except Exception:
         pass
     return {"job_id": job.id, "status": job.status}

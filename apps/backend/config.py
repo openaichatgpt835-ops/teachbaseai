@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     kb_watchdog_interval_seconds: int = 120
     kb_processing_stale_seconds: int = 600
     kb_watchdog_batch_limit: int = 200
+    kb_job_timeout_seconds: int = 3600
+    rq_ingest_queue_name: str = "ingest"
+    rq_outbox_queue_name: str = "outbox"
+    kb_pgvector_enabled: bool = False
 
 
 @lru_cache

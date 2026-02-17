@@ -203,6 +203,8 @@ def process_telegram_update(
             },
         )
         db.add(job)
+        rec.status = "queued"
+        db.add(rec)
         db.commit()
         outbox = Outbox(
             portal_id=portal_id,
@@ -222,9 +224,14 @@ def process_telegram_update(
             from rq import Queue
             s = get_settings()
             r = Redis(host=s.redis_host, port=s.redis_port)
-            q = Queue("default", connection=r)
-            q.enqueue("apps.worker.jobs.process_kb_job", job.id, job_timeout=1800)
-            q.enqueue("apps.worker.jobs.process_outbox", outbox.id)
+            q = Queue(s.rq_ingest_queue_name or "ingest", connection=r)
+            q.enqueue(
+                "apps.worker.jobs.process_kb_job",
+                job.id,
+                job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
+            )
+            q_outbox = Queue(s.rq_outbox_queue_name or "outbox", connection=r)
+            q_outbox.enqueue("apps.worker.jobs.process_outbox", outbox.id)
         except Exception as e:
             logger.exception("telegram enqueue failed: %s", e)
             job.error_message = f"enqueue_failed:{str(e)[:180]}"
@@ -380,7 +387,7 @@ def process_telegram_update(
         from rq import Queue
         s = get_settings()
         r = Redis(host=s.redis_host, port=s.redis_port)
-        q = Queue("default", connection=r)
+        q = Queue(s.rq_outbox_queue_name or "outbox", connection=r)
         q.enqueue("apps.worker.jobs.process_outbox", outbox.id)
     except Exception as e:
         logger.exception("telegram enqueue failed: %s", e)
