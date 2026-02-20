@@ -1,0 +1,1 @@
+docker exec teachbaseai-backend-1 python -c "from apps.backend.database import get_session_factory; from apps.backend.models.portal import Portal; Session=get_session_factory(); db=Session(); print(db.query(Portal.id,Portal.domain,Portal.status).order_by(Portal.id).all()); db.close()"

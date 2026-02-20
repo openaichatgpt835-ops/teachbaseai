@@ -21,7 +21,14 @@ type KbFile = {
 type KbCollection = { id: number; name: string; color?: string; file_count?: number };
 type KbSmartFolder = { id: number; name: string; system_tag?: string; rules?: any };
 type KbTopic = { id: string; name: string; count: number; file_ids: number[] };
-type SearchMatch = { file_id: number; filename?: string; snippet?: string };
+type SearchMatch = {
+  file_id: number;
+  filename?: string;
+  snippet?: string;
+  chunk_index?: number | null;
+  page_num?: number | null;
+  start_ms?: number | null;
+};
 type Filter = { kind: "all" | "collection" | "smart" | "topic"; id?: number | string };
 type KbPageCacheState = {
   kbFiles: KbFile[];
@@ -38,6 +45,16 @@ type KbPageCacheState = {
   kbLocationFilter: string;
   kbViewMode: "table" | "grid";
 };
+
+const SYSTEM_TOPIC_HINTS: Array<{ id: string; name: string; keywords: string[] }> = [
+  { id: "product", name: "Продукт и функциональность", keywords: ["rag", "база", "модель", "конструктор", "бот", "сценар"] },
+  { id: "pricing", name: "Тарифы и цены", keywords: ["тариф", "цена", "стоимость", "оплат", "прайс"] },
+  { id: "integrations", name: "Интеграции и процессы", keywords: ["bitrix", "амо", "crm", "api", "webhook", "telegram"] },
+  { id: "sales", name: "Продажи и квалификация", keywords: ["продаж", "лид", "сделк", "воронк"] },
+  { id: "support", name: "Поддержка и сервис", keywords: ["поддерж", "ошибк", "инцидент", "тикет"] },
+  { id: "hr", name: "HR и команда", keywords: ["сотруд", "hr", "команд", "найм", "ваканс"] },
+  { id: "analytics", name: "Аналитика и метрики", keywords: ["аналит", "отчет", "метрик", "retention", "ret3"] },
+];
 
 const kbPageCache = new Map<number, KbPageCacheState>();
 
@@ -82,6 +99,20 @@ function isInlinePreviewable(filename: string | undefined) {
   const ext = fileExt(filename);
   return [
     ".pdf",
+    ".doc",
+    ".docx",
+    ".ppt",
+    ".pptx",
+    ".xls",
+    ".xlsx",
+    ".rtf",
+    ".txt",
+    ".csv",
+    ".md",
+    ".epub",
+    ".json",
+    ".xml",
+    ".log",
     ".png",
     ".jpg",
     ".jpeg",
@@ -128,6 +159,17 @@ function buildExternalEmbedUrl(sourceUrl?: string, startMs?: number | null) {
   }
 }
 
+function buildOfficeViewerUrl(rawUrl: string | null | undefined) {
+  const u = (rawUrl || "").trim();
+  if (!u) return "";
+  try {
+    const abs = u.startsWith("http://") || u.startsWith("https://") ? u : `${window.location.origin}${u}`;
+    return `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(abs)}`;
+  } catch {
+    return "";
+  }
+}
+
 function fileStatusLabel(status: string | undefined) {
   const s = (status || "").toLowerCase();
   if (s === "ready") return "Готово";
@@ -144,12 +186,39 @@ function fileOwnerLabel(file: KbFile) {
   return file.uploaded_by_type || "—";
 }
 
+function isTwoPartTopicName(name: string) {
+  const n = (name || "").trim().toLowerCase();
+  if (!n) return false;
+  return /\b[^\W\d_]+\b\s+и\s+\b[^\W\d_]+\b/i.test(n);
+}
+
+function fallbackFileIdsByTopic(
+  files: KbFile[],
+  topicIdOrName: string,
+): number[] {
+  const key = (topicIdOrName || "").trim().toLowerCase();
+  if (!key) return [];
+  const hint = SYSTEM_TOPIC_HINTS.find(
+    (h) => h.id.toLowerCase() === key || h.name.toLowerCase() === key,
+  );
+  const words = hint
+    ? hint.keywords
+    : (key.match(/[a-zA-Zа-яА-ЯёЁ0-9]{4,}/g) || [key]);
+  const ids: number[] = [];
+  for (const f of files) {
+    const hay = `${f.filename || ""} ${f.source_type || ""} ${f.uploaded_by_name || ""}`.toLowerCase();
+    if (words.some((w) => hay.includes((w || "").toLowerCase()))) ids.push(Number(f.id));
+  }
+  return ids;
+}
+
 export function WebKbPage() {
   const location = useLocation();
   const { portalId, portalToken } = getWebPortalInfo();
   const cached = portalId ? kbPageCache.get(portalId) : null;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const searchTimerRef = useRef<number | null>(null);
+  const searchReqSeqRef = useRef(0);
   const tableRef = useRef<HTMLDivElement | null>(null);
   const rowRefs = useRef<Map<number, HTMLDivElement | null>>(new Map());
 
@@ -159,6 +228,8 @@ export function WebKbPage() {
   const [kbSmartFolders, setKbSmartFolders] = useState<KbSmartFolder[]>(cached?.kbSmartFolders || []);
   const [kbTopics, setKbTopics] = useState<KbTopic[]>(cached?.kbTopics || []);
   const [kbTopicSuggestions, setKbTopicSuggestions] = useState<{ id: string; name: string; count: number }[]>(cached?.kbTopicSuggestions || []);
+  const [kbTopicsThreshold, setKbTopicsThreshold] = useState<number>(5);
+  const [kbTopicsLoadError, setKbTopicsLoadError] = useState("");
   const [kbFilter, setKbFilter] = useState<Filter>(cached?.kbFilter || { kind: "all" });
   const [newCollectionName, setNewCollectionName] = useState("");
   const [smartFoldersOpen, setSmartFoldersOpen] = useState(cached?.smartFoldersOpen ?? true);
@@ -232,11 +303,28 @@ export function WebKbPage() {
 
   const loadTopics = async () => {
     if (!portalId || !portalToken) return;
-    const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/topics`);
-    const data = await res.json().catch(() => null);
-    if (res.ok) {
-      setKbTopics(Array.isArray(data?.topics) ? data.topics : []);
-      setKbTopicSuggestions(Array.isArray(data?.suggestions) ? data.suggestions : []);
+    try {
+      const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/topics`);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        setKbTopicsLoadError(String(data?.error || data?.detail || `HTTP ${res.status}`));
+        return;
+      }
+      const topics = Array.isArray(data?.topics) ? data.topics : [];
+      let suggestions = Array.isArray(data?.suggestions) ? data.suggestions : [];
+      setKbTopicsThreshold(Number(data?.threshold || 5));
+      if (!suggestions.length) {
+        suggestions = topics
+          .filter((t: any) => Number(t?.count || 0) > 0)
+          .sort((a: any, b: any) => Number(b?.count || 0) - Number(a?.count || 0))
+          .slice(0, 8)
+          .map((t: any) => ({ id: String(t.id || ""), name: String(t.name || ""), count: Number(t.count || 0) }));
+      }
+      setKbTopics(topics);
+      setKbTopicSuggestions(suggestions);
+      setKbTopicsLoadError("");
+    } catch (e: any) {
+      setKbTopicsLoadError(String(e?.message || "topics_load_failed"));
     }
   };
 
@@ -326,7 +414,12 @@ export function WebKbPage() {
     }
     if (hasFullText) {
       const ids = new Set(kbSearchResults || []);
-      items = items.filter((x) => ids.has(x.id));
+      if (selectedFileIds.length > 0) {
+        const selected = new Set(selectedFileIds);
+        items = items.filter((x) => selected.has(x.id) || ids.has(x.id));
+      } else {
+        items = items.filter((x) => ids.has(x.id));
+      }
     }
     if (kbFilter.kind === "collection" && kbFilter.id) {
       const ids = kbCollectionFiles[Number(kbFilter.id)] || [];
@@ -349,16 +442,22 @@ export function WebKbPage() {
       ).toString();
       if (topicId) {
         const topic = kbTopics.find((t) => String(t.id) === topicId);
-        const ids = (topic?.file_ids || []).map((id) => Number(id));
+        let ids = (topic?.file_ids || []).map((id) => Number(id));
+        if (!ids.length) {
+          ids = fallbackFileIdsByTopic(kbFiles, topicId);
+        }
         items = items.filter((x) => ids.includes(Number(x.id)));
       } else if (folder?.name) {
         const topic = kbTopics.find((t) => t.name.toLowerCase() === folder.name.toLowerCase());
-        const ids = (topic?.file_ids || []).map((id) => Number(id));
+        let ids = (topic?.file_ids || []).map((id) => Number(id));
+        if (!ids.length) {
+          ids = fallbackFileIdsByTopic(kbFiles, folder.name);
+        }
         items = items.filter((x) => ids.includes(Number(x.id)));
       }
     }
     return items;
-  }, [kbFiles, kbSearch, kbSearchResults, kbTypeFilter, kbPeopleFilter, kbLocationFilter, kbFilter, kbCollectionFiles, kbTopics, kbSmartFolders]);
+  }, [kbFiles, kbSearch, kbSearchResults, kbTypeFilter, kbPeopleFilter, kbLocationFilter, kbFilter, kbCollectionFiles, kbTopics, kbSmartFolders, selectedFileIds]);
 
   const sortedKbFiles = useMemo(() => {
     const items = filteredKbFiles.slice();
@@ -566,31 +665,54 @@ export function WebKbPage() {
     setFocusApplied(true);
   }, [location.search, kbFiles, focusApplied]);
 
-  const scheduleSearch = () => {
-    if (searchTimerRef.current) {
-      window.clearTimeout(searchTimerRef.current);
-      searchTimerRef.current = null;
-    }
-    searchTimerRef.current = window.setTimeout(() => {
-      runFullTextSearch();
-    }, 300);
-  };
-
-  const runFullTextSearch = async () => {
-    if (!portalId || !portalToken) return;
-    const q = kbSearch.trim();
+  const scheduleSearch = (nextQuery?: string) => {
+    const q = (nextQuery ?? kbSearch).trim();
     if (!q) {
+      if (searchTimerRef.current) {
+        window.clearTimeout(searchTimerRef.current);
+        searchTimerRef.current = null;
+      }
+      searchReqSeqRef.current += 1;
       setKbSearchResults(null);
       setKbSearchMatches([]);
       setKbSearchError("");
       return;
     }
+    if (searchTimerRef.current) {
+      window.clearTimeout(searchTimerRef.current);
+      searchTimerRef.current = null;
+    }
+    searchTimerRef.current = window.setTimeout(() => {
+      runFullTextSearch(q);
+    }, 300);
+  };
+
+  const runFullTextSearch = async (queryOverride?: string) => {
+    if (!portalId || !portalToken) return;
+    const q = (queryOverride ?? kbSearch).trim();
+    if (!q) {
+      searchReqSeqRef.current += 1;
+      setKbSearchResults(null);
+      setKbSearchMatches([]);
+      setKbSearchError("");
+      return;
+    }
+    const reqSeq = ++searchReqSeqRef.current;
     setKbSearchLoading(true);
     setKbSearchError("");
-    setKbSearchResults(null);
-    setKbSearchMatches([]);
-    const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/search?q=${encodeURIComponent(q)}&limit=100`);
+    const scopeParams = new URLSearchParams();
+    if (selectedFileIds.length > 0) {
+      scopeParams.set("file_ids", selectedFileIds.join(","));
+    } else {
+      if (kbFilter.kind === "collection" && kbFilter.id) scopeParams.set("collection_ids", String(kbFilter.id));
+      if (kbFilter.kind === "smart" && kbFilter.id) scopeParams.set("smart_folder_ids", String(kbFilter.id));
+      if (kbFilter.kind === "topic" && kbFilter.id) scopeParams.set("topic_ids", String(kbFilter.id));
+      if (kbLocationFilter !== "all") scopeParams.set("collection_ids", kbLocationFilter);
+    }
+    const qs = scopeParams.toString();
+    const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/search?q=${encodeURIComponent(q)}&limit=100${qs ? `&${qs}` : ""}`);
     const data = await res.json().catch(() => null);
+    if (reqSeq !== searchReqSeqRef.current) return;
     setKbSearchLoading(false);
     if (!res.ok) {
       setKbSearchError(data?.error || data?.detail || "Ошибка поиска");
@@ -613,7 +735,16 @@ export function WebKbPage() {
     const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/ask`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: q }),
+      body: JSON.stringify({
+        query: q,
+        scope: selectedFileIds.length > 0
+          ? { file_ids: selectedFileIds }
+          : {
+              collection_ids: kbFilter.kind === "collection" && kbFilter.id ? [Number(kbFilter.id)] : (kbLocationFilter !== "all" ? [Number(kbLocationFilter)] : undefined),
+              smart_folder_ids: kbFilter.kind === "smart" && kbFilter.id ? [Number(kbFilter.id)] : undefined,
+              topic_ids: kbFilter.kind === "topic" && kbFilter.id ? [String(kbFilter.id)] : undefined,
+            },
+      }),
     });
     const data = await res.json().catch(() => null);
     setSmartSearchLoading(false);
@@ -727,6 +858,7 @@ export function WebKbPage() {
     await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${fileId}`, { method: "DELETE" });
     await loadFiles();
     await loadCollections();
+    await loadTopics();
   };
 
   const bulkReindexFiles = async () => {
@@ -759,21 +891,30 @@ export function WebKbPage() {
 
   const uploadFiles = async (files: FileList | null) => {
     if (!portalId || !portalToken || !files || !files.length) return;
-    const form = new FormData();
-    Array.from(files).forEach((f) => form.append("files", f));
     setKbUploadMessage("Загрузка...");
-    const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/upload`, {
-      method: "POST",
-      body: form,
-    });
-    if (res.ok) {
-      setKbUploadMessage("Файлы загружены.");
+    let okCount = 0;
+    for (const f of Array.from(files)) {
+      const form = new FormData();
+      form.append("file", f);
+      const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/upload`, {
+        method: "POST",
+        body: form,
+      });
+      if (res.ok) {
+        okCount += 1;
+        continue;
+      }
+      const data = await res.json().catch(() => null);
+      setKbUploadMessage(data?.error || data?.detail || `Ошибка загрузки: ${f.name}`);
       await loadFiles();
       await loadCollections();
-    } else {
-      const data = await res.json().catch(() => null);
-      setKbUploadMessage(data?.error || data?.detail || "Ошибка загрузки");
+      await loadTopics();
+      return;
     }
+    setKbUploadMessage(okCount > 0 ? `Файлы загружены: ${okCount}` : "Ошибка загрузки");
+    await loadFiles();
+    await loadCollections();
+    await loadTopics();
   };
 
   const onFilePickerChange = (evt: React.ChangeEvent<HTMLInputElement>) => {
@@ -819,11 +960,60 @@ export function WebKbPage() {
       method: "DELETE",
     });
     await loadSmartFolders();
+    await loadTopics();
   };
 
   const smartFolderNameSet = useMemo(() => {
     return new Set(kbSmartFolders.map((s) => (s.name || "").trim().toLowerCase()));
   }, [kbSmartFolders]);
+  const uiFallbackSuggestions = useMemo(() => {
+    const byTopic = SYSTEM_TOPIC_HINTS.map((t) => {
+      const count = kbFiles.reduce((acc, f) => {
+        const hay = `${f.filename || ""} ${f.source_type || ""}`.toLowerCase();
+        return acc + (t.keywords.some((k) => hay.includes(k)) ? 1 : 0);
+      }, 0);
+      return { id: t.id, name: t.name, count };
+    })
+      .filter((x) => x.count > 0)
+      .sort((a, b) => b.count - a.count);
+    const minCount = Math.max(1, Number(kbTopicsThreshold || 1));
+    const topicSuggestions = byTopic
+      .filter((s) => s.count >= minCount)
+      .filter((s) => isTwoPartTopicName(s.name))
+      .filter((s) => !smartFolderNameSet.has((s.name || "").trim().toLowerCase()));
+    const stop = new Set([
+      "серия", "сезон", "часть", "video", "audio", "file", "doc", "docx", "pdf", "xlsx", "xls", "mp3", "mp4", "ogg",
+      "youtube", "rutube", "vk", "all", "new",
+    ]);
+    const tokenToFiles = new Map<string, Set<number>>();
+    for (const f of kbFiles) {
+      const text = `${f.filename || ""} ${f.source_type || ""}`.toLowerCase();
+      const tokens = Array.from(new Set((text.match(/[a-zA-Zа-яА-ЯёЁ0-9]{4,}/g) || [])));
+      for (const token of tokens) {
+        if (stop.has(token) || /^\d+$/.test(token)) continue;
+        if (!tokenToFiles.has(token)) tokenToFiles.set(token, new Set<number>());
+        tokenToFiles.get(token)!.add(Number(f.id));
+      }
+    }
+    const tokenSuggestions = Array.from(tokenToFiles.entries())
+      .map(([token, ids]) => ({ id: `ui:auto:${token}`, name: token.charAt(0).toUpperCase() + token.slice(1), count: ids.size }))
+      .filter((x) => x.count >= minCount && isTwoPartTopicName(x.name) && !smartFolderNameSet.has((x.name || "").trim().toLowerCase()))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+      .slice(0, 8);
+    const seen = new Set<string>();
+    const merged = [...topicSuggestions, ...tokenSuggestions].filter((x) => {
+      const k = (x.name || "").trim().toLowerCase();
+      if (!k || seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    return merged.slice(0, 8);
+  }, [kbFiles, smartFolderNameSet, kbTopicsThreshold]);
+  const visibleSuggestions = useMemo(() => {
+    const real = kbTopicSuggestions.filter((s) => !smartFolderNameSet.has((s.name || "").trim().toLowerCase()));
+    if (real.length > 0) return real;
+    return uiFallbackSuggestions;
+  }, [kbTopicSuggestions, smartFolderNameSet, uiFallbackSuggestions]);
 
   return (
     <div className="grid gap-6 lg:grid-cols-[260px_1fr]">
@@ -923,13 +1113,11 @@ export function WebKbPage() {
               ))}
               {kbSmartFolders.length === 0 && <div className="text-xs text-slate-400">Умных папок пока нет.</div>}
               {smartFolderMessage && <div className="text-xs text-slate-500">{smartFolderMessage}</div>}
-              {kbTopicSuggestions.filter((s) => !smartFolderNameSet.has((s.name || "").trim().toLowerCase())).length > 0 && (
+              {visibleSuggestions.length > 0 && (
                 <div className="mt-2 rounded-xl border border-slate-100 bg-slate-50 p-3">
                   <div className="text-xs text-slate-500">Рекомендации</div>
                   <div className="mt-2 flex flex-wrap gap-2">
-                    {kbTopicSuggestions
-                      .filter((s) => !smartFolderNameSet.has((s.name || "").trim().toLowerCase()))
-                      .map((s) => (
+                    {visibleSuggestions.map((s) => (
                       <button
                         key={s.id}
                         className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600"
@@ -939,6 +1127,14 @@ export function WebKbPage() {
                       </button>
                     ))}
                   </div>
+                </div>
+              )}
+              {visibleSuggestions.length === 0 && (
+                <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                  <div className="font-semibold">Диагностика тем</div>
+                  <div className="mt-1">Порог: {kbTopicsThreshold}. Рекомендации пустые.</div>
+                  <div className="mt-1">Темы и count: {kbTopics.length ? kbTopics.map((t) => `${t.name}=${t.count}`).join(", ") : "—"}</div>
+                  {kbTopicsLoadError && <div className="mt-1 text-rose-600">Ошибка загрузки тем: {kbTopicsLoadError}</div>}
                 </div>
               )}
             </div>
@@ -955,8 +1151,9 @@ export function WebKbPage() {
               <input
                 value={kbSearch}
                 onChange={(e) => {
-                  setKbSearch(e.target.value);
-                  scheduleSearch();
+                  const next = e.target.value;
+                  setKbSearch(next);
+                  scheduleSearch(next);
                 }}
                 className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
                 placeholder="Поиск по базе знаний"
@@ -966,21 +1163,44 @@ export function WebKbPage() {
               Умный поиск
             </button>
           </div>
-          {kbSearchLoading && <div className="mt-2 text-xs text-slate-500">Ищем…</div>}
-          {kbSearchError && <div className="mt-2 text-xs text-rose-500">{kbSearchError}</div>}
-          {kbSearchResults !== null && !kbSearchLoading && !kbSearchError && (
-            <div className="mt-2 text-xs text-slate-500">Найдено: {kbSearchResults.length}</div>
-          )}
-          {kbSearchMatches.length > 0 && (
-            <div className="mt-3 grid gap-2">
-              {kbSearchMatches.slice(0, 5).map((m) => (
-                <div key={m.file_id} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                  <div className="text-sm text-slate-700">{m.filename}</div>
-                  {m.snippet && <div className="text-xs text-slate-500 mt-1">{m.snippet}</div>}
+          <div className="mt-2 min-h-[18px] text-xs">
+            {kbSearchLoading && <div className="text-slate-500">Ищем…</div>}
+            {!kbSearchLoading && selectedFileIds.length > 0 && (
+              <div className="text-sky-700">Поиск ограничен выбранными файлами: {selectedFileIds.length}</div>
+            )}
+            {!kbSearchLoading && kbSearchError && <div className="text-rose-500">{kbSearchError}</div>}
+            {!kbSearchLoading && !kbSearchError && kbSearchResults !== null && (
+              <div className="text-slate-500">Найдено: {kbSearchResults.length}</div>
+            )}
+          </div>
+          <div className={`overflow-hidden transition-all duration-200 ${kbSearchMatches.length > 0 ? "max-h-[420px] opacity-100" : "max-h-0 opacity-0"}`}>
+            {kbSearchMatches.length > 0 && (
+              <details className="mt-1" open={!smartSearchOpen}>
+                <summary className="cursor-pointer text-xs text-slate-500">
+                  Найденные фрагменты ({kbSearchMatches.length})
+                </summary>
+                <div className="mt-2 grid gap-2">
+                  {kbSearchMatches.slice(0, 8).map((m, idx) => (
+                    <button
+                      key={`${m.file_id}:${m.chunk_index ?? idx}`}
+                      type="button"
+                      className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-left hover:bg-slate-100"
+                      onClick={() => {
+                        setKbSearchResults([m.file_id]);
+                        void openPreview(m.file_id, {
+                          page: m.page_num ?? null,
+                          ms: m.start_ms ?? null,
+                        });
+                      }}
+                    >
+                      <div className="text-sm text-slate-700">{m.filename}</div>
+                      {m.snippet && <div className="mt-1 text-xs text-slate-500">{m.snippet}</div>}
+                    </button>
+                  ))}
                 </div>
-              ))}
-            </div>
-          )}
+              </details>
+            )}
+          </div>
         </div>
 
         {smartSearchOpen && (
@@ -1287,6 +1507,7 @@ export function WebKbPage() {
           const mediaSec = previewStartMs ? Math.max(0, Math.floor(previewStartMs / 1000)) : 0;
           const mediaSuffix = mediaSec > 0 ? `#t=${mediaSec}` : "";
           const src = `${baseSrc}${ext === ".pdf" ? pageSuffix : mediaSuffix}`;
+          const officeSrc = buildOfficeViewerUrl(baseSrc);
           const externalUrl = (() => {
             const raw = (f.source_url || "").trim();
             if (!raw) return "";
@@ -1370,6 +1591,16 @@ export function WebKbPage() {
                     <div className="rounded-xl border border-slate-200 bg-white p-6">
                       <audio key={src} src={src} controls autoPlay className="w-full" />
                     </div>
+                  )}
+                  {!previewLoading && !!baseSrc && [".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".rtf"].includes(ext) && (
+                    officeSrc ? (
+                      <iframe title={f.filename} src={officeSrc} className="h-full w-full rounded-xl border border-slate-200 bg-white" />
+                    ) : (
+                      <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">Не удалось сформировать предпросмотр Office-документа. Используйте скачивание.</div>
+                    )
+                  )}
+                  {!previewLoading && !!baseSrc && [".txt", ".csv", ".md", ".epub", ".json", ".xml", ".log"].includes(ext) && (
+                    <iframe title={f.filename} src={baseSrc} className="h-full w-full rounded-xl border border-slate-200 bg-white" />
                   )}
                   {!previewLoading && !!baseSrc && !isInlinePreviewable(f.filename) && (
                     <div className="rounded-xl border border-slate-200 bg-white p-6">

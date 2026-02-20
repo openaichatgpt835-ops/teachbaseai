@@ -56,12 +56,15 @@ def query_top_chunks_by_pgvector(
     model: str,
     query_vec: Iterable[float],
     limit: int,
+    file_ids: list[int] | None = None,
 ) -> list[dict]:
     if not _is_pgvector_runtime_enabled(db):
         return []
     qvec = vector_to_literal(query_vec)
     if not qvec:
         return []
+    ids = [int(x) for x in (file_ids or []) if int(x) > 0]
+    extra_file_filter = " AND f.id = ANY(:file_ids) " if ids else ""
     sql = text(
         """
         SELECT
@@ -76,6 +79,7 @@ def query_top_chunks_by_pgvector(
             f.id AS file_id,
             s.source_type AS source_type,
             s.url AS source_url,
+            s.title AS source_title,
             1 - (e.vector_pg <=> CAST(:qvec AS vector)) AS score
         FROM kb_embeddings e
         JOIN kb_chunks c ON c.id = e.chunk_id
@@ -87,6 +91,9 @@ def query_top_chunks_by_pgvector(
             AND f.audience = :audience
             AND e.model = :model
             AND e.vector_pg IS NOT NULL
+            """
+        + extra_file_filter
+        + """
         ORDER BY e.vector_pg <=> CAST(:qvec AS vector)
         LIMIT :lim
         """
@@ -100,6 +107,7 @@ def query_top_chunks_by_pgvector(
                 "audience": audience,
                 "model": model,
                 "lim": int(limit),
+                "file_ids": ids if ids else None,
             },
         ).mappings().all()
     except Exception:

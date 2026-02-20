@@ -2,12 +2,14 @@
 import json
 import logging
 import os
+import re
 import uuid
 import time
 import hmac
 from urllib.parse import quote
 from pathlib import Path
 from datetime import datetime, timedelta
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -118,15 +120,37 @@ def _trace_id(request: Request) -> str:
     return getattr(request.state, "trace_id", "") or ""
 
 
-def _file_sig_payload(portal_id: int, file_id: int, exp: int, inline: int) -> str:
-    return f"{int(portal_id)}:{int(file_id)}:{int(exp)}:{int(inline)}"
+def _file_sig_payload(portal_id: int, file_id: int, exp: int, inline: int, rendition: str = "original") -> str:
+    return f"{int(portal_id)}:{int(file_id)}:{int(exp)}:{int(inline)}:{(rendition or 'original').strip().lower()}"
 
 
-def _make_file_sig(portal_id: int, file_id: int, exp: int, inline: int) -> str:
+def _make_file_sig(portal_id: int, file_id: int, exp: int, inline: int, rendition: str = "original") -> str:
     s = get_settings()
     key = (s.jwt_secret or s.secret_key or "dev-secret-change-in-production").encode("utf-8")
-    payload = _file_sig_payload(portal_id, file_id, exp, inline).encode("utf-8")
+    payload = _file_sig_payload(portal_id, file_id, exp, inline, rendition).encode("utf-8")
     return hmac.new(key, payload, digestmod="sha256").hexdigest()
+
+
+def _backfill_chunk_pages_from_preview(db: Session, rec: KBFile, preview_pdf_path: str) -> None:
+    """Fill missing page_num for existing chunks using preview PDF text matching."""
+    if not preview_pdf_path or not os.path.exists(preview_pdf_path):
+        return
+    rows = db.execute(
+        select(KBChunk)
+        .where(KBChunk.portal_id == rec.portal_id, KBChunk.file_id == rec.id)
+        .order_by(KBChunk.chunk_index.asc())
+    ).scalars().all()
+    if not rows:
+        return
+    if all((r.page_num is not None and int(r.page_num) > 0) for r in rows):
+        return
+    try:
+        from apps.backend.services.kb_ingest import _assign_chunk_pages_from_preview  # type: ignore
+        _assign_chunk_pages_from_preview(rows, preview_pdf_path)
+        db.add_all(rows)
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 def _content_disposition(filename: str, inline: bool) -> str:
@@ -889,6 +913,7 @@ class KBAskBody(BaseModel):
     audience: str | None = None
     show_sources: bool | None = None
     sources_format: str | None = None
+    scope: dict | None = None
 
 
 def _require_portal_admin(db: Session, portal_id: int, request: Request) -> Portal:
@@ -945,36 +970,270 @@ def _resolve_uploader(db: Session, portal_id: int, request: Request) -> tuple[st
 _KB_TOPICS = [
     {
         "id": "product",
-        "name": "Продукт и функциональность",
+        "name": "\u041f\u0440\u043e\u0434\u0443\u043a\u0442 \u0438 \u0444\u0443\u043d\u043a\u0446\u0438\u043e\u043d\u0430\u043b\u044c\u043d\u043e\u0441\u0442\u044c",
         "keywords": [
-            "функции", "функционал", "feature", "возможности", "платформа",
-            "rag", "база знаний", "модели", "интерфейс",
+            "\u0444\u0443\u043d\u043a\u0446\u0438\u0438", "\u0444\u0443\u043d\u043a\u0446\u0438\u043e\u043d\u0430\u043b", "feature", "\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e\u0441\u0442\u0438", "\u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0430",
+            "rag", "\u0431\u0430\u0437\u0430 \u0437\u043d\u0430\u043d\u0438\u0439", "\u043c\u043e\u0434\u0435\u043b\u0438", "\u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441",
+            "\u043a\u043e\u043d\u0441\u0442\u0440\u0443\u043a\u0442\u043e\u0440", "\u0441\u0446\u0435\u043d\u0430\u0440\u0438\u0439", "\u0447\u0430\u0442-\u0431\u043e\u0442",
         ],
     },
     {
         "id": "pricing",
-        "name": "Тарифы и цены",
+        "name": "\u0422\u0430\u0440\u0438\u0444\u044b \u0438 \u0446\u0435\u043d\u044b",
         "keywords": [
-            "тариф", "цена", "стоимость", "оплата", "подписка", "billing",
-            "счет", "прайс",
+            "\u0442\u0430\u0440\u0438\u0444", "\u0446\u0435\u043d\u0430", "\u0441\u0442\u043e\u0438\u043c\u043e\u0441\u0442\u044c", "\u043e\u043f\u043b\u0430\u0442\u0430", "\u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430", "billing",
+            "\u0441\u0447\u0435\u0442", "\u043f\u0440\u0430\u0439\u0441", "invoice",
         ],
     },
     {
         "id": "integrations",
-        "name": "Интеграции и процессы",
+        "name": "\u0418\u043d\u0442\u0435\u0433\u0440\u0430\u0446\u0438\u0438 \u0438 \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u044b",
         "keywords": [
-            "интеграция", "интеграции", "crm", "bitrix", "битрикс", "amo",
-            "webhook", "api", "oauth",
+            "\u0438\u043d\u0442\u0435\u0433\u0440\u0430\u0446\u0438\u044f", "\u0438\u043d\u0442\u0435\u0433\u0440\u0430\u0446\u0438\u0438", "crm", "bitrix", "\u0431\u0438\u0442\u0440\u0438\u043a\u0441", "amo",
+            "webhook", "api", "oauth", "telegram",
+        ],
+    },
+    {
+        "id": "sales",
+        "name": "\u041f\u0440\u043e\u0434\u0430\u0436\u0438 \u0438 \u043a\u0432\u0430\u043b\u0438\u0444\u0438\u043a\u0430\u0446\u0438\u044f",
+        "keywords": [
+            "\u043f\u0440\u043e\u0434\u0430\u0436", "\u043b\u0438\u0434", "\u0432\u043e\u0440\u043e\u043d\u043a\u0430", "\u0441\u0434\u0435\u043b\u043a", "\u043a\u043e\u043d\u0432\u0435\u0440\u0441\u0438\u044f",
+            "qualification", "offer", "objection", "cta",
+        ],
+    },
+    {
+        "id": "support",
+        "name": "\u041f\u043e\u0434\u0434\u0435\u0440\u0436\u043a\u0430 \u0438 \u0441\u0435\u0440\u0432\u0438\u0441",
+        "keywords": [
+            "\u043f\u043e\u0434\u0434\u0435\u0440\u0436\u043a", "\u0438\u043d\u0446\u0438\u0434\u0435\u043d\u0442", "\u043e\u0448\u0438\u0431\u043a", "\u0442\u0438\u043a\u0435\u0442",
+            "sla", "support", "\u0441\u0435\u0440\u0432\u0438\u0441", "\u043f\u043e\u043c\u043e\u0449",
+        ],
+    },
+    {
+        "id": "hr",
+        "name": "HR \u0438 \u043a\u043e\u043c\u0430\u043d\u0434\u0430",
+        "keywords": [
+            "\u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a", "\u043a\u043e\u043c\u0430\u043d\u0434", "\u043d\u0430\u0439\u043c", "\u0432\u0430\u043a\u0430\u043d\u0441", "hr",
+            "\u043e\u043d\u0431\u043e\u0440\u0434\u0438\u043d\u0433", "\u043e\u0431\u0443\u0447\u0435\u043d\u0438\u0435",
+        ],
+    },
+    {
+        "id": "analytics",
+        "name": "\u0410\u043d\u0430\u043b\u0438\u0442\u0438\u043a\u0430 \u0438 \u043c\u0435\u0442\u0440\u0438\u043a\u0438",
+        "keywords": [
+            "\u0430\u043d\u0430\u043b\u0438\u0442\u0438\u043a", "\u043e\u0442\u0447\u0435\u0442", "\u043c\u0435\u0442\u0440\u0438\u043a", "retention",
+            "ret3", "dashboard", "\u043a\u043e\u0433\u043e\u0440\u0442", "\u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a",
         ],
     },
 ]
-
 
 def _topic_matches(text: str, keywords: list[str]) -> bool:
     t = (text or "").lower()
     if not t:
         return False
     return any(k in t for k in keywords)
+
+
+def _make_chunk_anchor(
+    chunk_index: int | None,
+    page_num: int | None,
+    start_ms: int | None,
+) -> tuple[str, str]:
+    if page_num is not None and int(page_num) > 0:
+        return "pdf_page", str(int(page_num))
+    if start_ms is not None and int(start_ms) >= 0:
+        return "media_ms", str(int(start_ms))
+    if chunk_index is not None and int(chunk_index) >= 0:
+        return "chunk_index", str(int(chunk_index))
+    return "chunk_index", "0"
+
+
+def _parse_csv_ints(raw: str | None) -> list[int]:
+    if not raw:
+        return []
+    out: list[int] = []
+    for p in str(raw).split(","):
+        v = p.strip()
+        if not v:
+            continue
+        try:
+            iv = int(v)
+        except Exception:
+            continue
+        if iv > 0:
+            out.append(iv)
+    return sorted(set(out))
+
+
+def _resolve_scope_file_ids(
+    db: Session,
+    *,
+    portal_id: int,
+    audience: str,
+    file_ids: list[int] | None = None,
+    collection_ids: list[int] | None = None,
+    smart_folder_ids: list[int] | None = None,
+    topic_ids: list[str] | None = None,
+) -> set[int] | None:
+    scopes: list[set[int]] = []
+    ids_file = {int(x) for x in (file_ids or []) if int(x) > 0}
+    if ids_file:
+        allowed = {
+            int(x)
+            for x in db.execute(
+                select(KBFile.id).where(
+                    KBFile.portal_id == portal_id,
+                    KBFile.audience == audience,
+                    KBFile.id.in_(sorted(ids_file)),
+                )
+            ).scalars().all()
+        }
+        scopes.append(allowed)
+    col_ids = [int(x) for x in (collection_ids or []) if int(x) > 0]
+    if col_ids:
+        col_set = {
+            int(x)
+            for x in db.execute(
+                select(KBCollectionFile.file_id)
+                .join(KBFile, KBFile.id == KBCollectionFile.file_id)
+                .where(
+                    KBCollectionFile.collection_id.in_(col_ids),
+                    KBFile.portal_id == portal_id,
+                    KBFile.audience == audience,
+                )
+            ).scalars().all()
+        }
+        scopes.append(col_set)
+    smart_ids = [int(x) for x in (smart_folder_ids or []) if int(x) > 0]
+    if smart_ids:
+        rows = db.execute(
+            select(KBSmartFolder.id, KBSmartFolder.name, KBSmartFolder.system_tag, KBSmartFolder.rules_json)
+            .where(KBSmartFolder.portal_id == portal_id, KBSmartFolder.id.in_(smart_ids))
+        ).all()
+        topic_keys: set[str] = set()
+        for _sid, name, system_tag, rules_json in rows:
+            rules = rules_json or {}
+            topic = (
+                str(system_tag or "").strip()
+                or str(rules.get("topic_id") or "").strip()
+                or str(rules.get("topic") or "").strip()
+                or str(name or "").strip()
+            )
+            if topic:
+                topic_keys.add(topic.lower())
+        if topic_keys:
+            trows = db.execute(
+                select(KBFile.id, KBFile.filename, KBChunk.text)
+                .join(KBChunk, KBChunk.file_id == KBFile.id)
+                .where(KBFile.portal_id == portal_id, KBFile.audience == audience, KBChunk.portal_id == portal_id)
+                .limit(8000)
+            ).all()
+            hit_ids: set[int] = set()
+            for fid, fname, txt in trows:
+                hay = f"{fname or ''} {txt or ''}".lower()
+                matched = False
+                for t in _KB_TOPICS:
+                    k = str(t["id"]).lower()
+                    n = str(t["name"]).lower()
+                    if k in topic_keys or n in topic_keys:
+                        if _topic_matches(hay, t["keywords"]):
+                            matched = True
+                            break
+                if not matched:
+                    for key in topic_keys:
+                        if key and key in hay:
+                            matched = True
+                            break
+                if matched:
+                    hit_ids.add(int(fid))
+            scopes.append(hit_ids)
+    tids = [str(x).strip().lower() for x in (topic_ids or []) if str(x).strip()]
+    if tids:
+        trows = db.execute(
+            select(KBFile.id, KBFile.filename, KBChunk.text)
+            .join(KBChunk, KBChunk.file_id == KBFile.id)
+            .where(KBFile.portal_id == portal_id, KBFile.audience == audience, KBChunk.portal_id == portal_id)
+            .limit(8000)
+        ).all()
+        hit_ids: set[int] = set()
+        for fid, fname, txt in trows:
+            hay = f"{fname or ''} {txt or ''}".lower()
+            matched = False
+            for t in _KB_TOPICS:
+                k = str(t["id"]).lower()
+                n = str(t["name"]).lower()
+                if k in tids or n in tids:
+                    if _topic_matches(hay, t["keywords"]):
+                        matched = True
+                        break
+            if not matched:
+                for key in tids:
+                    if key and key in hay:
+                        matched = True
+                        break
+            if matched:
+                hit_ids.add(int(fid))
+        scopes.append(hit_ids)
+    if not scopes:
+        return None
+    out = scopes[0].copy()
+    for s in scopes[1:]:
+        out &= s
+    return out
+
+def _is_two_part_topic_name(name: str) -> bool:
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    return re.search(r"\b[^\W\d_]+\b\s+и\s+\b[^\W\d_]+\b", n, flags=re.IGNORECASE) is not None
+
+
+_AUTO_TOPIC_STOPWORDS = {
+    "\u0447\u0442\u043e", "\u043a\u0430\u043a", "\u044d\u0442\u043e", "\u0434\u043b\u044f", "\u0438\u043b\u0438", "\u043a\u043e\u0433\u0434\u0430", "\u0433\u0434\u0435", "\u0447\u0442\u043e\u0431\u044b", "\u0435\u0441\u043b\u0438", "\u043f\u0440\u0438",
+    "\u0435\u0441\u0442\u044c", "\u043d\u0435\u0442", "\u0431\u044b\u0442\u044c", "\u0431\u0443\u0434\u0435\u0442", "\u043f\u043e\u0441\u043b\u0435", "\u043f\u0435\u0440\u0435\u0434", "\u043c\u0435\u0436\u0434\u0443", "\u043d\u0430\u0434", "\u043f\u043e\u0434",
+    "\u043f\u0440\u043e", "also", "with", "from", "into", "your", "ours", "they", "them",
+    "\u043a\u043e\u0442\u043e\u0440\u044b\u0439", "\u043a\u043e\u0442\u043e\u0440\u0430\u044f", "\u043a\u043e\u0442\u043e\u0440\u044b\u0435", "\u043a\u043e\u0442\u043e\u0440\u044b\u0445", "\u044d\u0442\u043e\u0442", "\u044d\u0442\u0430", "\u044d\u0442\u0438", "\u0442\u043e\u0433\u043e",
+    "\u0432\u0441\u0435\u0433\u043e", "\u0432\u0441\u0435\u0445", "\u043c\u043e\u0436\u043d\u043e", "\u043d\u0443\u0436\u043d\u043e", "\u043e\u0447\u0435\u043d\u044c", "\u0431\u043e\u043b\u0435\u0435", "\u043c\u0435\u043d\u0435\u0435", "\u0442\u0430\u043a\u0436\u0435",
+}
+
+
+def _auto_topic_candidates(
+    file_texts: list[tuple[int, str]],
+    threshold: int,
+    excluded_tokens: set[str],
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    if not file_texts:
+        return []
+    token_to_files: dict[str, set[int]] = {}
+    for file_id, text in file_texts:
+        tokens = set(re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]{4,}", (text or "").lower()))
+        for token in tokens:
+            if token in _AUTO_TOPIC_STOPWORDS:
+                continue
+            if token.isdigit():
+                continue
+            if token in excluded_tokens:
+                continue
+            if len(token) > 40:
+                continue
+            token_to_files.setdefault(token, set()).add(int(file_id))
+    ranked = sorted(
+        ((tok, ids) for tok, ids in token_to_files.items() if len(ids) >= threshold),
+        key=lambda x: (-len(x[1]), x[0]),
+    )
+    out: list[dict[str, Any]] = []
+    for tok, ids in ranked[: max(1, limit)]:
+        out.append(
+            {
+                "id": f"auto:{tok}",
+                "name": tok.capitalize(),
+                "count": len(ids),
+                "file_ids": sorted(ids),
+                "auto": True,
+            }
+        )
+    return out
 
 
 @router.post("/portals/{portal_id}/web/register")
@@ -1216,6 +1475,10 @@ async def search_portal_kb(
     request: Request,
     limit: int = 50,
     audience: str | None = None,
+    file_ids: str | None = None,
+    collection_ids: str | None = None,
+    smart_folder_ids: str | None = None,
+    topic_ids: str | None = None,
     db: Session = Depends(get_db),
     pid: int = Depends(require_portal_access),
 ):
@@ -1232,9 +1495,29 @@ async def search_portal_kb(
     aud = (audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
+    scoped_ids = _resolve_scope_file_ids(
+        db,
+        portal_id=portal_id,
+        audience=aud,
+        file_ids=_parse_csv_ints(file_ids),
+        collection_ids=_parse_csv_ints(collection_ids),
+        smart_folder_ids=_parse_csv_ints(smart_folder_ids),
+        topic_ids=[x.strip() for x in str(topic_ids or "").split(",") if x.strip()],
+    )
+    if scoped_ids is not None and not scoped_ids:
+        if is_schema_v2(request):
+            return JSONResponse({"ok": True, "data": {"file_ids": [], "matches": []}, "meta": {"schema": "v2", "audience": aud}})
+        return JSONResponse({"file_ids": [], "matches": []})
     like_q = f"%{q}%"
-    rows = db.execute(
-        select(KBFile.id, KBFile.filename, KBChunk.text)
+    q_stmt = (
+        select(
+            KBFile.id,
+            KBFile.filename,
+            KBChunk.text,
+            KBChunk.chunk_index,
+            KBChunk.page_num,
+            KBChunk.start_ms,
+        )
         .join(KBChunk, KBChunk.file_id == KBFile.id)
         .where(
             KBFile.portal_id == portal_id,
@@ -1244,11 +1527,14 @@ async def search_portal_kb(
         )
         .order_by(KBFile.id.desc())
         .limit(max(1, min(limit, 200)))
-    ).all()
+    )
+    if scoped_ids is not None:
+        q_stmt = q_stmt.where(KBFile.id.in_(sorted(scoped_ids)))
+    rows = db.execute(q_stmt).all()
     file_ids: list[int] = []
     matches = []
     seen: set[int] = set()
-    for fid, fname, text in rows:
+    for fid, fname, text, chunk_index, page_num, start_ms in rows:
         if fid in seen:
             continue
         seen.add(fid)
@@ -1256,7 +1542,19 @@ async def search_portal_kb(
         snippet = (text or "").strip().replace("\n", " ")
         if len(snippet) > 160:
             snippet = snippet[:160] + "..."
-        matches.append({"file_id": int(fid), "filename": fname, "snippet": snippet})
+        anchor_kind, anchor_value = _make_chunk_anchor(chunk_index, page_num, start_ms)
+        matches.append(
+            {
+                "file_id": int(fid),
+                "filename": fname,
+                "snippet": snippet,
+                "chunk_index": int(chunk_index) if chunk_index is not None else None,
+                "page_num": int(page_num) if page_num is not None else None,
+                "start_ms": int(start_ms) if start_ms is not None else None,
+                "anchor_kind": anchor_kind,
+                "anchor_value": anchor_value,
+            }
+        )
     if is_schema_v2(request):
         return JSONResponse({
             "ok": True,
@@ -1267,6 +1565,7 @@ async def search_portal_kb(
             "meta": {
                 "schema": "v2",
                 "audience": aud,
+                "scope_file_ids": sorted(scoped_ids) if scoped_ids is not None else None,
             },
         })
     return JSONResponse({"file_ids": file_ids, "matches": matches})
@@ -1288,24 +1587,52 @@ async def ask_portal_kb(
     aud = (body.audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
+    scope = body.scope or {}
+    scoped_ids = _resolve_scope_file_ids(
+        db,
+        portal_id=portal_id,
+        audience=aud,
+        file_ids=[int(x) for x in (scope.get("file_ids") or []) if str(x).isdigit()],
+        collection_ids=[int(x) for x in (scope.get("collection_ids") or []) if str(x).isdigit()],
+        smart_folder_ids=[int(x) for x in (scope.get("smart_folder_ids") or []) if str(x).isdigit()],
+        topic_ids=[str(x).strip() for x in (scope.get("topic_ids") or []) if str(x).strip()],
+    )
+    if scoped_ids is not None and not scoped_ids:
+        if is_schema_v2(request):
+            return JSONResponse({
+                "ok": True,
+                "data": {"answer": "В выбранной области поиска нет подходящих материалов.", "sources": [], "line_refs": {}},
+                "meta": {"schema": "v2", "audience": aud, "scope_file_ids": []},
+            })
+        return JSONResponse({"answer": "В выбранной области поиска нет подходящих материалов."})
     overrides = {
         "show_sources": body.show_sources,
         "sources_format": body.sources_format,
     }
-    answer, err, usage = answer_from_kb(db, portal_id, query, audience=aud, model_overrides=overrides)
+    answer, err, usage = answer_from_kb(
+        db,
+        portal_id,
+        query,
+        audience=aud,
+        model_overrides=overrides,
+        file_ids_filter=sorted(scoped_ids) if scoped_ids is not None else None,
+    )
     if err:
         return _err(request, "kb_ask_failed", "kb_ask_failed", 400, detail=err)
     if is_schema_v2(request):
         sources = usage.get("sources") if isinstance(usage, dict) else []
+        line_refs = usage.get("line_refs") if isinstance(usage, dict) else {}
         return JSONResponse({
             "ok": True,
             "data": {
                 "answer": _strip_sources_block(answer),
                 "sources": sources if isinstance(sources, list) else [],
+                "line_refs": line_refs if isinstance(line_refs, dict) else {},
             },
             "meta": {
                 "schema": "v2",
                 "audience": aud,
+                "scope_file_ids": sorted(scoped_ids) if scoped_ids is not None else None,
             },
         })
     return JSONResponse({"answer": answer})
@@ -1488,6 +1815,22 @@ async def delete_kb_file(
     chunk_ids = db.execute(
         select(KBChunk.id).where(KBChunk.file_id == rec.id)
     ).scalars().all()
+    # unlink from collections first (FK safety)
+    db.execute(delete(KBCollectionFile).where(KBCollectionFile.file_id == rec.id))
+    # drop pending/history jobs for this file
+    jobs = db.execute(
+        select(KBJob).where(KBJob.portal_id == portal_id)
+    ).scalars().all()
+    job_ids_to_delete: list[int] = []
+    for j in jobs:
+        payload = j.payload_json if isinstance(j.payload_json, dict) else {}
+        try:
+            if int(payload.get("file_id") or 0) == int(rec.id):
+                job_ids_to_delete.append(int(j.id))
+        except Exception:
+            continue
+    if job_ids_to_delete:
+        db.execute(delete(KBJob).where(KBJob.id.in_(job_ids_to_delete)))
     if chunk_ids:
         db.execute(delete(KBEmbedding).where(KBEmbedding.chunk_id.in_(chunk_ids)))
         db.execute(delete(KBChunk).where(KBChunk.id.in_(chunk_ids)))
@@ -1537,6 +1880,7 @@ async def get_kb_file_signed_url(
     request: Request,
     inline: int = 1,
     ttl_seconds: int = 300,
+    rendition: str | None = None,
     db: Session = Depends(get_db),
     pid: int = Depends(require_portal_access),
 ):
@@ -1550,8 +1894,23 @@ async def get_kb_file_signed_url(
     ttl = max(30, min(int(ttl_seconds or 300), 3600))
     exp = int(time.time()) + ttl
     inl = 1 if int(inline or 0) == 1 else 0
-    sig = _make_file_sig(portal_id, file_id, exp, inl)
-    url = f"/api/v1/bitrix/portals/{portal_id}/kb/files/{file_id}/content?exp={exp}&inline={inl}&sig={sig}"
+    rend = (rendition or "original").strip().lower()
+    if rend not in ("original", "preview_pdf"):
+        rend = "original"
+    if rend == "preview_pdf":
+        candidate = f"{rec.storage_path}.preview.pdf" if rec.storage_path else ""
+        if (not candidate or not os.path.exists(candidate)) and rec.storage_path and os.path.exists(rec.storage_path):
+            # Best-effort on-demand rendition for already indexed files.
+            try:
+                from apps.backend.services.kb_ingest import _generate_preview_pdf  # type: ignore
+                _generate_preview_pdf(rec.storage_path)
+            except Exception:
+                pass
+        if not candidate or not os.path.exists(candidate):
+            return _err(request, "preview_missing", "preview_missing", 404)
+        _backfill_chunk_pages_from_preview(db, rec, candidate)
+    sig = _make_file_sig(portal_id, file_id, exp, inl, rend)
+    url = f"/api/v1/bitrix/portals/{portal_id}/kb/files/{file_id}/content?exp={exp}&inline={inl}&rendition={rend}&sig={sig}"
     return JSONResponse({"url": url, "expires_at": exp})
 
 
@@ -1563,11 +1922,15 @@ async def get_kb_file_content(
     exp: int,
     sig: str,
     inline: int = 1,
+    rendition: str | None = None,
     db: Session = Depends(get_db),
 ):
     now = int(time.time())
     inl = 1 if int(inline or 0) == 1 else 0
-    expected = _make_file_sig(portal_id, file_id, int(exp), inl)
+    rend = (rendition or "original").strip().lower()
+    if rend not in ("original", "preview_pdf"):
+        rend = "original"
+    expected = _make_file_sig(portal_id, file_id, int(exp), inl, rend)
     if int(exp) < now or not hmac.compare_digest(expected, str(sig or "")):
         return _err(request, "forbidden", "Forbidden", 403)
     rec = db.execute(
@@ -1575,12 +1938,30 @@ async def get_kb_file_content(
     ).scalar_one_or_none()
     if not rec:
         return _err(request, "not_found", "not_found", 404)
-    if not rec.storage_path or not os.path.exists(rec.storage_path):
+    storage_path = rec.storage_path
+    filename = rec.filename or (os.path.basename(rec.storage_path) if rec.storage_path else "file")
+    media_type = rec.mime_type or "application/octet-stream"
+    if rend == "preview_pdf":
+        candidate = f"{rec.storage_path}.preview.pdf" if rec.storage_path else ""
+        if (not candidate or not os.path.exists(candidate)) and rec.storage_path and os.path.exists(rec.storage_path):
+            # Best-effort on-demand rendition for already indexed files.
+            try:
+                from apps.backend.services.kb_ingest import _generate_preview_pdf  # type: ignore
+                _generate_preview_pdf(rec.storage_path)
+            except Exception:
+                pass
+        if not candidate or not os.path.exists(candidate):
+            return _err(request, "preview_missing", "preview_missing", 404)
+        _backfill_chunk_pages_from_preview(db, rec, candidate)
+        storage_path = candidate
+        stem = os.path.splitext(filename or "file")[0]
+        filename = f"{stem}.preview.pdf"
+        media_type = "application/pdf"
+    if not storage_path or not os.path.exists(storage_path):
         return _err(request, "file_missing", "file_missing", 404)
-    filename = rec.filename or os.path.basename(rec.storage_path)
     return FileResponse(
-        rec.storage_path,
-        media_type=rec.mime_type or "application/octet-stream",
+        storage_path,
+        media_type=media_type,
         filename=filename,
         headers={
             "Content-Disposition": _content_disposition(filename, inl == 1),
@@ -1613,17 +1994,21 @@ async def get_kb_file_chunks(
         .order_by(KBChunk.chunk_index.asc())
         .limit(lim)
     ).scalars().all()
-    items = [
-        {
-            "id": r.id,
-            "chunk_index": r.chunk_index,
-            "text": r.text or "",
-            "start_ms": r.start_ms,
-            "end_ms": r.end_ms,
-            "page_num": r.page_num,
-        }
-        for r in rows
-    ]
+    items = []
+    for r in rows:
+        anchor_kind, anchor_value = _make_chunk_anchor(r.chunk_index, r.page_num, r.start_ms)
+        items.append(
+            {
+                "id": r.id,
+                "chunk_index": r.chunk_index,
+                "text": r.text or "",
+                "start_ms": r.start_ms,
+                "end_ms": r.end_ms,
+                "page_num": r.page_num,
+                "anchor_kind": anchor_kind,
+                "anchor_value": anchor_value,
+            }
+        )
     return JSONResponse({"items": items})
 
 
@@ -1903,6 +2288,7 @@ async def get_kb_topics(
         .order_by(KBFile.id.desc())
     ).all()
     topic_hits: dict[str, list[int]] = {t["id"]: [] for t in _KB_TOPICS}
+    file_texts: list[tuple[int, str]] = []
     for file_id, filename in files:
         chunks = db.execute(
             select(KBChunk.text)
@@ -1910,6 +2296,7 @@ async def get_kb_topics(
             .limit(20)
         ).scalars().all()
         text = (filename or "") + " " + " ".join(chunks)
+        file_texts.append((int(file_id), text))
         for t in _KB_TOPICS:
             if _topic_matches(text, t["keywords"]):
                 topic_hits[t["id"]].append(int(file_id))
@@ -1919,9 +2306,14 @@ async def get_kb_topics(
         select(KBSmartFolder.system_tag)
         .where(KBSmartFolder.portal_id == portal_id, KBSmartFolder.system_tag.isnot(None))
     ).scalars().all()
+    existing_names = db.execute(
+        select(KBSmartFolder.name).where(KBSmartFolder.portal_id == portal_id)
+    ).scalars().all()
     existing_tags = {str(x) for x in existing if x}
+    existing_name_set = {str(x or "").strip().lower() for x in existing_names if str(x or "").strip()}
     topics_out = []
     suggestions = []
+    min_count = max(1, threshold)
     for t in _KB_TOPICS:
         ids = topic_hits.get(t["id"], [])
         topics_out.append({
@@ -1930,8 +2322,45 @@ async def get_kb_topics(
             "count": len(ids),
             "file_ids": ids,
         })
-        if len(ids) >= threshold and t["id"] not in existing_tags:
+        if (
+            len(ids) >= min_count
+            and _is_two_part_topic_name(str(t["name"]))
+            and t["id"] not in existing_tags
+            and str(t["name"]).strip().lower() not in existing_name_set
+        ):
             suggestions.append({"id": t["id"], "name": t["name"], "count": len(ids)})
+    excluded = set()
+    for t in _KB_TOPICS:
+        for kw in t.get("keywords", []):
+            for tok in re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]{4,}", str(kw).lower()):
+                excluded.add(tok)
+    auto_topics = _auto_topic_candidates(file_texts, threshold=threshold, excluded_tokens=excluded, limit=8)
+    for at in auto_topics:
+        topics_out.append(
+            {
+                "id": at["id"],
+                "name": at["name"],
+                "count": at["count"],
+                "file_ids": at["file_ids"],
+            }
+        )
+        if _is_two_part_topic_name(str(at["name"])) and at["name"].strip().lower() not in existing_name_set:
+            suggestions.append({"id": at["id"], "name": at["name"], "count": at["count"], "auto": True})
+    if not suggestions:
+        fallback = sorted(
+            [
+                t for t in topics_out
+                if int(t.get("count") or 0) >= min_count
+                and _is_two_part_topic_name(str(t.get("name") or ""))
+                and str(t.get("name") or "").strip().lower() not in existing_name_set
+            ],
+            key=lambda x: int(x.get("count") or 0),
+            reverse=True,
+        )[:8]
+        suggestions = [
+            {"id": str(t.get("id") or ""), "name": str(t.get("name") or ""), "count": int(t.get("count") or 0)}
+            for t in fallback
+        ]
     return JSONResponse({
         "threshold": threshold,
         "topics": topics_out,

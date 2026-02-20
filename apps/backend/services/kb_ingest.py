@@ -1,12 +1,14 @@
-"""KB ingestion: parse files, chunk text, generate embeddings."""
+﻿"""KB ingestion: parse files, chunk text, generate embeddings."""
 from __future__ import annotations
 
 import csv
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
+import base64
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
@@ -94,8 +96,7 @@ def _read_pdf_pages(path: str) -> list[tuple[int, str]]:
     out: list[tuple[int, str]] = []
     for idx, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
-        if text.strip():
-            out.append((idx, text.strip()))
+        out.append((idx, text.strip()))
     return out
 
 
@@ -139,6 +140,241 @@ def _ocr_pdf_file(path: str, lang: str = "rus+eng") -> str:
         if text.strip():
             parts.append(text.strip())
     return "\n".join(parts)
+
+
+def _ocr_pdf_pages(path: str, lang: str = "rus+eng") -> list[tuple[int, str]]:
+    from pdf2image import convert_from_path  # type: ignore
+    import pytesseract  # type: ignore
+    pages = convert_from_path(path, dpi=200)
+    out: list[tuple[int, str]] = []
+    for idx, img in enumerate(pages, start=1):
+        text = (pytesseract.image_to_string(img, lang=lang) or "").strip()
+        out.append((idx, text))
+    return out
+
+
+def _preview_pdf_path(storage_path: str) -> str:
+    return f"{storage_path}.preview.pdf"
+
+
+def _build_epub_preview_html(path: str) -> str | None:
+    from ebooklib import epub, ITEM_DOCUMENT  # type: ignore
+    from bs4 import BeautifulSoup  # type: ignore
+    book = epub.read_epub(path)
+    id_to_item: dict[str, object] = {}
+    image_map: dict[str, str] = {}
+    for item in book.get_items():
+        item_id = getattr(item, "id", None)
+        if item_id:
+            id_to_item[str(item_id)] = item
+        media_type = (getattr(item, "media_type", "") or "").strip().lower()
+        if media_type.startswith("image/"):
+            raw = getattr(item, "get_content", lambda: b"")() or b""
+            if not raw:
+                continue
+            b64 = base64.b64encode(raw).decode("ascii")
+            data_uri = f"data:{media_type};base64,{b64}"
+            fname = (getattr(item, "file_name", "") or "").strip()
+            href = (getattr(item, "href", "") or "").strip()
+            for key in (fname, href, fname.lstrip("./"), href.lstrip("./"), os.path.basename(fname), os.path.basename(href)):
+                if key:
+                    image_map[key] = data_uri
+
+    ordered_docs: list[object] = []
+    for sp in (getattr(book, "spine", None) or []):
+        sid = sp[0] if isinstance(sp, (list, tuple)) and sp else sp
+        it = id_to_item.get(str(sid))
+        if not it:
+            continue
+        media_type = (getattr(it, "media_type", "") or "").strip().lower()
+        if media_type in ("application/xhtml+xml", "text/html"):
+            ordered_docs.append(it)
+    if not ordered_docs:
+        for item in book.get_items():
+            media_type = (getattr(item, "media_type", "") or "").strip().lower()
+            item_type = item.get_type() if hasattr(item, "get_type") else None
+            if item_type == ITEM_DOCUMENT or media_type in ("application/xhtml+xml", "text/html"):
+                ordered_docs.append(item)
+
+    parts: list[str] = []
+    for item in ordered_docs:
+        soup = BeautifulSoup(item.get_body_content(), "lxml")
+        for bad in soup.find_all(["script", "style"]):
+            bad.decompose()
+        for img in soup.find_all("img"):
+            src = (img.get("src") or "").strip()
+            if not src:
+                continue
+            src_clean = src.split("#", 1)[0]
+            candidates = [src_clean, src_clean.lstrip("./"), os.path.basename(src_clean)]
+            repl = next((image_map.get(c) for c in candidates if c in image_map), None)
+            if repl:
+                img["src"] = repl
+                img["style"] = "max-width:100%;height:auto;display:block;margin:8pt auto;"
+        body = soup.body or soup
+        chapter = str(body)
+        if chapter.strip():
+            parts.append(f"<section class='chapter'>{chapter}</section>")
+    if not parts:
+        return None
+    return (
+        "<html><head><meta charset='utf-8'/>"
+        "<style>"
+        "body{font-family:Arial,sans-serif;font-size:11pt;line-height:1.45;margin:16mm;text-align:left;}"
+        ".chapter{page-break-after:always;}"
+        "p{margin:0 0 8pt 0; text-align:left;}"
+        "h1,h2,h3,h4{margin:10pt 0 8pt 0;}"
+        "img{max-width:100%;height:auto;display:block;margin:8pt auto;}"
+        "</style></head><body>"
+        + "\n".join(parts)
+        + "</body></html>"
+    )
+
+
+def _build_fb2_preview_html(path: str) -> str | None:
+    from bs4 import BeautifulSoup, NavigableString  # type: ignore
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        data = f.read()
+    soup = BeautifulSoup(data, "lxml-xml")
+    binaries: dict[str, str] = {}
+    for b in soup.find_all("binary"):
+        bid = (b.get("id") or "").strip()
+        ctype = (b.get("content-type") or "image/jpeg").strip()
+        raw_b64 = "".join((b.get_text() or "").split())
+        if bid and raw_b64:
+            binaries[bid] = f"data:{ctype};base64,{raw_b64}"
+
+    body = soup.find("body")
+    if not body:
+        return None
+
+    def render_node(node) -> str:
+        if isinstance(node, NavigableString):
+            txt = str(node)
+            return txt if txt.strip() else ""
+        if not getattr(node, "name", None):
+            return ""
+        name = str(node.name).lower()
+        if name == "image":
+            href = (node.get("l:href") or node.get("xlink:href") or node.get("href") or "").strip()
+            bid = href[1:] if href.startswith("#") else href
+            src = binaries.get(bid, "")
+            if not src:
+                return ""
+            return f"<img src='{src}' style='max-width:100%;height:auto;display:block;margin:8pt auto;'/>"
+        children = "".join(render_node(ch) for ch in getattr(node, "children", [])).strip()
+        if not children:
+            return ""
+        if name in ("title",):
+            return f"<h2>{children}</h2>"
+        if name in ("subtitle",):
+            return f"<h3>{children}</h3>"
+        if name in ("section",):
+            return f"<section class='chapter'>{children}</section>"
+        if name in ("p", "v", "text-author", "epigraph", "cite", "poem", "stanza"):
+            return f"<p>{children}</p>"
+        return children
+
+    html_body = "".join(render_node(ch) for ch in getattr(body, "children", []))
+    if not html_body.strip():
+        return None
+    return (
+        "<html><head><meta charset='utf-8'/>"
+        "<style>"
+        "body{font-family:Arial,sans-serif;font-size:11pt;line-height:1.45;margin:16mm;text-align:left;}"
+        ".chapter{page-break-after:always;}"
+        "p{margin:0 0 8pt 0; text-align:left;}"
+        "h1,h2,h3,h4{margin:10pt 0 8pt 0;}"
+        "img{max-width:100%;height:auto;display:block;margin:8pt auto;}"
+        "</style></head><body>"
+        + html_body
+        + "</body></html>"
+    )
+
+
+def _generate_preview_pdf(src_path: str) -> str | None:
+    """Best-effort conversion to PDF via LibreOffice (soffice)."""
+    def _convert_with_soffice(input_path: str) -> str | None:
+        with tempfile.TemporaryDirectory() as td:
+            cmd = [
+                "soffice",
+                "--headless",
+                "--convert-to",
+                "pdf:writer_pdf_Export",
+                "--outdir",
+                td,
+                input_path,
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            base = os.path.splitext(os.path.basename(input_path))[0]
+            candidate = os.path.join(td, f"{base}.pdf")
+            if not os.path.exists(candidate):
+                return None
+            out_path = _preview_pdf_path(src_path)
+            with open(candidate, "rb") as rf, open(out_path, "wb") as wf:
+                wf.write(rf.read())
+            return out_path
+
+    def _fallback_book_to_html_pdf() -> str | None:
+        ext = os.path.splitext(src_path)[1].lower()
+        if ext not in (".epub", ".fb2"):
+            return None
+        try:
+            html = _build_epub_preview_html(src_path) if ext == ".epub" else _build_fb2_preview_html(src_path)
+            html = (html or "").strip()
+            if not html:
+                return None
+            with tempfile.TemporaryDirectory() as td:
+                html_path = os.path.join(td, "book_preview.html")
+                with open(html_path, "w", encoding="utf-8") as f:
+                    f.write(html)
+                return _convert_with_soffice(html_path)
+        except Exception:
+            return None
+
+    try:
+        out = _convert_with_soffice(src_path)
+        if out:
+            return out
+        return _fallback_book_to_html_pdf()
+    except Exception:
+        return None
+
+
+def _best_page_for_text(text: str, pages: list[tuple[int, str]]) -> int | None:
+    t = (text or "").lower()
+    if not t:
+        return None
+    toks = re.findall(r"[a-zа-яё0-9]{3,}", t, flags=re.IGNORECASE)
+    if not toks:
+        return None
+    top = toks[:24]
+    best: tuple[int, int] | None = None  # score, page_num
+    for pnum, ptext in pages:
+        plow = (ptext or "").lower()
+        if not plow:
+            continue
+        score = sum(1 for tok in top if tok in plow)
+        if score <= 0:
+            continue
+        if best is None or score > best[0]:
+            best = (score, int(pnum))
+    return best[1] if best else None
+
+
+def _assign_chunk_pages_from_preview(chunks: list[KBChunk], preview_pdf_path: str) -> None:
+    try:
+        pages = _read_pdf_pages(preview_pdf_path)
+    except Exception:
+        return
+    if not pages:
+        return
+    for ch in chunks:
+        if ch.page_num is not None and int(ch.page_num) > 0:
+            continue
+        page = _best_page_for_text(ch.text or "", pages)
+        if page:
+            ch.page_num = int(page)
 
 
 _VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
@@ -211,6 +447,33 @@ def _media_duration_seconds(src_path: str) -> int:
 _WHISPER_MODEL = None
 
 
+def _is_noise_transcript_text(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return True
+    if len(t) < 14:
+        return True
+    bad_phrases = (
+        "позитивная музыка",
+        "подпишись",
+        "ставьте лайк",
+        "ставь лайк",
+        "жми колокольчик",
+        "ссылка в описании",
+        "промокод",
+        "реклама",
+    )
+    if any(p in t for p in bad_phrases):
+        return True
+    toks = re.findall(r"[a-zа-яё0-9]+", t, flags=re.IGNORECASE)
+    if len(toks) < 3:
+        return True
+    uniq = len(set(toks))
+    if uniq <= 2 and len(toks) >= 5:
+        return True
+    return False
+
+
 def _get_whisper_model():
     global _WHISPER_MODEL
     if _WHISPER_MODEL is not None:
@@ -227,7 +490,7 @@ def _transcribe_media(path: str) -> list[_Segment]:
     out: list[_Segment] = []
     for seg in segments:
         text = (seg.text or "").strip()
-        if not text:
+        if not text or _is_noise_transcript_text(text):
             continue
         start_ms = int((seg.start or 0) * 1000)
         end_ms = int((seg.end or 0) * 1000)
@@ -346,12 +609,14 @@ def _chunk_segments(segments: list[_Segment], max_chars: int = 1200) -> list[_Se
             buf = buf + " " + seg.text
             end_ms = seg.end_ms
             continue
-        chunks.append(_Segment(text=buf, start_ms=start_ms or 0, end_ms=end_ms or (start_ms or 0)))
+        if not _is_noise_transcript_text(buf):
+            chunks.append(_Segment(text=buf, start_ms=start_ms or 0, end_ms=end_ms or (start_ms or 0)))
         buf = seg.text
         start_ms = seg.start_ms
         end_ms = seg.end_ms
     if buf:
-        chunks.append(_Segment(text=buf, start_ms=start_ms or 0, end_ms=end_ms or (start_ms or 0)))
+        if not _is_noise_transcript_text(buf):
+            chunks.append(_Segment(text=buf, start_ms=start_ms or 0, end_ms=end_ms or (start_ms or 0)))
     return chunks
 
 
@@ -461,9 +726,21 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
             try:
                 if ext == ".pdf":
                     page_texts = _read_pdf_pages(rec.storage_path)
+                    ocr_by_page: dict[int, str] = {}
+                    if ocr_enabled:
+                        try:
+                            ocr_pages = _ocr_pdf_pages(rec.storage_path)
+                            ocr_by_page = {int(p): (t or "").strip() for p, t in ocr_pages}
+                        except Exception:
+                            ocr_by_page = {}
                     chunks = []
                     for page_num, page_text in page_texts:
-                        chunks.extend(chunk_text_with_page(page_text, page_num, max_chars=max_chars, overlap=overlap))
+                        text_for_page = (page_text or "").strip()
+                        if not text_for_page and ocr_by_page:
+                            text_for_page = (ocr_by_page.get(int(page_num)) or "").strip()
+                        if not text_for_page:
+                            continue
+                        chunks.extend(chunk_text_with_page(text_for_page, page_num, max_chars=max_chars, overlap=overlap))
                     if not chunks:
                         text = ""
                     else:
@@ -536,6 +813,14 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
         db.add_all(new_rows)
         db.commit()
         chunk_rows = new_rows
+
+        # Best-effort paginated preview for office/book-like files.
+        if ext in (".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".rtf", ".epub", ".fb2"):
+            preview_pdf = _generate_preview_pdf(rec.storage_path)
+            if preview_pdf:
+                _assign_chunk_pages_from_preview(chunk_rows, preview_pdf)
+                db.add_all(chunk_rows)
+                db.commit()
 
     settings = get_effective_gigachat_settings(db, rec.portal_id)
     model = (settings.get("embedding_model") or settings.get("model") or "").strip()
