@@ -4,7 +4,8 @@ param(
     [string]$RemoteUser = "root",
     [string]$RemoteDir = "/opt/teachbaseai",
     [int]$IngestWorkers = 8,
-    [int]$OutboxWorkers = 2
+    [int]$OutboxWorkers = 2,
+    [switch]$FullBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,7 +14,7 @@ Set-Location $RepoRoot
 
 $files = @(
     "apps", "alembic", "infra", "packages", "tests",
-    "docker-compose.prod.yml", "requirements.txt", "alembic.ini",
+    "docker-compose.prod.yml", "requirements.txt", "requirements.ingest.txt", "alembic.ini",
     ".env.example"
 )
 if (Test-Path "pyproject.toml") { $files += "pyproject.toml" }
@@ -51,7 +52,13 @@ fi
 cp infra/nginx/necrogame-host.conf /etc/nginx/sites-available/necrogame.ru
 nginx -t && systemctl reload nginx
 
-docker compose -f docker-compose.prod.yml build
+if [ "$($FullBuild.IsPresent)" = "True" ]; then
+  echo "Build mode: full (including worker-ingest)"
+  docker compose -f docker-compose.prod.yml build
+else
+  echo "Build mode: fast (skip worker-ingest rebuild)"
+  docker compose -f docker-compose.prod.yml build backend frontend migrator worker-outbox
+fi
 docker compose -f docker-compose.prod.yml up -d --scale worker-ingest=$IngestWorkers --scale worker-outbox=$OutboxWorkers
 docker compose -f docker-compose.prod.yml restart nginx
 

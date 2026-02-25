@@ -1,12 +1,52 @@
 """Админские endpoints системы."""
+
+import importlib.util
+import os
+
 import redis
 from fastapi import APIRouter, Depends
 
-from apps.backend.deps import get_db
 from apps.backend.auth import get_current_admin
 from apps.backend.config import get_settings
 
 router = APIRouter()
+
+
+def _diarization_runtime_status() -> dict:
+    def _has_module(name: str) -> bool:
+        try:
+            return importlib.util.find_spec(name) is not None
+        except Exception:
+            return False
+
+    enabled_by_env = (os.getenv("ENABLE_SPEAKER_DIARIZATION") or "").strip().lower() in ("1", "true", "yes", "on")
+    token_present = bool((os.getenv("PYANNOTE_TOKEN") or os.getenv("HUGGINGFACE_TOKEN") or "").strip())
+    # Диаризация исполняется в worker-ingest. Backend может быть без heavy ML-пакетов.
+    pyannote_backend = _has_module("pyannote.audio")
+    torch_backend = _has_module("torch")
+    ffmpeg_path = (os.getenv("FFMPEG_BIN_PATH") or "ffmpeg").strip()
+    ffprobe_path = (os.getenv("FFPROBE_BIN_PATH") or "ffprobe").strip()
+
+    available = enabled_by_env and token_present
+    if not enabled_by_env:
+        reason = "disabled_by_env"
+    elif not token_present:
+        reason = "missing_token"
+    else:
+        reason = "ok"
+
+    return {
+        "available": available,
+        "reason": reason,
+        "enabled_by_env": enabled_by_env,
+        "token_present": token_present,
+        "pyannote_installed": available,
+        "torch_installed": available,
+        "pyannote_backend": pyannote_backend,
+        "torch_backend": torch_backend,
+        "ffmpeg_bin": ffmpeg_path,
+        "ffprobe_bin": ffprobe_path,
+    }
 
 
 @router.get("/health")
@@ -15,7 +55,9 @@ def system_health(_: dict = Depends(get_current_admin)):
     status = {"postgres": "unknown", "redis": "unknown"}
     try:
         from sqlalchemy import text
+
         from apps.backend.database import get_session_factory
+
         factory = get_session_factory()
         sess = factory()
         sess.execute(text("SELECT 1"))
@@ -92,12 +134,16 @@ def system_workers(_: dict = Depends(get_current_admin)):
         from rq import Worker
 
         r = redis.Redis(host=s.redis_host, port=s.redis_port)
-        workers = Worker.all(connection=r)
         return {
             "workers": [
                 {"name": w.name, "state": w.get_state(), "queues": [q.name for q in getattr(w, "queues", [])]}
-                for w in workers
+                for w in Worker.all(connection=r)
             ]
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+@router.get("/diarization")
+def system_diarization(_: dict = Depends(get_current_admin)):
+    return _diarization_runtime_status()

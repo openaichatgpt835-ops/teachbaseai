@@ -92,7 +92,7 @@ services:
   worker-ingest:
     build:
       context: .
-      dockerfile: infra/docker/Dockerfile.worker
+      dockerfile: infra/docker/Dockerfile.worker.ingest
     env_file: .env
     environment:
       POSTGRES_HOST: postgres

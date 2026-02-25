@@ -1,0 +1,3 @@
+cd /opt/teachbaseai
+set -e
+docker compose -f docker-compose.prod.yml exec -T postgres psql -U teachbaseai -d teachbaseai -At -F '|' -c "select wu.email, p.id as portal_id, p.account_id, a.account_no, am.role, ap.kb_access, ap.can_invite_users, ap.can_manage_settings, ap.can_view_finance from web_users wu join portals p on p.id=wu.portal_id left join accounts a on a.id=p.account_id left join app_user_web_credentials c on c.email=lower(wu.email) left join account_memberships am on am.account_id=p.account_id and am.user_id=c.user_id and am.status in ('active','invited') left join account_permissions ap on ap.membership_id=am.id where lower(wu.email)='lagutinaleks@gmail.com' order by wu.id desc limit 3;"

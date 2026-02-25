@@ -32,6 +32,9 @@ export function AdminLayout() {
               <Link to="/admin/errors" className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-100">
                 Ошибки API
               </Link>
+              <Link to="/admin/rbac-owners" className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-100">
+                RBAC аудит
+              </Link>
               <Link to="/admin/inbound-events" className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-100">
                 Inbound events
               </Link>

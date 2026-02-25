@@ -13,6 +13,8 @@ from sqlalchemy import select, delete, desc
 from apps.backend.deps import get_db
 from apps.backend.auth import get_current_admin
 from apps.backend.models.portal import Portal, PortalUsersAccess, PortalToken
+from apps.backend.models.web_user import WebUser
+from apps.backend.models.account import Account, AccountMembership, AccountPermission, AppUserWebCredential
 from apps.backend.models.event import Event
 from apps.backend.models.bitrix_log import BitrixHttpLog
 from apps.backend.services.portal_tokens import BitrixAuthError, ensure_fresh_access_token, refresh_portal_tokens
@@ -48,6 +50,104 @@ class AccessUsersBody(BaseModel):
 class BitrixCredentialsBody(BaseModel):
     client_id: str
     client_secret: str
+
+
+@router.get("/rbac/owners/audit")
+def admin_rbac_owners_audit(
+    email: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=2000),
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_admin),
+):
+    """
+    Аудит owner-прав для web пользователей:
+    - есть ли account
+    - есть ли membership
+    - роль/права owner
+    """
+    q = (
+        select(
+            WebUser.id.label("web_user_id"),
+            WebUser.email.label("email"),
+            WebUser.portal_id.label("portal_id"),
+            Portal.domain.label("portal_domain"),
+            Portal.install_type.label("install_type"),
+            Portal.account_id.label("account_id"),
+            Account.account_no.label("account_no"),
+            AccountMembership.id.label("membership_id"),
+            AccountMembership.role.label("role"),
+            AccountMembership.status.label("membership_status"),
+            AccountPermission.kb_access.label("kb_access"),
+            AccountPermission.can_invite_users.label("can_invite_users"),
+            AccountPermission.can_manage_settings.label("can_manage_settings"),
+            AccountPermission.can_view_finance.label("can_view_finance"),
+        )
+        .select_from(WebUser)
+        .join(Portal, Portal.id == WebUser.portal_id, isouter=True)
+        .join(Account, Account.id == Portal.account_id, isouter=True)
+        .join(AppUserWebCredential, AppUserWebCredential.email == WebUser.email, isouter=True)
+        .join(
+            AccountMembership,
+            (AccountMembership.account_id == Portal.account_id)
+            & (AccountMembership.user_id == AppUserWebCredential.user_id)
+            & (AccountMembership.status.in_(["active", "invited"])),
+            isouter=True,
+        )
+        .join(
+            AccountPermission,
+            AccountPermission.membership_id == AccountMembership.id,
+            isouter=True,
+        )
+        .order_by(desc(WebUser.id))
+        .limit(limit)
+    )
+    if email:
+        q = q.where(WebUser.email.ilike(f"%{email.strip().lower()}%"))
+    rows = db.execute(q).mappings().all()
+
+    items = []
+    ok_count = 0
+    broken_count = 0
+    for r in rows:
+        is_owner = (r.get("role") == "owner")
+        has_owner_perms = (
+            (r.get("kb_access") == "write")
+            and bool(r.get("can_invite_users"))
+            and bool(r.get("can_manage_settings"))
+            and bool(r.get("can_view_finance"))
+        )
+        healthy = bool(r.get("account_id")) and bool(r.get("membership_id")) and is_owner and has_owner_perms
+        if healthy:
+            ok_count += 1
+        else:
+            broken_count += 1
+        items.append(
+            {
+                "web_user_id": r.get("web_user_id"),
+                "email": r.get("email"),
+                "portal_id": r.get("portal_id"),
+                "portal_domain": r.get("portal_domain"),
+                "install_type": r.get("install_type"),
+                "account_id": r.get("account_id"),
+                "account_no": r.get("account_no"),
+                "membership_id": r.get("membership_id"),
+                "role": r.get("role"),
+                "membership_status": r.get("membership_status"),
+                "kb_access": r.get("kb_access"),
+                "can_invite_users": bool(r.get("can_invite_users")) if r.get("can_invite_users") is not None else None,
+                "can_manage_settings": bool(r.get("can_manage_settings")) if r.get("can_manage_settings") is not None else None,
+                "can_view_finance": bool(r.get("can_view_finance")) if r.get("can_view_finance") is not None else None,
+                "healthy_owner_default": healthy,
+            }
+        )
+    return {
+        "items": items,
+        "summary": {
+            "total": len(items),
+            "ok": ok_count,
+            "broken": broken_count,
+        },
+    }
 
 
 @router.get("")

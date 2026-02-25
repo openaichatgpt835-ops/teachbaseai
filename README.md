@@ -1,42 +1,58 @@
-# Teachbase AI — Bitrix24 Marketplace
+﻿# Teachbase AI
 
-Мультипортальное приложение для Bitrix24 Cloud Marketplace. Тысячи порталов, глобальная админка, ping/pong + ответы на текст.
+Мультиканальная платформа базы знаний и AI-ботов:
+- web-кабинет;
+- iframe-приложение Bitrix24;
+- Telegram staff/client боты;
+- админка (только через localhost-туннель).
 
-## Быстрый старт
+## Архитектура (кратко)
+- Backend: FastAPI + SQLAlchemy + Alembic
+- Workers: RQ + Redis (`ingest`, `outbox`)
+- DB: PostgreSQL
+- Frontend: React (web/admin) + Vue (iframe legacy)
+- Reverse proxy: nginx
 
+## Локальный запуск (dev)
 ```bash
 cp .env.example .env
 docker compose -f docker-compose.dev.yml up -d
-# Гейт: http://localhost:3000
-# Логин: admin@localhost / changeme
 ```
 
-## Симулятор
+Проверки:
+- `http://localhost:3000/health`
+- `http://localhost:3000/admin`
 
-```bash
-# Логин и получить токен
-curl -X POST http://localhost:3000/api/v1/admin/auth/login \
-  -H "Content-Type: application/json" -d '{"email":"admin@localhost","password":"changeme"}'
-
-# Симулировать входящее сообщение (с Bearer)
-curl -X POST http://localhost:3000/api/v1/debug/simulate/bitrix/incoming \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" -d '{"portal_id":1,"body":"ping"}'
+## Прод деплой
+Используется скрипт:
+```powershell
+powershell -Command ./scripts/deploy_teachbase.ps1
 ```
 
-После симуляции диалог и сообщения появятся в админке (/admin/dialogs).
+### Режимы деплоя
+- Быстрый (по умолчанию): без rebuild `worker-ingest`.
+  - Для обычных правок backend/frontend.
+- Полный: с rebuild всех сервисов, включая `worker-ingest`.
+  - Для изменений ML/ingest (`requirements.ingest.txt`, `Dockerfile.worker.ingest`, diarization).
 
-## Документация
-
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — архитектура, модули, таблицы
-- [docs/ONBOARDING.md](docs/ONBOARDING.md) — dev/prod, env, логи
-- [docs/OPERATIONS.md](docs/OPERATIONS.md) — runbook
-- [docs/BITRIX_INSTALL.md](docs/BITRIX_INSTALL.md) — установка в Bitrix24
-
-## Prod деплой (109.73.193.61)
-
-```bash
-docker compose -f docker-compose.prod.yml up -d
-# Админка: ssh -L 3000:localhost:3000 user@109.73.193.61
-# http://localhost:3000/admin
+Полный деплой:
+```powershell
+powershell -Command ./scripts/deploy_teachbase.ps1 -FullBuild
 ```
+
+## Диаризация спикеров (media transcript)
+Требования на проде:
+- `ENABLE_SPEAKER_DIARIZATION=1`
+- `PYANNOTE_TOKEN=hf_...`
+
+Важно:
+- Диаризация выполняется в `worker-ingest`.
+- Диагностика доступна в админке: `Система -> Диаризация (runtime)`.
+
+## Полезные документы
+- `docs/ARCHITECTURE.md`
+- `docs/ONBOARDING.md`
+- `docs/OPERATIONS.md`
+- `docs/BITRIX_INSTALL.md`
+- `docs/AGENTS_ONBOARDING.md`
+- `SERVER_ACCESS.md`

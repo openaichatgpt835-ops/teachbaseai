@@ -14,6 +14,7 @@ import { KnowledgeBasePage } from "./pages/admin/KnowledgeBasePage";
 import { BotSettingsPage } from "./pages/admin/BotSettingsPage";
 import { RegistrationsPage } from "./pages/admin/RegistrationsPage";
 import { ErrorsPage } from "./pages/admin/ErrorsPage";
+import { RbacOwnersAuditPage } from "./pages/admin/RbacOwnersAuditPage";
 import { B24AppPage } from "./pages/b24/B24AppPage";
 import { RegisterPage } from "./pages/web/RegisterPage";
 import { WebLoginPage } from "./pages/web/WebLoginPage";
@@ -27,6 +28,9 @@ import { WebSettingsPage } from "./pages/web/WebSettingsPage";
 import { WebIntegrationsPage } from "./pages/web/WebIntegrationsPage";
 import { WebFlowPage } from "./pages/web/WebFlowPage";
 import { ConfirmEmailPage } from "./pages/web/ConfirmEmailPage";
+import { AcceptInvitePage } from "./pages/web/AcceptInvitePage";
+import { WebForgotPasswordPage } from "./pages/web/WebForgotPasswordPage";
+import { WebResetPasswordPage } from "./pages/web/WebResetPasswordPage";
 import { WebAiRopPage } from "./pages/web/WebAiRopPage";
 import { WebAiRopAccessPage } from "./pages/web/WebAiRopAccessPage";
 import { WebChatPage } from "./pages/web/WebChatPage";
@@ -37,7 +41,10 @@ export default function App() {
       <Route path="/" element={<Navigate to="/register" replace />} />
       <Route path="/register" element={<RegisterPage />} />
       <Route path="/login" element={<WebLoginPage />} />
+      <Route path="/password/forgot" element={<WebForgotPasswordPage />} />
+      <Route path="/password/reset" element={<WebResetPasswordPage />} />
       <Route path="/confirm" element={<ConfirmEmailPage />} />
+      <Route path="/invite/accept" element={<AcceptInvitePage />} />
       <Route path="/app" element={<WebLayout />}>
         <Route index element={<Navigate to="/app/overview" replace />} />
         <Route path="overview" element={<WebOverviewPage />} />
@@ -69,6 +76,7 @@ export default function App() {
         <Route path="bot-settings" element={<BotSettingsPage />} />
         <Route path="registrations" element={<RegistrationsPage />} />
         <Route path="errors" element={<ErrorsPage />} />
+        <Route path="rbac-owners" element={<RbacOwnersAuditPage />} />
         <Route index element={<Navigate to="portals" replace />} />
       </Route>
       <Route path="/b24/app" element={<B24AppPage />} />

@@ -18,6 +18,9 @@ class Portal(Base):
     local_client_id = Column(String(128), index=True)  # local.* for Local App, per-portal
     local_client_secret_encrypted = Column(Text)  # encrypted, stored in env
     admin_user_id = Column(Integer, nullable=True, index=True)  # Bitrix portal admin (installer)
+    # Keep ORM loosely coupled for tests that import only portal model.
+    # DB FK is created by migration 033_accounts_core.
+    account_id = Column(Integer, nullable=True, index=True)
     metadata_json = Column(Text)
     welcome_message = Column(Text, nullable=False, default="Hello! I am Teachbase AI. Type \"ping\" and I will reply \"pong\".")
     created_at = Column(DateTime, default=datetime.utcnow)

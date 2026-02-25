@@ -17,7 +17,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from apps.backend.models.kb import KBFile, KBChunk, KBEmbedding
-from apps.backend.services.kb_settings import get_effective_gigachat_settings, get_valid_gigachat_access_token
+from apps.backend.services.kb_settings import (
+    get_effective_gigachat_settings,
+    get_valid_gigachat_access_token,
+    is_media_transcription_enabled,
+    is_speaker_diarization_enabled,
+)
 from apps.backend.services.gigachat_client import create_embeddings
 from apps.backend.services.kb_pgvector import write_vector_column
 from apps.backend.services.billing import get_pricing, calc_cost_rub, record_usage
@@ -409,21 +414,42 @@ class _Segment:
     text: str
     start_ms: int
     end_ms: int
+    speaker: str | None = None
 
 
-def _extract_audio_to_wav(src_path: str, dst_path: str) -> None:
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        src_path,
+def _extract_audio_to_wav(src_path: str, dst_path: str, stream_index: int | None = None) -> None:
+    cmd = ["ffmpeg", "-y", "-i", src_path]
+    if stream_index is not None and stream_index >= 0:
+        cmd.extend(["-map", f"0:a:{int(stream_index)}"])
+    cmd.extend([
         "-ac",
         "1",
         "-ar",
         "16000",
         dst_path,
-    ]
+    ])
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _audio_stream_count(src_path: str) -> int:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        src_path,
+    ]
+    try:
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("utf-8", errors="ignore")
+    except Exception:
+        return 1
+    cnt = len([ln for ln in out.splitlines() if ln.strip() != ""])
+    return max(1, cnt)
 
 
 def _media_duration_seconds(src_path: str) -> int:
@@ -445,6 +471,7 @@ def _media_duration_seconds(src_path: str) -> int:
 
 
 _WHISPER_MODEL = None
+_DIARIZATION_PIPELINE = None
 
 
 def _is_noise_transcript_text(text: str) -> bool:
@@ -484,6 +511,89 @@ def _get_whisper_model():
     return _WHISPER_MODEL
 
 
+def _get_diarization_pipeline():
+    global _DIARIZATION_PIPELINE
+    if _DIARIZATION_PIPELINE is not None:
+        return _DIARIZATION_PIPELINE
+    enabled = (os.getenv("ENABLE_SPEAKER_DIARIZATION") or "").strip().lower() in ("1", "true", "yes", "on")
+    if not enabled:
+        return None
+    token = (os.getenv("PYANNOTE_TOKEN") or os.getenv("HUGGINGFACE_TOKEN") or "").strip()
+    if not token:
+        return None
+    try:
+        from pyannote.audio import Pipeline  # type: ignore
+        _DIARIZATION_PIPELINE = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=token)
+        return _DIARIZATION_PIPELINE
+    except Exception:
+        return None
+
+
+def _diarize_track(path: str) -> list[tuple[int, int, str]]:
+    pipe = _get_diarization_pipeline()
+    if pipe is None:
+        return []
+    kwargs: dict[str, int] = {}
+    try:
+        min_sp = int(os.getenv("DIARIZATION_MIN_SPEAKERS") or 0)
+    except Exception:
+        min_sp = 0
+    try:
+        max_sp = int(os.getenv("DIARIZATION_MAX_SPEAKERS") or 0)
+    except Exception:
+        max_sp = 0
+    if min_sp > 0:
+        kwargs["min_speakers"] = min_sp
+    if max_sp > 0:
+        kwargs["max_speakers"] = max_sp
+    try:
+        diar = pipe(path, **kwargs)
+    except Exception:
+        return []
+    spans: list[tuple[int, int, str]] = []
+    try:
+        for turn, _track, speaker in diar.itertracks(yield_label=True):
+            s_ms = int(max(0.0, float(getattr(turn, "start", 0.0))) * 1000)
+            e_ms = int(max(0.0, float(getattr(turn, "end", 0.0))) * 1000)
+            if e_ms > s_ms:
+                spans.append((s_ms, e_ms, str(speaker or "").strip() or "SPEAKER_0"))
+    except Exception:
+        return []
+    return spans
+
+
+def _assign_speakers_from_spans(segments: list[_Segment], spans: list[tuple[int, int, str]]) -> list[_Segment]:
+    if not segments:
+        return segments
+    if not spans:
+        for seg in segments:
+            if not seg.speaker:
+                seg.speaker = "Спикер A"
+        return segments
+
+    order: list[str] = []
+    for _s, _e, sp in spans:
+        if sp not in order:
+            order.append(sp)
+    label_map: dict[str, str] = {}
+    for i, sp in enumerate(order):
+        label_map[sp] = f"Спикер {chr(ord('A') + i)}" if i < 26 else f"Спикер {i+1}"
+
+    for seg in segments:
+        best_sp = None
+        best_ov = -1
+        for s_ms, e_ms, sp in spans:
+            ov = min(seg.end_ms, e_ms) - max(seg.start_ms, s_ms)
+            if ov > best_ov:
+                best_ov = ov
+                best_sp = sp
+        if best_sp and best_ov > 0:
+            seg.speaker = label_map.get(best_sp, "Спикер A")
+        elif not seg.speaker:
+            seg.speaker = "Спикер A"
+    return segments
+
+
 def _transcribe_media(path: str) -> list[_Segment]:
     model = _get_whisper_model()
     segments, _info = model.transcribe(path, vad_filter=True)
@@ -494,7 +604,7 @@ def _transcribe_media(path: str) -> list[_Segment]:
             continue
         start_ms = int((seg.start or 0) * 1000)
         end_ms = int((seg.end or 0) * 1000)
-        out.append(_Segment(text=text, start_ms=start_ms, end_ms=end_ms))
+        out.append(_Segment(text=text, start_ms=start_ms, end_ms=end_ms, speaker=None))
     return out
 
 
@@ -539,6 +649,7 @@ def _read_transcript_segments_jsonl(path: str) -> list[_Segment]:
                         text=txt,
                         start_ms=int(row.get("start_ms") or 0),
                         end_ms=int(row.get("end_ms") or 0),
+                        speaker=(str(row.get("speaker") or "").strip() or None),
                     )
                 )
             except Exception:
@@ -547,7 +658,12 @@ def _read_transcript_segments_jsonl(path: str) -> list[_Segment]:
 
 
 def _append_transcript_segment_jsonl(path: str, seg: _Segment) -> None:
-    row = {"start_ms": seg.start_ms, "end_ms": seg.end_ms, "text": seg.text}
+    row = {
+        "start_ms": seg.start_ms,
+        "end_ms": seg.end_ms,
+        "text": seg.text,
+        "speaker": seg.speaker,
+    }
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -576,6 +692,7 @@ def _transcribe_media_resumable(
                 text=seg.text,
                 start_ms=seg.start_ms + pos * 1000,
                 end_ms=seg.end_ms + pos * 1000,
+                speaker=seg.speaker,
             )
             # Skip overlap duplicates on resume/chunk boundaries.
             if shifted.end_ms <= last_end_ms:
@@ -684,6 +801,7 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
     rec.error_message = None
     db.add(rec)
     db.commit()
+    media_ext = os.path.splitext((rec.filename or "").lower())[1]
 
     # reuse existing chunks if they already exist (multi-version embeddings)
     chunk_rows = db.execute(
@@ -691,10 +809,23 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
     ).scalars().all()
 
     if not chunk_rows:
-        ext = os.path.splitext(rec.filename.lower())[1]
+        ext = media_ext
         max_chars, overlap = _chunk_profile_for_ext(ext)
         ocr_enabled = (os.getenv("OCR_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
         if ext in _VIDEO_EXTS:
+            if not is_media_transcription_enabled(db, rec.portal_id):
+                rec.status = "ready"
+                rec.error_message = "transcription_not_enabled"
+                rec.transcript_status = "not_enabled"
+                rec.transcript_error = None
+                rec.processed_at = datetime.utcnow()
+                db.add(rec)
+                db.commit()
+                return {"ok": True, "chunks": 0, "skipped": True, "reason": "transcription_not_enabled"}
+            rec.transcript_status = "processing"
+            rec.transcript_error = None
+            db.add(rec)
+            db.commit()
             try:
                 transcript_jsonl_path = rec.storage_path + ".transcript.jsonl"
 
@@ -705,20 +836,53 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
 
                 with tempfile.TemporaryDirectory() as td:
                     wav_path = os.path.join(td, "audio.wav")
-                    _extract_audio_to_wav(rec.storage_path, wav_path)
-                    segments = _transcribe_media_resumable(
-                        wav_path,
-                        transcript_jsonl_path=transcript_jsonl_path,
-                        progress_cb=_set_progress,
-                    )
+                    stream_count = _audio_stream_count(rec.storage_path)
+                    if stream_count <= 1:
+                        _extract_audio_to_wav(rec.storage_path, wav_path)
+                        segments = _transcribe_media_resumable(
+                            wav_path,
+                            transcript_jsonl_path=transcript_jsonl_path,
+                            progress_cb=_set_progress,
+                        )
+                        spans = _diarize_track(wav_path) if is_speaker_diarization_enabled(db, rec.portal_id) else []
+                        segments = _assign_speakers_from_spans(segments, spans)
+                    else:
+                        all_segments: list[_Segment] = []
+                        for si in range(stream_count):
+                            stream_wav = os.path.join(td, f"audio_s{si+1}.wav")
+                            stream_jsonl = rec.storage_path + f".transcript.s{si+1}.jsonl"
+                            _extract_audio_to_wav(rec.storage_path, stream_wav, stream_index=si)
+                            segs = _transcribe_media_resumable(
+                                stream_wav,
+                                transcript_jsonl_path=stream_jsonl,
+                                progress_cb=None,
+                            )
+                            for seg in segs:
+                                seg.speaker = f"Дорожка {si+1}"
+                                all_segments.append(seg)
+                            _set_progress(int(((si + 1) / stream_count) * 100))
+                        all_segments.sort(key=lambda s: (int(s.start_ms), int(s.end_ms)))
+                        segments = all_segments
+                        with open(transcript_jsonl_path, "w", encoding="utf-8") as f:
+                            for seg in segments:
+                                row = {
+                                    "start_ms": int(seg.start_ms),
+                                    "end_ms": int(seg.end_ms),
+                                    "text": seg.text,
+                                    "speaker": seg.speaker,
+                                }
+                                f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 chunks = _chunk_segments(segments, max_chars=max_chars)
                 transcript_path = rec.storage_path + ".transcript.txt"
                 with open(transcript_path, "w", encoding="utf-8") as tf:
                     for seg in segments:
-                        tf.write(f"[{seg.start_ms}-{seg.end_ms}] {seg.text}\n")
+                        sp = f"[{seg.speaker}] " if seg.speaker else ""
+                        tf.write(f"[{seg.start_ms}-{seg.end_ms}] {sp}{seg.text}\n")
             except Exception as e:
                 rec.status = "error"
                 rec.error_message = ("transcribe_failed:" + str(e))[:200]
+                rec.transcript_status = "error"
+                rec.transcript_error = rec.error_message
                 db.add(rec)
                 db.commit()
                 return {"ok": False, "error": "transcribe_failed", "detail": rec.error_message}
@@ -828,6 +992,9 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
     if not model:
         rec.status = "error"
         rec.error_message = "missing_embedding_model"
+        if media_ext in _VIDEO_EXTS:
+            rec.transcript_status = "error"
+            rec.transcript_error = rec.error_message
         db.add(rec)
         db.commit()
         return {"ok": False, "error": "missing_embedding_model"}
@@ -835,6 +1002,9 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
     if err or not token:
         rec.status = "error"
         rec.error_message = err or "missing_access_token"
+        if media_ext in _VIDEO_EXTS:
+            rec.transcript_status = "error"
+            rec.transcript_error = rec.error_message
         db.add(rec)
         db.commit()
         return {"ok": False, "error": rec.error_message}
@@ -917,6 +1087,9 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
                 return {"ok": False, "error": "rate_limited"}
             rec.status = "error"
             rec.error_message = err or "embedding_failed"
+            if media_ext in _VIDEO_EXTS:
+                rec.transcript_status = "error"
+                rec.transcript_error = rec.error_message
             db.add(rec)
             db.commit()
             return {"ok": False, "error": rec.error_message}
@@ -959,6 +1132,9 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
         pass
     rec.status = "ready"
     rec.error_message = None
+    if media_ext in _VIDEO_EXTS:
+        rec.transcript_status = "ready"
+        rec.transcript_error = None
     rec.processed_at = datetime.utcnow()
     db.add(rec)
     db.commit()

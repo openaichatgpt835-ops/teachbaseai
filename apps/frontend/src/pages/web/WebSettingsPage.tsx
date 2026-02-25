@@ -9,6 +9,10 @@ type KbSettings = {
   system_prompt_extra: string;
   show_sources: boolean;
   sources_format: "detailed" | "short" | "none";
+  media_transcription_enabled: boolean;
+  speaker_diarization_enabled: boolean;
+  speaker_diarization_available?: boolean;
+  speaker_diarization_reason?: string;
   collections_multi_assign: boolean;
   smart_folder_threshold: number | "";
   allow_general: boolean;
@@ -40,6 +44,8 @@ const defaultSettings: KbSettings = {
   system_prompt_extra: "",
   show_sources: true,
   sources_format: "detailed",
+  media_transcription_enabled: true,
+  speaker_diarization_enabled: false,
   collections_multi_assign: true,
   smart_folder_threshold: 5,
   allow_general: false,
@@ -134,6 +140,10 @@ export function WebSettingsPage() {
             system_prompt_extra: data.system_prompt_extra || "",
             show_sources: data.show_sources !== false,
             sources_format: data.sources_format || "detailed",
+            media_transcription_enabled: data.media_transcription_enabled !== false,
+            speaker_diarization_enabled: !!data.speaker_diarization_enabled,
+            speaker_diarization_available: data.speaker_diarization_available !== false,
+            speaker_diarization_reason: data.speaker_diarization_reason || "",
             collections_multi_assign: data.collections_multi_assign !== false,
             smart_folder_threshold: data.smart_folder_threshold ?? 5,
             allow_general: !!data.allow_general,
@@ -250,6 +260,27 @@ export function WebSettingsPage() {
           </Field>
 
           <div className="grid gap-4 md:grid-cols-2">
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={kbSettings.media_transcription_enabled}
+                onChange={(e) => setKbSettings((prev) => ({ ...prev, media_transcription_enabled: e.target.checked }))}
+              />
+              Включить опцию транскрибации медиа
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={kbSettings.speaker_diarization_enabled}
+                onChange={(e) => setKbSettings((prev) => ({ ...prev, speaker_diarization_enabled: e.target.checked }))}
+                disabled={!kbSettings.media_transcription_enabled}
+              />
+              Разделять по спикерам (диаризация)
+            </label>
+            <div className="text-xs text-slate-500 md:col-span-2">
+              Статус диаризации: {kbSettings.speaker_diarization_available ? "доступна" : "недоступна"}
+              {kbSettings.speaker_diarization_reason ? ` (${kbSettings.speaker_diarization_reason})` : ""}
+            </div>
             <label className="flex items-center gap-2 text-sm text-slate-700">
               <input
                 type="checkbox"

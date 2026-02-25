@@ -19,6 +19,7 @@ from apps.backend.routers import admin_system, admin_logs, admin_traces, admin_d
 from apps.backend.routers import admin_settings, admin_inbound_events, admin_billing, admin_registrations
 from apps.backend.routers import admin_errors
 from apps.backend.routers import bitrix, bitrix_botflow, bitrix_dialogs, portal, debug, admin_kb, telegram, web_auth
+from apps.backend.routers import web_rbac_v2
 from apps.backend.services.token_refresh_daemon import refresh_tokens_once
 from apps.backend.services.kb_job_watchdog import run_kb_watchdog_cycle
 from apps.backend.config import get_settings
@@ -128,6 +129,7 @@ app.include_router(bitrix_dialogs.router, prefix="/v1/bitrix", tags=["Bitrix"])
 app.include_router(telegram.router, prefix="/v1/telegram", tags=["Telegram"])
 app.include_router(portal.router, prefix="/v1/portal", tags=["Portal"])
 app.include_router(web_auth.router, prefix="/v1/web", tags=["Web"])
+app.include_router(web_rbac_v2.router, prefix="/v2/web", tags=["Web RBAC v2"])
 app.include_router(debug.router, prefix="/v1/debug", tags=["Debug"])
 
 

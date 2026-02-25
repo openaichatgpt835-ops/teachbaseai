@@ -42,6 +42,8 @@ class KBFile(Base):
     uploaded_by_id = Column(String(64), nullable=True)
     uploaded_by_name = Column(String(128), nullable=True)
     query_count = Column(Integer, nullable=False, default=0)
+    transcript_status = Column(String(32), nullable=True)  # not_enabled|queued|processing|ready|error
+    transcript_error = Column(Text, nullable=True)
     processed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

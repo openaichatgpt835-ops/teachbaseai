@@ -123,6 +123,11 @@ export function WebLoginPage() {
             {resendBusy ? "Отправка..." : "Отправить письмо ещё раз"}
           </button>
         </form>
+        <div className="mt-3 text-xs text-slate-500">
+          <Link to="/password/forgot" className="text-sky-600 font-semibold">
+            Забыли пароль?
+          </Link>
+        </div>
         <div className="mt-4 text-xs text-slate-500">
           Нет аккаунта?{" "}
           <Link to="/register" className="text-sky-600 font-semibold">

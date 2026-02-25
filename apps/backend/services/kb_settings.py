@@ -139,6 +139,8 @@ def get_portal_bot_settings(db: Session, portal_id: int) -> dict[str, Any]:
             "use_history": None,
             "use_cache": None,
             "system_prompt_extra": None,
+            "media_transcription_enabled": None,
+            "speaker_diarization_enabled": None,
             "collections_multi_assign": None,
             "smart_folder_threshold": None,
         }
@@ -158,6 +160,8 @@ def get_portal_bot_settings(db: Session, portal_id: int) -> dict[str, Any]:
         "use_history": row.use_history,
         "use_cache": row.use_cache,
         "system_prompt_extra": row.system_prompt_extra,
+        "media_transcription_enabled": row.media_transcription_enabled,
+        "speaker_diarization_enabled": row.speaker_diarization_enabled,
         "collections_multi_assign": row.collections_multi_assign,
         "smart_folder_threshold": row.smart_folder_threshold,
     }
@@ -173,6 +177,8 @@ def get_portal_kb_settings(db: Session, portal_id: int) -> dict[str, Any]:
             "prompt_preset": "auto",
             "show_sources": True,
             "sources_format": "detailed",
+            "media_transcription_enabled": True,
+            "speaker_diarization_enabled": False,
             "collections_multi_assign": True,
             "smart_folder_threshold": 5,
             **get_portal_bot_settings(db, portal_id),
@@ -184,6 +190,8 @@ def get_portal_kb_settings(db: Session, portal_id: int) -> dict[str, Any]:
         "prompt_preset": row.prompt_preset or "auto",
         "show_sources": row.show_sources if row.show_sources is not None else True,
         "sources_format": row.sources_format or "detailed",
+        "media_transcription_enabled": row.media_transcription_enabled if row.media_transcription_enabled is not None else True,
+        "speaker_diarization_enabled": row.speaker_diarization_enabled if row.speaker_diarization_enabled is not None else False,
         "collections_multi_assign": row.collections_multi_assign if row.collections_multi_assign is not None else True,
         "smart_folder_threshold": row.smart_folder_threshold if row.smart_folder_threshold is not None else 5,
         **get_portal_bot_settings(db, portal_id),
@@ -215,6 +223,8 @@ def set_portal_kb_settings(
     system_prompt_extra: str | None = None,
     show_sources: bool | None = None,
     sources_format: str | None = None,
+    media_transcription_enabled: bool | None = None,
+    speaker_diarization_enabled: bool | None = None,
     collections_multi_assign: bool | None = None,
     smart_folder_threshold: int | None = None,
 ) -> dict[str, Any]:
@@ -264,6 +274,10 @@ def set_portal_kb_settings(
         row.show_sources = bool(show_sources)
     if sources_format is not None:
         row.sources_format = (sources_format or "").strip() or None
+    if media_transcription_enabled is not None:
+        row.media_transcription_enabled = bool(media_transcription_enabled)
+    if speaker_diarization_enabled is not None:
+        row.speaker_diarization_enabled = bool(speaker_diarization_enabled)
     if collections_multi_assign is not None:
         row.collections_multi_assign = bool(collections_multi_assign)
     if smart_folder_threshold is not None:
@@ -313,6 +327,8 @@ def get_effective_gigachat_settings(db: Session, portal_id: int) -> dict[str, An
         "system_prompt_extra",
         "show_sources",
         "sources_format",
+        "media_transcription_enabled",
+        "speaker_diarization_enabled",
         "collections_multi_assign",
         "smart_folder_threshold",
     ):
@@ -320,6 +336,17 @@ def get_effective_gigachat_settings(db: Session, portal_id: int) -> dict[str, An
             base[k] = p.get(k)
     base["portal_override"] = p
     return base
+
+
+def is_media_transcription_enabled(db: Session, portal_id: int) -> bool:
+    p = get_portal_kb_settings(db, portal_id)
+    val = p.get("media_transcription_enabled")
+    return True if val is None else bool(val)
+
+
+def is_speaker_diarization_enabled(db: Session, portal_id: int) -> bool:
+    p = get_portal_kb_settings(db, portal_id)
+    return bool(p.get("speaker_diarization_enabled"))
 
 
 def set_gigachat_settings(

@@ -6,6 +6,7 @@ import re
 import uuid
 import time
 import hmac
+import importlib.util
 from urllib.parse import quote
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -47,7 +48,12 @@ from apps.backend.services.bitrix_events import process_imbot_message
 from apps.backend.services.portal_tokens import save_tokens, get_valid_access_token, BitrixAuthError, refresh_portal_tokens
 from apps.backend.services.token_crypto import encrypt_token
 from apps.backend.services.kb_storage import ensure_portal_dir, save_upload
-from apps.backend.services.kb_settings import get_portal_kb_settings, set_portal_kb_settings
+from apps.backend.services.kb_settings import (
+    get_portal_kb_settings,
+    set_portal_kb_settings,
+    is_media_transcription_enabled,
+    is_speaker_diarization_enabled,
+)
 from apps.backend.services.kb_sources import create_url_source
 from apps.backend.services.kb_rag import answer_from_kb
 from apps.backend.services.gigachat_client import list_models, DEFAULT_API_BASE
@@ -71,6 +77,7 @@ from apps.backend.models.portal_link_request import PortalLinkRequest
 from apps.backend.services.activity import log_activity
 from apps.backend.clients.telegram import telegram_get_me, telegram_set_webhook
 from apps.backend.services.web_email import create_email_token, send_registration_email
+from apps.backend.services.rbac_service import ensure_rbac_for_web_user
 from apps.backend.utils.api_errors import error_envelope
 from apps.backend.utils.api_schema import is_schema_v2
 
@@ -1048,6 +1055,33 @@ def _make_chunk_anchor(
     return "chunk_index", "0"
 
 
+_MEDIA_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+
+
+def _is_media_file(filename: str | None, mime_type: str | None) -> bool:
+    ext = os.path.splitext((filename or "").lower())[1]
+    mt = (mime_type or "").lower().strip()
+    return ext in _MEDIA_EXTS or mt.startswith("audio/") or mt.startswith("video/")
+
+
+def _diarization_runtime_status() -> tuple[bool, str]:
+    def _has_module(name: str) -> bool:
+        try:
+            return importlib.util.find_spec(name) is not None
+        except Exception:
+            return False
+
+    enabled = (os.getenv("ENABLE_SPEAKER_DIARIZATION") or "").strip().lower() in ("1", "true", "yes", "on")
+    if not enabled:
+        return False, "disabled_by_env"
+    token = (os.getenv("PYANNOTE_TOKEN") or os.getenv("HUGGINGFACE_TOKEN") or "").strip()
+    if not token:
+        return False, "missing_token"
+    # Диаризация выполняется в worker-ingest, а не в backend-контейнере.
+    # Здесь проверяем только флаги доступа.
+    return True, "ok"
+
+
 def _parse_csv_ints(raw: str | None) -> list[int]:
     if not raw:
         return []
@@ -1270,6 +1304,7 @@ async def register_web_from_bitrix(
         meta["company"] = body.company
     portal.metadata_json = json.dumps(meta, ensure_ascii=False)
     db.add(portal)
+    ensure_rbac_for_web_user(db, user, force_owner=True, account_name=(body.company or "").strip() or None)
     db.commit()
     token = create_email_token(db, user.id)
     ok, err = send_registration_email(db, user, token)
@@ -1463,6 +1498,8 @@ async def get_portal_kb_files(
             "uploaded_by_id": f.uploaded_by_id,
             "uploaded_by_name": f.uploaded_by_name,
             "query_count": int(f.query_count or 0),
+            "transcript_status": f.transcript_status,
+            "transcript_error": f.transcript_error,
             "created_at": f.created_at.isoformat() if f.created_at else None,
         })
     return JSONResponse({"items": items})
@@ -1661,6 +1698,8 @@ async def upload_portal_kb_file(
     aud = (audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
+    is_media = _is_media_file(safe_name, file.content_type)
+    media_enabled = is_media_transcription_enabled(db, portal_id)
     rec = KBFile(
         portal_id=portal_id,
         filename=safe_name,
@@ -1673,6 +1712,7 @@ async def upload_portal_kb_file(
         uploaded_by_type=uploader_type,
         uploaded_by_id=uploader_id,
         uploaded_by_name=uploader_name,
+        transcript_status=("queued" if (is_media and media_enabled) else ("not_enabled" if is_media else None)),
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -1734,6 +1774,9 @@ async def reindex_portal_kb(
         q = None
     for f in files:
         f.status = "queued"
+        if _is_media_file(f.filename, f.mime_type):
+            f.transcript_status = "queued" if is_media_transcription_enabled(db, portal_id) else "not_enabled"
+            f.transcript_error = None
         job = KBJob(
             portal_id=f.portal_id,
             job_type="ingest",
@@ -1773,6 +1816,9 @@ async def reindex_kb_file(
         return _err(request, "not_found", "not_found", 404)
     rec.status = "queued"
     rec.error_message = None
+    if _is_media_file(rec.filename, rec.mime_type):
+        rec.transcript_status = "queued" if is_media_transcription_enabled(db, portal_id) else "not_enabled"
+        rec.transcript_error = None
     db.add(rec)
     job = KBJob(
         portal_id=rec.portal_id,
@@ -2010,6 +2056,156 @@ async def get_kb_file_chunks(
             }
         )
     return JSONResponse({"items": items})
+
+
+@router.get("/portals/{portal_id}/kb/files/{file_id}/transcript/status")
+async def get_kb_file_transcript_status(
+    portal_id: int,
+    file_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    rec = db.execute(
+        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
+    ).scalar_one_or_none()
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    is_media = _is_media_file(rec.filename, rec.mime_type)
+    enabled = is_media_transcription_enabled(db, portal_id)
+    status = (rec.transcript_status or "").strip().lower()
+    if not status:
+        if not is_media:
+            status = "n/a"
+        elif not enabled:
+            status = "not_enabled"
+        elif rec.status in ("queued", "processing"):
+            status = "processing"
+        elif rec.status == "ready":
+            status = "ready"
+        elif rec.status == "error":
+            status = "error"
+        else:
+            status = "queued"
+    return JSONResponse(
+        {
+            "allowed": bool(enabled),
+            "is_media": bool(is_media),
+            "status": status,
+            "error": rec.transcript_error or rec.error_message,
+        }
+    )
+
+
+@router.post("/portals/{portal_id}/kb/files/{file_id}/transcript/start")
+async def start_kb_file_transcript(
+    portal_id: int,
+    file_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    _require_portal_admin(db, portal_id, request)
+    rec = db.execute(
+        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
+    ).scalar_one_or_none()
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    if not _is_media_file(rec.filename, rec.mime_type):
+        return _err(request, "not_media_file", "not_media_file", 400)
+    if not is_media_transcription_enabled(db, portal_id):
+        return _err(request, "feature_not_enabled", "feature_not_enabled", 403)
+    rec.status = "queued"
+    rec.error_message = None
+    rec.transcript_status = "queued"
+    rec.transcript_error = None
+    db.add(rec)
+    job = KBJob(
+        portal_id=rec.portal_id,
+        job_type="ingest",
+        status="queued",
+        payload_json={"file_id": rec.id},
+    )
+    db.add(job)
+    db.commit()
+    try:
+        from redis import Redis
+        from rq import Queue
+
+        s = get_settings()
+        r = Redis(host=s.redis_host, port=s.redis_port)
+        q = Queue(s.rq_ingest_queue_name or "ingest", connection=r)
+        q.enqueue(
+            "apps.worker.jobs.process_kb_job",
+            job.id,
+            job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
+        )
+    except Exception:
+        pass
+    return JSONResponse({"status": "ok", "job_id": job.id})
+
+
+@router.get("/portals/{portal_id}/kb/files/{file_id}/transcript")
+async def get_kb_file_transcript(
+    portal_id: int,
+    file_id: int,
+    request: Request,
+    limit: int = 2000,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    rec = db.execute(
+        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
+    ).scalar_one_or_none()
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    if not _is_media_file(rec.filename, rec.mime_type):
+        return _err(request, "not_media_file", "not_media_file", 400)
+    if not is_media_transcription_enabled(db, portal_id):
+        return _err(request, "feature_not_enabled", "feature_not_enabled", 403)
+    lim = max(1, min(int(limit or 2000), 5000))
+    # Preferred source for transcript panel: raw transcript segments from ingest file.
+    # This avoids showing RAG chunks as if they were transcript turns.
+    transcript_jsonl_path = (rec.storage_path or "") + ".transcript.jsonl"
+    items = []
+    if transcript_jsonl_path and os.path.exists(transcript_jsonl_path):
+        try:
+            with open(transcript_jsonl_path, "r", encoding="utf-8", errors="ignore") as f:
+                for idx, line in enumerate(f):
+                    if idx >= lim:
+                        break
+                    line = (line or "").strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    text = str(row.get("text") or "").strip()
+                    if not text:
+                        continue
+                    items.append(
+                        {
+                            "id": -1 - idx,  # synthetic id for transcript rows
+                            "chunk_index": idx,
+                            "speaker": (str(row.get("speaker") or "").strip() or "Спикер A"),
+                            "text": text,
+                            "start_ms": int(row.get("start_ms") or 0),
+                            "end_ms": int(row.get("end_ms") or 0),
+                        }
+                    )
+        except Exception:
+            items = []
+    status = (rec.transcript_status or "").strip().lower() or "ready"
+    if not items and status == "ready":
+        status = "missing"
+    return JSONResponse({"items": items, "status": status})
 
 
 @router.get("/portals/{portal_id}/kb/collections")
@@ -2378,7 +2574,11 @@ async def get_portal_kb_settings_api(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    return JSONResponse(get_portal_kb_settings(db, portal_id))
+    out = get_portal_kb_settings(db, portal_id)
+    available, reason = _diarization_runtime_status()
+    out["speaker_diarization_available"] = available
+    out["speaker_diarization_reason"] = reason
+    return JSONResponse(out)
 
 
 class PortalKBSettingsBody(BaseModel):
@@ -2403,6 +2603,8 @@ class PortalKBSettingsBody(BaseModel):
     system_prompt_extra: str | None = None
     show_sources: bool | None = None
     sources_format: str | None = None
+    media_transcription_enabled: bool | None = None
+    speaker_diarization_enabled: bool | None = None
     collections_multi_assign: bool | None = None
     smart_folder_threshold: int | None = None
 
@@ -2448,6 +2650,8 @@ async def set_portal_kb_settings_api(
         system_prompt_extra=body.system_prompt_extra,
         show_sources=body.show_sources,
         sources_format=body.sources_format,
+        media_transcription_enabled=body.media_transcription_enabled,
+        speaker_diarization_enabled=body.speaker_diarization_enabled,
         collections_multi_assign=body.collections_multi_assign,
         smart_folder_threshold=body.smart_folder_threshold,
     )

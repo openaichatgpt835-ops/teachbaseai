@@ -21,6 +21,7 @@ from apps.backend.models.portal_telegram_setting import PortalTelegramSetting
 from apps.backend.models.portal_bot_flow import PortalBotFlow
 from apps.backend.models.kb import KBSource, KBFile, KBChunk, KBJob
 from apps.backend.models.web_user import WebUser, WebSession
+from apps.backend.models.account import AppUserWebCredential
 from apps.backend.services.activity import log_activity
 from apps.backend.services.portal_tokens import get_valid_access_token, BitrixAuthError
 from apps.backend.clients.bitrix import user_get
@@ -38,7 +39,10 @@ from apps.backend.services.web_email import (
     send_registration_email,
     send_registration_confirmed_email,
     get_valid_confirm_token,
+    get_valid_email_token,
+    send_password_reset_email,
 )
+from apps.backend.services.rbac_service import ensure_rbac_for_web_user
 
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
@@ -134,6 +138,7 @@ def register(body: RegisterBody, db: Session = Depends(get_db)):
     db.refresh(user)
     portal.admin_user_id = user.id
     db.add(portal)
+    ensure_rbac_for_web_user(db, user, force_owner=True, account_name=(body.company or "").strip() or None)
     db.commit()
     token = create_email_token(db, user.id)
     ok, err = send_registration_email(db, user, token)
@@ -152,6 +157,8 @@ def login(body: LoginBody, db: Session = Depends(get_db)):
         raise HTTPException(status_code=403, detail="email_not_verified")
     if not user.portal_id:
         raise HTTPException(status_code=400, detail="missing_portal")
+    ensure_rbac_for_web_user(db, user)
+    db.commit()
     session_token = _create_session(db, user)
     portal_token = create_portal_token_with_user(user.portal_id, user.id, expires_minutes=60)
     log_activity(db, kind="web", portal_id=user.portal_id, web_user_id=user.id)
@@ -165,6 +172,15 @@ def login(body: LoginBody, db: Session = Depends(get_db)):
 
 class ConfirmEmailBody(BaseModel):
     email: EmailStr
+
+
+class ForgotPasswordBody(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordBody(BaseModel):
+    token: str
+    password: str
 
 
 @router.get("/auth/confirm")
@@ -186,6 +202,56 @@ def confirm_email(token: str, db: Session = Depends(get_db)):
     db.commit()
     send_registration_confirmed_email(db, user)
     return {"status": "ok", "email": user.email}
+
+
+@router.post("/auth/password/forgot")
+def forgot_password(body: ForgotPasswordBody, db: Session = Depends(get_db)):
+    email = body.email.lower().strip()
+    user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
+    if not user:
+        return {"status": "ok"}
+    token = create_email_token(
+        db,
+        user.id,
+        kind="reset_password",
+        expires_in=timedelta(hours=2),
+    )
+    ok, err = send_password_reset_email(db, user, token)
+    if not ok:
+        raise HTTPException(status_code=500, detail=err or "email_send_failed")
+    return {"status": "ok"}
+
+
+@router.post("/auth/password/reset")
+def reset_password(body: ResetPasswordBody, db: Session = Depends(get_db)):
+    token = (body.token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="missing_token")
+    if len(body.password) < 6:
+        raise HTTPException(status_code=400, detail="password_too_short")
+    rec = get_valid_email_token(db, token, kind="reset_password")
+    if not rec:
+        raise HTTPException(status_code=400, detail="invalid_or_expired_token")
+    user = db.get(WebUser, rec.user_id)
+    if not user:
+        raise HTTPException(status_code=400, detail="user_not_found")
+    new_hash = get_password_hash(body.password)
+    user.password_hash = new_hash
+    user.updated_at = datetime.utcnow()
+    rec.used_at = datetime.utcnow()
+    db.execute(delete(WebSession).where(WebSession.user_id == user.id))
+    db.add(user)
+    db.add(rec)
+    cred = db.execute(
+        select(AppUserWebCredential).where(AppUserWebCredential.email == user.email)
+    ).scalar_one_or_none()
+    if cred:
+        cred.password_hash = new_hash
+        cred.must_change_password = False
+        cred.updated_at = datetime.utcnow()
+        db.add(cred)
+    db.commit()
+    return {"status": "ok"}
 
 
 @router.post("/auth/resend-confirm")
@@ -210,6 +276,8 @@ def me(
 ):
     if not user.portal_id:
         raise HTTPException(status_code=400, detail="missing_portal")
+    ensure_rbac_for_web_user(db, user)
+    db.commit()
     portal_token = create_portal_token_with_user(user.portal_id, user.id, expires_minutes=60)
     log_activity(db, kind="web", portal_id=user.portal_id, web_user_id=user.id)
     return TokenResponse(

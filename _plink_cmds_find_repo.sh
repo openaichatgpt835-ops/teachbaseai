@@ -1,0 +1,1 @@
+find / -maxdepth 3 -type d -name teachbaseai 2>/dev/null

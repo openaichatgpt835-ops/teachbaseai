@@ -27,6 +27,17 @@ from apps.backend.models.topic_summary import PortalTopicSummary
 from apps.backend.models.web_user import WebUser, WebSession
 from apps.backend.models.activity_event import ActivityEvent
 from apps.backend.models.portal_link_request import PortalLinkRequest
+from apps.backend.models.account import (
+    Account,
+    AppUser,
+    AppUserWebCredential,
+    AccountMembership,
+    AccountPermission,
+    AccountIntegration,
+    AppUserIdentity,
+    AccountInvite,
+    AccountAuditLog,
+)
 
 __all__ = [
     "Portal",
@@ -63,4 +74,13 @@ __all__ = [
     "WebSession",
     "ActivityEvent",
     "PortalLinkRequest",
+    "Account",
+    "AppUser",
+    "AppUserWebCredential",
+    "AccountMembership",
+    "AccountPermission",
+    "AccountIntegration",
+    "AppUserIdentity",
+    "AccountInvite",
+    "AccountAuditLog",
 ]

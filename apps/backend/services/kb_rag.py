@@ -330,6 +330,7 @@ def _extract_person_entity_answer(query: str, chunks: list[dict[str, Any]], limi
         return None
     name_tokens = [t.lower() for t in base_tokens[:4]]
     surname = name_tokens[-1]
+    first_name = name_tokens[0]
     full = " ".join(name_tokens)
     scored: list[tuple[int, str]] = []
     seen: set[str] = set()
@@ -339,10 +340,13 @@ def _extract_person_entity_answer(query: str, chunks: list[dict[str, Any]], limi
             continue
         for s in _split_sentences(txt):
             low = s.lower()
-            hits = sum(1 for t in name_tokens if t in low)
-            if hits < 2 and surname not in low:
+            # For person queries we require surname evidence; same first name is not enough.
+            if surname not in low and full not in low:
                 continue
+            hits = sum(1 for t in name_tokens if t in low)
             score = (hits * 4) + (5 if full in low else 0) + (3 if surname in low else 0)
+            if first_name in low and surname in low:
+                score += 4
             if len(s) < 24:
                 score -= 3
             key = re.sub(r"\s+", " ", low).strip()
@@ -815,6 +819,37 @@ def _style_rewrite_answer(
     return rewritten
 
 
+def _normalize_answer_readability(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return raw
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    # Keep explicit list formatting as is.
+    if any(re.match(r"^\s*(\d+[\)\.]|[-*•])\s+", ln) for ln in lines):
+        return "\n".join(lines)
+    joined = re.sub(r"\s+", " ", " ".join(lines)).strip()
+    if len(joined) <= 240:
+        return joined
+    # Split long prose into readable paragraphs (1-2 sentences each).
+    sentences = [s.strip() for s in re.split(r"(?<=[\.\!\?])\s+", joined) if s.strip()]
+    if len(sentences) <= 1:
+        return joined
+    out: list[str] = []
+    i = 0
+    while i < len(sentences):
+        first = sentences[i]
+        second = sentences[i + 1] if (i + 1) < len(sentences) else ""
+        if second and (len(first) + len(second) <= 260):
+            out.append(f"{first} {second}".strip())
+            i += 2
+        else:
+            out.append(first)
+            i += 1
+    return "\n\n".join(out)
+
+
 def _looks_like_generic_non_answer(query: str, answer: str, chunks: list[dict[str, Any]]) -> bool:
     qk = _extract_keywords(query)
     if not qk:
@@ -1023,6 +1058,9 @@ def _rerank_candidates(query: str, candidates: list[dict[str, Any]], *, top_k: i
     if not candidates:
         return []
     qk = _extract_keywords(query)
+    query_low = (query or "").lower()
+    # Strong focus terms (names/titles) should dominate reranking over generic semantic proximity.
+    focus_terms = [t for t in _expand_query_keywords(qk) if len(t) >= 5][:10]
     person_phrase = _person_query_phrase(query)
     person_tokens = [t.lower() for t in re.findall(r"[a-zа-яё]{2,}", person_phrase or "", flags=re.IGNORECASE)]
     person_tokens = person_tokens[:4]
@@ -1037,27 +1075,18 @@ def _rerank_candidates(query: str, candidates: list[dict[str, Any]], *, top_k: i
                 continue
             seen_chunk.add(cid)
         sem = float(c.get("_score") or 0.0)
-        body_hits = _keyword_hits(str(c.get("text") or ""), qk)
-        meta_hits = _keyword_hits(
-            " ".join(
-                [
-                    str(c.get("filename") or ""),
-                    str(c.get("source_title") or ""),
-                    str(c.get("source_url") or ""),
-                    str(c.get("file_summary") or ""),
-                ]
-            ),
-            qk,
-        )
+        text_scope = str(c.get("text") or "")
+        file_name = str(c.get("filename") or "")
+        source_title = str(c.get("source_title") or "")
+        source_url = str(c.get("source_url") or "")
+        file_summary = str(c.get("file_summary") or "")
+        meta_scope = " ".join([file_name, source_title, source_url, file_summary])
+        body_hits = _keyword_hits(text_scope, qk)
+        meta_hits = _keyword_hits(meta_scope, qk)
+        file_hits = _keyword_hits(file_name, qk)
         txt_low = str(c.get("text") or "").lower()
-        meta_low = " ".join(
-            [
-                str(c.get("filename") or ""),
-                str(c.get("source_title") or ""),
-                str(c.get("source_url") or ""),
-                str(c.get("file_summary") or ""),
-            ]
-        ).lower()
+        meta_low = meta_scope.lower()
+        file_low = file_name.lower()
         entity_bonus = 0.0
         entity_penalty = 0.0
         if person_tokens:
@@ -1068,6 +1097,12 @@ def _rerank_candidates(query: str, candidates: list[dict[str, Any]], *, top_k: i
                 entity_bonus += 0.16
             else:
                 entity_penalty -= 0.22
+        focus_hits_file = sum(1 for t in focus_terms if t in file_low)
+        focus_hits_text = sum(1 for t in focus_terms if t in txt_low)
+        focus_bonus = (focus_hits_file * 0.22) + (focus_hits_text * 0.08)
+        if len(query_low) >= 6 and query_low in file_low:
+            focus_bonus += 0.28
+        no_evidence_penalty = -0.14 if (body_hits + meta_hits) <= 0 else 0.0
         noise_penalty = -0.18 if _is_noise_chunk_text(txt_low) else 0.0
         # prefer unique files in top positions
         file_diversity_bonus = 0.0
@@ -1081,12 +1116,15 @@ def _rerank_candidates(query: str, candidates: list[dict[str, Any]], *, top_k: i
         if idx == 0:
             file_diversity_bonus += 0.02
         final = (
-            sem
-            + (body_hits * 0.06)
-            + (meta_hits * 0.09)
+            (sem * 0.72)
+            + (body_hits * 0.16)
+            + (meta_hits * 0.22)
+            + (file_hits * 0.30)
+            + focus_bonus
             + file_diversity_bonus
             + entity_bonus
             + entity_penalty
+            + no_evidence_penalty
             + noise_penalty
         )
         ranked.append((final, c))
@@ -1123,6 +1161,26 @@ def _dedup_source_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         seen.add(key)
         out.append(s)
+    return out
+
+
+def _dedup_used_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for c in chunks:
+        key = "|".join(
+            [
+                str(c.get("chunk_id") or ""),
+                str(c.get("file_id") or ""),
+                str(c.get("chunk_index") or ""),
+                str(c.get("start_ms") or ""),
+                str(c.get("page_num") or ""),
+            ]
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.append(c)
     return out
 
 
@@ -1177,7 +1235,8 @@ def _build_line_refs(answer: str, source_items: list[dict[str, Any]], query: str
         t = (ln or "").strip()
         if not t:
             continue
-        if has_list and not re.match(r"^\s*(\d+[\)\.]|[-*•])\s+", t):
+        if has_list and (not re.match(r"^\s*(\d+[\)\.]|[-*•])\s+", t)) and len(t) < 40:
+            # In mixed answers (list + paragraphs) keep only meaningful paragraphs.
             continue
         line_k = _expand_query_keywords(_extract_keywords(t))
         if not line_k:
@@ -1202,8 +1261,38 @@ def _build_line_refs(answer: str, source_items: list[dict[str, Any]], query: str
         if not scored:
             continue
         scored.sort(key=lambda x: (-x[0], x[1]))
-        refs[str(i)] = [si for _sc, si in scored[:3]]
+        best = scored[0][0]
+        cutoff = max(2.2, best * 0.5)
+        refs[str(i)] = [si for sc, si in scored if sc >= cutoff]
     return refs
+
+
+def _prune_sources_by_line_refs(source_items: list[dict[str, Any]], line_refs: dict[str, list[int]], *, max_items: int = 12) -> list[dict[str, Any]]:
+    if not source_items:
+        return []
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for refs in line_refs.values():
+        for idx in refs:
+            if not isinstance(idx, int):
+                continue
+            if idx < 0 or idx >= len(source_items):
+                continue
+            if idx in seen:
+                continue
+            seen.add(idx)
+            ordered.append(idx)
+    if not ordered:
+        return source_items[:max_items]
+    out = [source_items[i] for i in ordered]
+    if len(out) < max_items:
+        for i, item in enumerate(source_items):
+            if i in seen:
+                continue
+            out.append(item)
+            if len(out) >= max_items:
+                break
+    return out[:max_items]
 
 
 def _is_follow_up(text: str) -> bool:
@@ -1822,6 +1911,7 @@ def answer_from_kb(
     person_answer = _extract_person_entity_answer(query, used_chunks)
     if person_answer:
         out = person_answer
+    out = _normalize_answer_readability(out)
     answer_keywords = _extract_keywords(out)[:40]
     validated_chunks: list[tuple[int, dict[str, Any]]] = []
     for c in used_chunks:
@@ -1845,15 +1935,7 @@ def answer_from_kb(
     if validated_chunks:
         validated_chunks.sort(key=lambda x: x[0], reverse=True)
         used_chunks = [c for _s, c in validated_chunks]
-    if show_sources and sources_format not in ("none", "off", "false"):
-        if sources_format == "short":
-            short_list = _format_citations_short(used_chunks)
-            if short_list:
-                out = out + "\n\nИсточники: " + short_list
-        else:
-            citations = _format_citations(used_chunks)
-            if citations:
-                out = out + "\n\nИсточники:\n" + citations
+    used_chunks = _dedup_used_chunks(used_chunks)
     source_items = [
         {
             "file_id": int(c.get("file_id")) if c.get("file_id") is not None else None,
@@ -1885,6 +1967,16 @@ def answer_from_kb(
     source_items = _dedup_source_items(source_items)
     source_items = _attach_support_chunks(source_items, used_chunks)
     line_refs = _build_line_refs(out, source_items, query=query)
+    source_items = _prune_sources_by_line_refs(source_items, line_refs, max_items=max(8, retrieval_top_k * 2))
+    if show_sources and sources_format not in ("none", "off", "false"):
+        if sources_format == "short":
+            short_list = _format_citations_short(source_items)
+            if short_list:
+                out = out + "\n\nИсточники: " + short_list
+        else:
+            citations = _format_citations(source_items)
+            if citations:
+                out = out + "\n\nИсточники:\n" + citations
     if usage is None:
         usage = {}
     if isinstance(usage, dict):

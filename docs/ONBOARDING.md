@@ -1,79 +1,63 @@
-# Onboarding — Teachbase AI
+﻿# Onboarding (Dev + Prod)
 
-## Dev
+## 1. Локальная разработка
 
 ### Требования
+- Docker + Docker Compose
+- Node.js 20+
+- Python 3.12
 
-- Docker и Docker Compose
-- Node.js 20+ (для frontend dev)
-- Python 3.12 (для локального backend)
-
-### Запуск dev
-
+### Старт
 ```bash
-# Создать .env из .env.example
 cp .env.example .env
-
-# Поднять все сервисы
 docker compose -f docker-compose.dev.yml up -d
-
-# Миграции выполняются автоматически при старте backend
-# Гейт: http://localhost:3000
-# - /health — 200 OK
-# - /admin — SPA
-# - /admin/portals — порталы (после логина)
 ```
 
-### Логи в админке
+### Проверка
+- `http://localhost:3000/health`
+- `http://localhost:3000/admin`
 
-- GET /v1/admin/logs/backend?tail=200
-- GET /v1/admin/logs/worker?tail=200
+## 2. Ключевые сервисы
+- `backend` — API
+- `frontend` — web/admin SPA
+- `worker-ingest` — ingest/индексация/media
+- `worker-outbox` — отправка сообщений/уведомлений
+- `postgres`, `redis`, `nginx`
 
-Требуется Bearer-токен после логина.
+## 3. Прод деплой
+```powershell
+powershell -Command ./scripts/deploy_teachbase.ps1
+```
 
-### Inbound events (POST /v1/bitrix/events)
+### Режимы
+- Default (быстрый): rebuild `backend/frontend/migrator/worker-outbox`, без `worker-ingest`.
+- `-FullBuild`: rebuild всего, включая `worker-ingest`.
 
-- Один запрос — один `trace_id`: в ответе POST и в записи `bitrix_inbound_events` один и тот же `trace_id` (искать в админке «Inbound events» по этому ID).
-- GET/HEAD `/v1/bitrix/events` возвращают 200 JSON: `{"status":"ok","method":"GET","note":"events endpoint accepts POST"}` (Bitrix-проверки URL не получают 405).
-- Настройки хранения: админка → «Inbound events» → «Настройки хранения» (TTL, retain_count, truncate, prune/clear).
+```powershell
+powershell -Command ./scripts/deploy_teachbase.ps1 -FullBuild
+```
 
-### Добавить портал
+Использовать `-FullBuild`, если меняли:
+- `requirements.ingest.txt`
+- `infra/docker/Dockerfile.worker.ingest`
+- логику diarization/ingest-зависимостей
 
-1. Войти в админку (admin@localhost / changeme)
-2. Порталы → создать вручную или через симулятор
-3. Симулятор: POST /v1/debug/simulate/bitrix/incoming (с Bearer) с телом:
-   ```json
-   {"portal_id": 1, "body": "ping"}
-   ```
+## 4. Диаризация
 
-## Prod
+### Env
+- `ENABLE_SPEAKER_DIARIZATION=1`
+- `PYANNOTE_TOKEN=hf_...`
 
-### Env (только глобальные секреты)
+### Где проверять
+- Админка: `Система -> Диаризация (runtime)`
+- API: `GET /api/v1/admin/system/diarization` (через nginx)
 
-В .env хранятся только глобальные ключи сервиса:
-
-- POSTGRES_* — БД
-- REDIS_HOST — Redis
-- SECRET_KEY, JWT_SECRET — секреты приложения
-- TOKEN_ENCRYPTION_KEY — шифрование токенов порталов в БД
-- PUBLIC_BASE_URL — HTTPS URL (necrogame.ru)
-- BITRIX_APP_CLIENT_ID / BITRIX_APP_CLIENT_SECRET — если нужен OAuth flow
-
-Токены порталов (access_token, refresh_token) хранятся только в БД, шифрованно. Per-portal секреты в env запрещены.
-
-### Запуск prod
-
+## 5. Тесты (минимум)
 ```bash
-docker compose -f docker-compose.prod.yml up -d
+python -m pytest -q tests/test_kb_diarization_assign.py
 ```
 
-Админка только через SSH-туннель (localhost:3000).
-
-### Bitrix OAuth (локальные приложения)
-
-- У каждого портала свой `client_id` / `client_secret`.
-- Эти данные **не хранятся в env**, только в БД (шифрованно).
-- В админке: Портал → секция **Bitrix OAuth (локальное приложение)**:
-  - сохранить `client_id/client_secret`,
-  - проверить refresh (Test refresh),
-  - увидеть статус токена (expired/valid) и expected handler URL.
+## 6. Частые проблемы
+- В админке "Диаризация недоступна": проверить env и токен в `worker-ingest`.
+- Долгий деплой: используйте быстрый режим (без `-FullBuild`).
+- Ошибка мигратора по revision length: ID alembic revision должен быть <= 32 символов.

@@ -285,10 +285,6 @@ function uniqueSources(sources: ChatSource[] | undefined): ChatSource[] {
   return out;
 }
 
-function _escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function _normalizeNeedle(raw: string | undefined): string {
   const t = String(raw || "").replace(/\s+/g, " ").trim();
   if (!t) return "";
@@ -298,22 +294,25 @@ function _normalizeNeedle(raw: string | undefined): string {
 function renderHighlightedText(text: string, rawNeedle: string | undefined) {
   const needle = _normalizeNeedle(rawNeedle);
   if (!needle || needle.length < 12) return text;
-  const re = new RegExp(_escapeRegex(needle), "ig");
-  const out: any[] = [];
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const i = m.index;
-    if (i > last) out.push(text.slice(last, i));
-    out.push(
-      <mark key={`${i}-${m[0].length}`} className="rounded bg-yellow-200/80 px-0.5">
-        {text.slice(i, i + m[0].length)}
-      </mark>
-    );
-    last = i + m[0].length;
+  const lcText = String(text || "").toLowerCase();
+  const lcNeedle = needle.toLowerCase();
+  let start = lcText.indexOf(lcNeedle);
+  if (start < 0) {
+    const toks = Array.from(new Set(_tokens(needle))).slice(0, 24);
+    for (const t of toks) {
+      const p = lcText.indexOf(t.toLowerCase());
+      if (p >= 0 && (start < 0 || p < start)) start = p;
+    }
   }
-  if (last < text.length) out.push(text.slice(last));
-  return out.length ? out : text;
+  if (start < 0) return text;
+  const head = text.slice(0, start);
+  const tail = text.slice(start);
+  return (
+    <>
+      {head}
+      <mark className="rounded bg-yellow-200/80 px-0.5">{tail}</mark>
+    </>
+  );
 }
 
 function _norm(s: string): string {
@@ -529,13 +528,12 @@ function PdfHighlightViewer({
               }
             }
             if (best) {
-              ranges.push([best.l, best.r]);
+              ranges.push([best.l, Math.max(best.l, items.length - 1)]);
               setFirstHitPage((prev) => prev ?? pno);
             } else {
               const firstIdx = normItems.findIndex((s) => uniqTokens.some((t) => s.includes(t)));
               if (firstIdx >= 0) {
-                const endIdx = Math.min(normItems.length - 1, firstIdx + Math.max(8, Math.min(36, uniqTokens.length * 4)));
-                ranges.push([firstIdx, endIdx]);
+                ranges.push([firstIdx, Math.max(firstIdx, normItems.length - 1)]);
                 setFirstHitPage((prev) => prev ?? pno);
               }
             }
@@ -681,6 +679,9 @@ export function WebChatPage() {
   const [previewNeedle, setPreviewNeedle] = useState<string>("");
   const [, setPreviewSupportNeedles] = useState<string[]>([]);
   const [resolvedPreviewPage, setResolvedPreviewPage] = useState<number | null>(null);
+  const [transcriptAllowed, setTranscriptAllowed] = useState<boolean | null>(null);
+  const [transcriptStatus, setTranscriptStatus] = useState<string>("");
+  const [transcriptError, setTranscriptError] = useState<string>("");
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
@@ -809,6 +810,9 @@ export function WebChatPage() {
     setPreviewNeedle("");
     setPreviewSupportNeedles([]);
     setResolvedPreviewPage(null);
+    setTranscriptAllowed(null);
+    setTranscriptStatus("");
+    setTranscriptError("");
     chunkRefs.current.clear();
   };
 
@@ -830,8 +834,17 @@ export function WebChatPage() {
     setPreviewNeedle(needleFromAnswer);
     setPreviewSupportNeedles([]);
     setResolvedPreviewPage(null);
+    setTranscriptAllowed(null);
+    setTranscriptStatus("");
+    setTranscriptError("");
 
     if (!portalId || !src.file_id) return;
+    const ext = fileExt(src.filename);
+    const mime = (src.mime_type || "").toLowerCase();
+    const isMedia =
+      [".mp4", ".mov", ".avi", ".mkv", ".webm", ".mp3", ".ogg", ".wav", ".m4a", ".aac"].includes(ext) ||
+      mime.startsWith("video/") ||
+      mime.startsWith("audio/");
 
     const sourceKind = (src.source_type || "").toLowerCase();
     const externalPreferred = ["youtube", "rutube", "vk"].includes(sourceKind) && !!(src.source_url || "").trim();
@@ -856,10 +869,33 @@ export function WebChatPage() {
 
     setChunksLoading(true);
     try {
-      const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/chunks?limit=2000`);
+      if (isMedia) {
+        const st = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/transcript/status`);
+        const stData = await st.json().catch(() => null);
+        if (st.ok && stData) {
+          setTranscriptAllowed(!!stData.allowed);
+          setTranscriptStatus(String(stData.status || ""));
+          setTranscriptError(String(stData.error || ""));
+        } else {
+          setTranscriptAllowed(false);
+          setTranscriptStatus("error");
+          setTranscriptError("Не удалось получить статус транскрибации.");
+        }
+        if (!st.ok || !stData?.allowed || String(stData?.status || "") !== "ready") {
+          setPreviewChunks([]);
+          return;
+        }
+      }
+      const endpoint = isMedia
+        ? `/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/transcript?limit=2000`
+        : `/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/chunks?limit=2000`;
+      const res = await fetchPortal(endpoint);
       const data = await res.json().catch(() => null);
       if (res.ok && Array.isArray(data?.items)) {
-        const items = data.items as FileChunk[];
+        const items = (data.items as FileChunk[]).map((x: any, idx: number) => ({
+          ...x,
+          chunk_index: Number.isFinite(Number(x?.chunk_index)) ? Number(x.chunk_index) : idx,
+        }));
         setPreviewChunks(items);
         const srcForMatch: ChatSource = needleFromAnswer ? { ...src, text: needleFromAnswer } : src;
         const target = _selectAnchorChunk(srcForMatch, items, parsedChunkId, parsedChunk, anchorKind, anchorValue);
@@ -1077,8 +1113,38 @@ export function WebChatPage() {
             <div className="border-l border-slate-200 bg-white">
               <div className="border-b border-slate-200 px-4 py-2 text-sm font-semibold text-slate-800">Контекст / транскрибация</div>
               <div className="h-[calc(86vh-94px)] overflow-auto p-3">
-                {chunksLoading && <div className="text-sm text-slate-500">Загрузка контекста...</div>}
-                {!chunksLoading && previewChunks.length === 0 && <div className="text-sm text-slate-500">Контекст пока недоступен.</div>}
+                {(isVideo || isAudio) && (
+                  <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                    Статус транскрибации: {transcriptStatus || "unknown"}
+                    {transcriptAllowed === false ? " · опция выключена" : ""}
+                    {transcriptError ? ` · ${transcriptError}` : ""}
+                  </div>
+                )}
+                {chunksLoading && <div className="text-sm text-slate-500">{(isVideo || isAudio) ? "Загрузка транскрибации..." : "Загрузка контекста..."}</div>}
+                {!chunksLoading && (isVideo || isAudio) && transcriptAllowed === false && (
+                  <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                    <div>Транскрибация недоступна в текущем тарифе.</div>
+                    <div className="text-xs">Подключите опцию в разделе Настройки → База знаний.</div>
+                  </div>
+                )}
+                {!chunksLoading && (isVideo || isAudio) && transcriptAllowed !== false && transcriptStatus && transcriptStatus !== "ready" && (
+                  <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                    <div>Статус транскрибации: {transcriptStatus}</div>
+                    {transcriptError ? <div className="text-xs text-rose-600">{transcriptError}</div> : null}
+                    <button
+                      type="button"
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm"
+                      onClick={async () => {
+                        if (!portalId || !src.file_id) return;
+                        await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/transcript/start`, { method: "POST" }).catch(() => null);
+                        void openSourcePreview(src);
+                      }}
+                    >
+                      Создать транскрибацию
+                    </button>
+                  </div>
+                )}
+                {!chunksLoading && previewChunks.length === 0 && !((isVideo || isAudio) && transcriptAllowed === false) && <div className="text-sm text-slate-500">{(isVideo || isAudio) ? "Транскрибация пока недоступна." : "Контекст пока недоступен."}</div>}
                 <div className="space-y-2">
                   {previewChunks.map((ch) => (
                     <button
@@ -1095,13 +1161,13 @@ export function WebChatPage() {
                       onClick={() => onPickChunk(ch)}
                     >
                       <div className="mb-1 flex items-center gap-2 text-xs text-slate-500">
-                        <span>#{ch.chunk_index + 1}</span>
-                        {(selectedChunkIdx === ch.chunk_index && resolvedPreviewPage)
+                        {isVideo || isAudio ? <span>{(ch as any).speaker || "Спикер A"}</span> : <span>#{ch.chunk_index + 1}</span>}
+                        {!(isVideo || isAudio) && ((selectedChunkIdx === ch.chunk_index && resolvedPreviewPage)
                           ? <span>стр. {resolvedPreviewPage}</span>
-                          : (ch.page_num ? <span>стр. {ch.page_num}</span> : null)}
+                          : (ch.page_num ? <span>стр. {ch.page_num}</span> : null))}
                         {ch.start_ms != null ? <span>{fmtMs(ch.start_ms)}</span> : null}
                       </div>
-                      <div className="line-clamp-5 whitespace-pre-wrap text-slate-700">
+                      <div className={`whitespace-pre-wrap text-slate-700 ${(isVideo || isAudio) ? "" : "line-clamp-5"}`}>
                         {ch.text || ""}
                       </div>
                     </button>
@@ -1158,18 +1224,14 @@ export function WebChatPage() {
                     });
                     const sourceIndexMap = new Map<number, number>();
                     const orderedUsed = Array.from(usedSourceIdx).sort((a, b) => a - b);
-                    const renderedSources: ChatSource[] = [];
                     if (orderedUsed.length > 0) {
                       orderedUsed.forEach((origIdx, pos) => {
-                        const src = msgSources[origIdx];
                         const next = pos + 1;
                         sourceIndexMap.set(origIdx, next);
-                        renderedSources.push(src);
                       });
                     } else {
-                      msgSources.forEach((src, idx) => {
+                      msgSources.forEach((_src, idx) => {
                         sourceIndexMap.set(idx, idx + 1);
-                        renderedSources.push(src);
                       });
                     }
                     return (
@@ -1206,18 +1268,6 @@ export function WebChatPage() {
                             </div>
                           );
                         })}
-                      </div>
-                    )}
-                    {m.role === "assistant" && !!msgSources.length && (
-                      <div className="mt-3 border-t border-slate-200 pt-2 text-xs text-slate-600">
-                        <div className="mb-1 font-semibold text-slate-700">Источники</div>
-                        <div className="space-y-1">
-                          {renderedSources.map((s, sIdx) => (
-                            <button key={`${m.ts}-${sIdx}`} type="button" className="block text-left text-sky-700 underline" onClick={() => openSourcePreview(s)}>
-                              {(sIdx + 1).toString()}. {s.filename || "Файл"}
-                            </button>
-                          ))}
-                        </div>
                       </div>
                     )}
                   </div>
