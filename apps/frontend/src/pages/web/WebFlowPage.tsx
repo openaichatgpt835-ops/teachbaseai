@@ -1,5 +1,6 @@
 ﻿
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LockedSection, UpgradeInlineNotice } from "../../components/LockedSection";
 import { fetchPortal, getWebPortalInfo } from "./auth";
 import { Select } from "../../components/Select";
 import "../../flow.css";
@@ -14,6 +15,13 @@ type FlowDraft = {
 };
 
 type FlowChatMsg = { role: "user" | "bot"; text: string; trace?: string };
+type PortalBillingState = {
+  billing_policy?: { plan_name?: string; plan_code?: string; features?: Record<string, boolean> };
+  feature_gates?: {
+    client_bot?: { allowed?: boolean; reason?: string };
+    webhooks?: { allowed?: boolean; reason?: string };
+  };
+};
 
 const NODE_WIDTH = 170;
 const NODE_HEIGHT = 78;
@@ -107,6 +115,7 @@ function newNodeId() {
 }
 export function WebFlowPage() {
   const { portalId, portalToken } = getWebPortalInfo();
+  const [portalBilling, setPortalBilling] = useState<PortalBillingState>({});
   const [flowDraft, setFlowDraft] = useState<FlowDraft>({
     version: 1,
     settings: { mood: "нейтральный", custom_prompt: "", use_history: true },
@@ -147,6 +156,13 @@ export function WebFlowPage() {
   const selectedNode = useMemo(
     () => flowDraft.nodes.find((n) => n.id === selectedNodeId) || null,
     [flowDraft.nodes, selectedNodeId]
+  );
+  const clientBotAllowed = !!(portalBilling.feature_gates?.client_bot?.allowed ?? true);
+  const webhookAllowed = !!(portalBilling.feature_gates?.webhooks?.allowed ?? true);
+  const planName = portalBilling.billing_policy?.plan_name || "текущий тариф";
+  const hasWebhookNodes = useMemo(
+    () => flowDraft.nodes.some((n) => n.type === "webhook"),
+    [flowDraft.nodes]
   );
 
   const flowStageStyle = useMemo(
@@ -215,9 +231,19 @@ export function WebFlowPage() {
     }
   }, [headers, portalId, portalToken]);
 
+  const loadBillingPolicy = useCallback(async () => {
+    if (!portalId || !portalToken) return;
+    const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/billing/policy`);
+    const data = await res.json().catch(() => null);
+    if (res.ok && data) {
+      setPortalBilling(data);
+    }
+  }, [portalId, portalToken]);
+
   useEffect(() => {
     loadFlow();
-  }, [loadFlow]);
+    loadBillingPolicy();
+  }, [loadBillingPolicy, loadFlow]);
 
   useEffect(() => {
     const onKeydown = (evt: KeyboardEvent) => {
@@ -282,6 +308,10 @@ export function WebFlowPage() {
     };
   }, [connectingFrom, toFlowPoint]);
   const addFlowNode = (type: string) => {
+    if (type === "webhook" && !webhookAllowed) {
+      setFlowMessage("Webhook-ноды недоступны на текущем тарифе.");
+      return;
+    }
     setFlowDraft((prev) => {
       const idx = prev.nodes.length;
       const node: FlowNode = {
@@ -304,6 +334,10 @@ export function WebFlowPage() {
   };
 
   const addFlowNodeAfter = (node: FlowNode) => {
+    if (!clientBotAllowed) {
+      setFlowMessage("Конструктор клиентского бота недоступен на текущем тарифе.");
+      return;
+    }
     const next: FlowNode = {
       id: newNodeId(),
       type: "message",
@@ -407,6 +441,14 @@ export function WebFlowPage() {
 
   const saveFlowDraft = async () => {
     if (!portalId || !portalToken) return;
+    if (!clientBotAllowed) {
+      setFlowMessage("Конструктор клиентского бота недоступен на текущем тарифе.");
+      return;
+    }
+    if (hasWebhookNodes && !webhookAllowed) {
+      setFlowMessage("Webhook-ноды недоступны на текущем тарифе.");
+      return;
+    }
     setFlowSaving(true);
     setFlowMessage("");
     const payload = JSON.parse(JSON.stringify(flowDraft));
@@ -422,6 +464,14 @@ export function WebFlowPage() {
 
   const publishFlow = async () => {
     if (!portalId || !portalToken) return;
+    if (!clientBotAllowed) {
+      setFlowMessage("Конструктор клиентского бота недоступен на текущем тарифе.");
+      return;
+    }
+    if (hasWebhookNodes && !webhookAllowed) {
+      setFlowMessage("Webhook-ноды недоступны на текущем тарифе.");
+      return;
+    }
     setFlowPublishing(true);
     setFlowMessage("");
     const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/botflow/client/publish`, {
@@ -434,6 +484,14 @@ export function WebFlowPage() {
 
   const runFlowTest = async () => {
     if (!portalId || !portalToken || !flowTestInput.trim()) return;
+    if (!clientBotAllowed) {
+      setFlowChatLog((prev) => [...prev, { role: "bot", text: "Конструктор клиентского бота недоступен на текущем тарифе." }]);
+      return;
+    }
+    if (hasWebhookNodes && !webhookAllowed) {
+      setFlowChatLog((prev) => [...prev, { role: "bot", text: "Webhook-ноды недоступны на текущем тарифе." }]);
+      return;
+    }
     setFlowTesting(true);
     const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/botflow/client/test`, {
       method: "POST",
@@ -461,25 +519,35 @@ export function WebFlowPage() {
   };
   return (
     <div className="tb-flow">
+      {clientBotAllowed && hasWebhookNodes && !webhookAllowed && (
+        <UpgradeInlineNotice
+          title="Webhook-ноды"
+          text={`В текущем сценарии есть webhook-ноды, но вебхуки недоступны на тарифе "${planName}". Удалите эти ноды или расширьте тариф.`}
+          description="Webhook-шаги позволяют вызывать внешние системы из сценария. На текущем тарифе они заблокированы, поэтому сохранить или опубликовать такой сценарий нельзя."
+          planName={planName}
+        />
+      )}
+      {clientBotAllowed ? (
+        <>
       <div className="tb-flow-toolbar">
-        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm" onClick={() => addFlowNode("start")}>Start</button>
-        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm" onClick={() => addFlowNode("ask")}>Question</button>
-        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm" onClick={() => addFlowNode("branch")}>Intent</button>
-        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm" onClick={() => addFlowNode("kb_answer")}>RAG Search</button>
-        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm" onClick={() => addFlowNode("message")}>Answer</button>
-        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm" onClick={() => addFlowNode("webhook")}>Webhook</button>
-        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm" onClick={() => addFlowNode("bitrix_lead")}>Bitrix Lead</button>
-        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm" onClick={() => addFlowNode("bitrix_deal")}>Bitrix Deal</button>
-        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm" onClick={() => addFlowNode("handoff")}>CTA / Handoff</button>
+        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100" onClick={() => addFlowNode("start")} disabled={!clientBotAllowed}>Start</button>
+        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100" onClick={() => addFlowNode("ask")} disabled={!clientBotAllowed}>Question</button>
+        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100" onClick={() => addFlowNode("branch")} disabled={!clientBotAllowed}>Intent</button>
+        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100" onClick={() => addFlowNode("kb_answer")} disabled={!clientBotAllowed}>RAG Search</button>
+        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100" onClick={() => addFlowNode("message")} disabled={!clientBotAllowed}>Answer</button>
+        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100" onClick={() => addFlowNode("webhook")} disabled={!clientBotAllowed || !webhookAllowed}>Webhook</button>
+        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100" onClick={() => addFlowNode("bitrix_lead")} disabled={!clientBotAllowed}>Bitrix Lead</button>
+        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100" onClick={() => addFlowNode("bitrix_deal")} disabled={!clientBotAllowed}>Bitrix Deal</button>
+        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100" onClick={() => addFlowNode("handoff")} disabled={!clientBotAllowed}>CTA / Handoff</button>
         <div className="tb-flow-zoom">
           <button className="rounded-md border border-slate-200 bg-white px-2" onClick={() => setFlowScale((s) => Math.max(0.2, Math.round((s - 0.1) * 10) / 10))}>−</button>
           <span className="text-xs text-slate-500">{Math.round(flowScale * 100)}%</span>
           <button className="rounded-md border border-slate-200 bg-white px-2" onClick={() => setFlowScale((s) => Math.min(3, Math.round((s + 0.1) * 10) / 10))}>+</button>
         </div>
-        <button className="rounded-lg bg-sky-600 px-3 py-1 text-sm font-semibold text-white" onClick={saveFlowDraft} disabled={flowSaving}>
+        <button className="rounded-lg bg-sky-600 px-3 py-1 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300" onClick={saveFlowDraft} disabled={flowSaving || !clientBotAllowed || (hasWebhookNodes && !webhookAllowed)}>
           {flowSaving ? "Сохраняю..." : "Сохранить"}
         </button>
-        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm" onClick={publishFlow} disabled={flowPublishing}>
+        <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100" onClick={publishFlow} disabled={flowPublishing || !clientBotAllowed || (hasWebhookNodes && !webhookAllowed)}>
           {flowPublishing ? "Публикую..." : "Опубликовать"}
         </button>
         {flowMessage && <span className="text-xs text-slate-500">{flowMessage}</span>}
@@ -598,7 +666,7 @@ export function WebFlowPage() {
                   </div>
                   <div className="tb-flow-port-stub">
                     <div className="tb-flow-port-line"></div>
-                    <button className="tb-flow-plus" onClick={(e) => {
+                    <button className="tb-flow-plus" disabled={!clientBotAllowed} onClick={(e) => {
                       e.stopPropagation();
                       addFlowNodeAfter(node);
                     }}>+</button>
@@ -628,7 +696,7 @@ export function WebFlowPage() {
                 />
               </div>
               <div className="flex gap-2">
-                <button className="rounded-lg bg-sky-600 px-3 py-1 text-sm font-semibold text-white" onClick={runFlowTest} disabled={flowTesting}>
+                <button className="rounded-lg bg-sky-600 px-3 py-1 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300" onClick={runFlowTest} disabled={flowTesting || !clientBotAllowed || (hasWebhookNodes && !webhookAllowed)}>
                   {flowTesting ? "Тестирую..." : "Тестовый прогон"}
                 </button>
                 <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm" onClick={resetFlowTest}>
@@ -829,6 +897,41 @@ export function WebFlowPage() {
           </div>
         </div>
       </div>
+        </>
+      ) : (
+        <LockedSection
+          title="Конструктор клиентского бота"
+          summary="Здесь находится редактор сценария, тестовый прогон, публикация и webhook-ноды. На текущем тарифе раздел закрыт."
+          planName={planName}
+          className="mt-4"
+        >
+          <div>
+            <div className="tb-flow-toolbar">
+              <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm">Start</button>
+              <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm">Question</button>
+              <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm">RAG Search</button>
+              <button className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm">Webhook</button>
+              <button className="rounded-lg bg-sky-600 px-3 py-1 text-sm font-semibold text-white">Сохранить</button>
+            </div>
+            <div className="tb-flow-settings">
+              <div className="space-y-1">
+                <label className="text-xs text-slate-600">Настроение</label>
+                <input className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm" value="Дружелюбный" disabled onChange={() => null} />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-slate-600">Кастомный промпт</label>
+                <input className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm" value="Отвечай кратко и по делу" disabled onChange={() => null} />
+              </div>
+            </div>
+            <div className="tb-flow-layout">
+              <div className="tb-flow-canvas min-h-[320px]"></div>
+              <div className="tb-flow-panel">
+                <div className="text-sm text-slate-500">Параметры узла и связи доступны после апгрейда.</div>
+              </div>
+            </div>
+          </div>
+        </LockedSection>
+      )}
     </div>
   );
 }

@@ -182,7 +182,12 @@ def recover_stuck_kb_jobs_once(
             q = Queue(s.rq_ingest_queue_name or "ingest", connection=r)
             job_timeout = max(300, int(s.kb_job_timeout_seconds or 3600))
             for job_id in enqueue_ids:
-                q.enqueue("apps.worker.jobs.process_kb_job", job_id, job_timeout=job_timeout)
+                q.enqueue(
+                    "apps.worker.jobs.process_kb_job",
+                    job_id,
+                    job_id=f"kbjob:{job_id}",
+                    job_timeout=job_timeout,
+                )
         except Exception:
             logger.exception("kb_watchdog_enqueue_failed")
 

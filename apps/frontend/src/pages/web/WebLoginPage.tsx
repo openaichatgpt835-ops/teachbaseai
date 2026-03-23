@@ -37,7 +37,13 @@ export function WebLoginPage() {
       if (!existing) {
         setWebUser({ email, createdAt: new Date().toISOString() });
       }
-      setWebSession(data.session_token, data.portal_id, data.portal_token);
+      setWebSession(
+        data.session_token,
+        Number(data.portal_id),
+        String(data.portal_token),
+        Number(data?.active_account_id || 0) || null,
+        Array.isArray(data?.accounts) ? data.accounts : null,
+      );
       navigate("/app");
     } catch {
       setError("Сервис временно недоступен.");

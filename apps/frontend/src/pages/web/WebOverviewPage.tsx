@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useState } from "react";
-import { fetchPortal, getWebPortalInfo } from "./auth";
+import { fetchPortal, getActiveAccountId, getWebPortalInfo } from "./auth";
 
 type KbFile = { id: number; status: string; created_at?: string };
 type KbSource = { id: number };
@@ -28,9 +28,11 @@ const overviewCache = new Map<number, OverviewState>();
 
 export function WebOverviewPage() {
   const { portalId, portalToken } = getWebPortalInfo();
+  const activeAccountId = getActiveAccountId();
+  const cacheKey = activeAccountId || portalId;
   const [overview, setOverview] = useState<OverviewState>(() => {
-    if (!portalId) return OVERVIEW_DEFAULT;
-    return overviewCache.get(portalId) || OVERVIEW_DEFAULT;
+    if (!cacheKey) return OVERVIEW_DEFAULT;
+    return overviewCache.get(cacheKey) || OVERVIEW_DEFAULT;
   });
 
   const kbCounts = useMemo(() => {
@@ -50,7 +52,7 @@ export function WebOverviewPage() {
 
   useEffect(() => {
     if (!portalId || !portalToken) return;
-    const cached = overviewCache.get(portalId);
+    const cached = cacheKey ? overviewCache.get(cacheKey) : null;
     if (cached) setOverview(cached);
 
     const load = async () => {
@@ -96,7 +98,7 @@ export function WebOverviewPage() {
             topicSummaries: summaryRes.ok && summary?.items ? summary.items : prev.topicSummaries,
             lastUpdated: new Date().toLocaleString("ru-RU"),
           };
-          overviewCache.set(portalId, next);
+          if (cacheKey) overviewCache.set(cacheKey, next);
           return next;
         });
       } catch {
@@ -105,7 +107,7 @@ export function WebOverviewPage() {
     };
 
     load();
-  }, [portalId, portalToken]);
+  }, [portalId, portalToken, cacheKey]);
 
   return (
     <div className="space-y-6">

@@ -3,6 +3,8 @@ param(
     [string]$RemoteHost = "109.73.193.61",
     [string]$RemoteUser = "root",
     [string]$RemoteDir = "/opt/teachbaseai",
+    [string]$KeyFile = "",
+    [string]$HostKey = "",
     [int]$IngestWorkers = 8,
     [int]$OutboxWorkers = 2,
     [switch]$FullBuild
@@ -11,6 +13,15 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = if (Test-Path ".\apps\backend") { (Get-Location).Path } else { (Get-Item "..").FullName }
 Set-Location $RepoRoot
+
+function Normalize-HostKey([string]$h) {
+    if (-not $h) { return "" }
+    $v = $h.Trim()
+    if ($v -match "SHA256:[A-Za-z0-9+/=]+") {
+        return ($Matches[0])
+    }
+    return $v
+}
 
 $files = @(
     "apps", "alembic", "infra", "packages", "tests",
@@ -24,14 +35,65 @@ $ArchivePath = Join-Path $env:TEMP $ArchiveName
 if (Test-Path $ArchivePath) { Remove-Item $ArchivePath -Force }
 
 Write-Host "Creating archive..." -ForegroundColor Cyan
-& python "scripts/check_text_integrity.py"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$pythonOk = $false
+try {
+    $pythonCandidates = @()
+    if ($env:PYTHON_EXE) { $pythonCandidates += $env:PYTHON_EXE }
+    $pythonCandidates += @(
+        "python",
+        "py -3.12",
+        "py -3",
+        "C:\Users\user\AppData\Local\Programs\Python\Python312\python.exe"
+    )
+    foreach ($candidate in $pythonCandidates) {
+        try {
+            Write-Host "Running text integrity precheck via: $candidate" -ForegroundColor DarkGray
+            if ($candidate -match "\s") {
+                & powershell -Command "$candidate scripts/check_text_integrity.py"
+            } else {
+                & $candidate "scripts/check_text_integrity.py"
+            }
+            if ($LASTEXITCODE -eq 0) {
+                $pythonOk = $true
+                break
+            }
+            if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+            }
+        } catch {
+            continue
+        }
+    }
+} catch {
+    Write-Warning "python is unavailable; skipping check_text_integrity.py"
+}
+if (-not $pythonOk) {
+    Write-Warning "Text integrity precheck skipped (python unavailable in current shell)."
+}
 $tarArgs = @("-czf", $ArchivePath) + $files
 & tar $tarArgs
 
 Write-Host "Uploading to server..." -ForegroundColor Cyan
-plink -batch -load $Session "mkdir -p $RemoteDir"
-pscp -batch -load $Session $ArchivePath "${RemoteUser}@${RemoteHost}:${RemoteDir}/"
+$HostKey = Normalize-HostKey $HostKey
+if ($KeyFile) {
+    $plinkArgs = @("-batch")
+    $pscpArgs = @("-batch")
+    if ($HostKey) {
+        $plinkArgs += @("-hostkey", $HostKey)
+        $pscpArgs += @("-hostkey", $HostKey)
+    }
+    $plinkArgs += @("-i", $KeyFile, "${RemoteUser}@${RemoteHost}")
+    $pscpArgs += @("-i", $KeyFile)
+    & plink @plinkArgs "mkdir -p $RemoteDir"
+    if ($LASTEXITCODE -ne 0) { throw "plink mkdir failed with code $LASTEXITCODE" }
+    pscp @pscpArgs $ArchivePath "${RemoteUser}@${RemoteHost}:${RemoteDir}/"
+    if ($LASTEXITCODE -ne 0) { throw "pscp upload failed with code $LASTEXITCODE" }
+} else {
+    plink -batch -load $Session "mkdir -p $RemoteDir"
+    if ($LASTEXITCODE -ne 0) { throw "plink mkdir failed with code $LASTEXITCODE" }
+    pscp -batch -load $Session $ArchivePath "${RemoteUser}@${RemoteHost}:${RemoteDir}/"
+    if ($LASTEXITCODE -ne 0) { throw "pscp upload failed with code $LASTEXITCODE" }
+}
 
 $remoteScript = @"
 set -e
@@ -70,7 +132,16 @@ echo DEPLOY_OK
 
 $tmpScript = [System.IO.Path]::GetTempFileName() + ".sh"
 $remoteScript | Set-Content $tmpScript -Encoding ASCII
-plink -batch -load $Session -m $tmpScript
+if ($KeyFile) {
+    $plinkArgs = @("-batch")
+    if ($HostKey) { $plinkArgs += @("-hostkey", $HostKey) }
+    $plinkArgs += @("-i", $KeyFile, "${RemoteUser}@${RemoteHost}", "-m", $tmpScript)
+    & plink @plinkArgs
+    if ($LASTEXITCODE -ne 0) { throw "plink remote apply failed with code $LASTEXITCODE" }
+} else {
+    plink -batch -load $Session -m $tmpScript
+    if ($LASTEXITCODE -ne 0) { throw "plink remote apply failed with code $LASTEXITCODE" }
+}
 Remove-Item $tmpScript -Force -ErrorAction SilentlyContinue
 
 Write-Host "Deploy OK" -ForegroundColor Green

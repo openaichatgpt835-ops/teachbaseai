@@ -9,3 +9,5 @@ venv/
 
 # Local tooling artifacts
 .pytest_cache/
+
+.secrets/

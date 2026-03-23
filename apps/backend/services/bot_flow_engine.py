@@ -13,6 +13,7 @@ from sqlalchemy import select
 from apps.backend.models.portal_bot_flow import PortalBotFlow
 from apps.backend.models.dialog_state import DialogState
 from apps.backend.models.portal import Portal
+from apps.backend.services.billing import get_portal_effective_policy
 from apps.backend.services.kb_rag import answer_from_kb
 from apps.backend.services.bitrix_auth import rest_call_with_refresh
 
@@ -193,11 +194,15 @@ def _execute_flow(
     nodes = flow.get("nodes") or []
     edges = flow.get("edges") or []
     settings = flow.get("settings") or {}
+    features = dict((get_portal_effective_policy(db, portal_id) or {}).get("features") or {})
     vars_map = {}
     state = state_override if state_override is not None else ({"vars": {}, "pending": None} if preview else _get_state(db, dialog_id))
     vars_map.update(state.get("vars") or {})
     pending = state.get("pending")
     trace: list[dict[str, Any]] = []
+
+    if not bool(features.get("allow_client_bot", True)):
+        return "Функция клиентского бота недоступна на текущем тарифе.", state, trace
 
     def _trace(event: str, node: dict[str, Any] | None = None, extra: dict[str, Any] | None = None) -> None:
         if not collect_trace:
@@ -325,6 +330,11 @@ def _execute_flow(
             continue
 
         if ntype == "webhook":
+            if not bool(features.get("allow_webhooks", True)):
+                _trace("webhook_blocked", node)
+                current_id = _select_next(_out_edges(edges, current_id), user_text, vars_map)
+                _trace("edge", node, {"to": current_id})
+                continue
             url = (config.get("url") or "").strip()
             payload = config.get("payload") or {}
             if isinstance(payload, str):

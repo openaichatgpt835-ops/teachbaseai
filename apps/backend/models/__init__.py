@@ -5,7 +5,15 @@ from apps.backend.models.dialog_rag_cache import DialogRagCache
 from apps.backend.models.dialog_state import DialogState
 from apps.backend.models.event import Event
 from apps.backend.models.outbox import Outbox
-from apps.backend.models.billing import BillingPlan, PortalBilling, UsageCounter, PortalUsageLimit, BillingUsage
+from apps.backend.models.billing import (
+    BillingPlan,
+    PortalBilling,
+    UsageCounter,
+    PortalUsageLimit,
+    BillingUsage,
+    AccountSubscription,
+    AccountPlanOverride,
+)
 from apps.backend.models.admin import AdminUser
 from apps.backend.models.bitrix_log import BitrixHttpLog
 from apps.backend.models.bitrix_inbound_event import BitrixInboundEvent
@@ -31,6 +39,7 @@ from apps.backend.models.account import (
     Account,
     AppUser,
     AppUserWebCredential,
+    AppSession,
     AccountMembership,
     AccountPermission,
     AccountIntegration,
@@ -54,6 +63,8 @@ __all__ = [
     "UsageCounter",
     "PortalUsageLimit",
     "BillingUsage",
+    "AccountSubscription",
+    "AccountPlanOverride",
     "AdminUser",
     "BitrixHttpLog",
     "BitrixInboundEvent",
@@ -77,6 +88,7 @@ __all__ = [
     "Account",
     "AppUser",
     "AppUserWebCredential",
+    "AppSession",
     "AccountMembership",
     "AccountPermission",
     "AccountIntegration",

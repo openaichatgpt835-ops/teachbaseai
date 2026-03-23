@@ -228,6 +228,7 @@ def process_telegram_update(
             q.enqueue(
                 "apps.worker.jobs.process_kb_job",
                 job.id,
+                job_id=f"kbjob:{job.id}",
                 job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
             )
             q_outbox = Queue(s.rq_outbox_queue_name or "outbox", connection=r)

@@ -243,7 +243,12 @@ def process_kb_job(job_id: int) -> bool:
                         s = get_settings()
                         r = Redis(host=s.redis_host, port=s.redis_port)
                         q = Queue(s.rq_ingest_queue_name or "ingest", connection=r)
-                        q.enqueue_in(timedelta(seconds=30), "apps.worker.jobs.process_kb_job", job.id)
+                        q.enqueue_in(
+                            timedelta(seconds=30),
+                            "apps.worker.jobs.process_kb_job",
+                            job.id,
+                            job_id=f"kbjob:{job.id}",
+                        )
                     except Exception:
                         pass
                     return False

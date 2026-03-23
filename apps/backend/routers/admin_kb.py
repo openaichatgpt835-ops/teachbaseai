@@ -16,6 +16,7 @@ from apps.backend.models.kb import KBFile, KBJob
 from apps.backend.services.kb_storage import ensure_portal_dir, save_upload
 from apps.backend.services.kb_settings import (
     get_gigachat_settings,
+    get_gigachat_health_snapshot,
     set_gigachat_settings,
     get_gigachat_auth_key_plain,
     get_gigachat_access_token_plain,
@@ -37,6 +38,15 @@ def kb_get_credentials(
     _: dict = Depends(get_current_admin),
 ):
     return get_gigachat_settings(db)
+
+
+@router.get("/credentials/health")
+def kb_get_credentials_health(
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_admin),
+):
+    """Non-secret diagnostics for GigaChat credentials/token chain."""
+    return get_gigachat_health_snapshot(db)
 
 
 @router.post("/credentials")
@@ -427,6 +437,7 @@ def kb_process_file(
         q.enqueue(
             "apps.worker.jobs.process_kb_job",
             job.id,
+            job_id=f"kbjob:{job.id}",
             job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
         )
     except Exception:

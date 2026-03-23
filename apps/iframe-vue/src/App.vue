@@ -533,7 +533,7 @@
                     <span class="tb-help-balloon">Модель для поиска по базе знаний. Обычно не требуется менять.</span>
                   </span>
                 </label>
-                <select v-model="kbSettings.embedding_model">
+                <select v-model="kbSettings.embedding_model" :disabled="!kbSettings.model_selection_available">
                   <option value="">—</option>
                   <option v-for="m in embedModels" :key="m" :value="m">{{ m }}</option>
                 </select>
@@ -546,27 +546,59 @@
                     <span class="tb-help-balloon">Основная модель, которая формирует ответ по найденным фрагментам.</span>
                   </span>
                 </label>
-                <select v-model="kbSettings.chat_model">
+                <select v-model="kbSettings.chat_model" :disabled="!kbSettings.model_selection_available">
                   <option value="">—</option>
                   <option v-for="m in chatModels" :key="m" :value="m">{{ m }}</option>
                 </select>
               </div>
+              <div v-if="!kbSettings.model_selection_available" class="tb-info">
+                Выбор моделей недоступен на текущем тарифе.
+              </div>
               <div class="tb-field">
                 <label class="tb-label">
-                  <span>Пресет ответа</span>
+                  <span>Стиль ответа</span>
                   <span class="tb-help">
                     <span class="tb-help-icon">?</span>
-                    <span class="tb-help-balloon">Выберите стиль ответа: краткий обзор, FAQ или таймлайн.</span>
+                    <span class="tb-help-balloon">Управляет подачей ответа: компактно, сбалансированно или более развернуто.</span>
                   </span>
                 </label>
                 <select v-model="kbSettings.prompt_preset">
-                  <option value="auto">Авто</option>
-                  <option value="summary">Краткий обзор</option>
-                  <option value="faq">FAQ</option>
-                  <option value="timeline">Таймлайн</option>
+                  <option value="summary">Кратко</option>
+                  <option value="auto">Сбалансированно</option>
+                  <option value="timeline">Развернуто</option>
                 </select>
               </div>
               <div class="tb-settings-grid">
+                <div class="tb-field">
+                  <label class="tb-inline">
+                    <input
+                      type="checkbox"
+                      v-model="kbSettings.media_transcription_enabled"
+                      :disabled="!kbSettings.media_transcription_available"
+                    />
+                    Включить опцию транскрибации медиа
+                  </label>
+                </div>
+                <div class="tb-field">
+                  <label class="tb-inline">
+                    <input
+                      type="checkbox"
+                      v-model="kbSettings.speaker_diarization_enabled"
+                      :disabled="!kbSettings.media_transcription_enabled || !kbSettings.speaker_diarization_available"
+                    />
+                    Разделять по спикерам (диаризация)
+                  </label>
+                </div>
+                <div class="tb-field" style="grid-column: 1 / -1;">
+                  <div class="tb-muted">
+                    Статус транскрибации: {{ kbSettings.media_transcription_available ? 'доступна' : 'недоступна' }}
+                    <span v-if="kbSettings.media_transcription_reason">({{ kbSettings.media_transcription_reason }})</span>
+                  </div>
+                  <div class="tb-muted">
+                    Статус диаризации: {{ kbSettings.speaker_diarization_available ? 'доступна' : 'недоступна' }}
+                    <span v-if="kbSettings.speaker_diarization_reason">({{ kbSettings.speaker_diarization_reason }})</span>
+                  </div>
+                </div>
                 <div class="tb-field">
                   <label class="tb-inline">
                     <input type="checkbox" v-model="kbSettings.collections_multi_assign" />
@@ -596,7 +628,7 @@
                     <span class="tb-help-balloon">Инструкция, которая добавляется в системное сообщение перед каждым ответом.</span>
                   </span>
                 </label>
-                <textarea v-model="kbSettings.system_prompt_extra" class="tb-input" rows="3" placeholder="Например: отвечай кратко и по делу."></textarea>
+                <textarea v-model="kbSettings.system_prompt_extra" class="tb-input" rows="3" placeholder="Например: отвечай кратко и по делу." :disabled="!kbSettings.advanced_tuning_available"></textarea>
               </div>
               <div class="tb-field">
                 <label class="tb-inline">
@@ -633,7 +665,7 @@
                       <span class="tb-help-balloon">Сколько последних сообщений учитывать при ответе.</span>
                     </span>
                   </label>
-                  <input v-model.number="kbSettings.context_messages" type="number" min="0" class="tb-input" />
+                  <input v-model.number="kbSettings.context_messages" type="number" min="0" class="tb-input" :disabled="!kbSettings.advanced_tuning_available" />
                 </div>
                 <div class="tb-field">
                   <label class="tb-label">
@@ -643,34 +675,41 @@
                       <span class="tb-help-balloon">Максимальный объём контекста, который отправляется в модель.</span>
                     </span>
                   </label>
-                  <input v-model.number="kbSettings.context_chars" type="number" min="0" class="tb-input" />
+                  <input v-model.number="kbSettings.context_chars" type="number" min="0" class="tb-input" :disabled="!kbSettings.advanced_tuning_available" />
                 </div>
               </div>
               <div class="tb-field">
                 <label class="tb-inline">
-                  <input type="checkbox" v-model="kbSettings.strict_mode" />
+                  <input type="checkbox" v-model="kbSettings.strict_mode" :disabled="!kbSettings.advanced_tuning_available" />
                   Строгий режим (только по базе знаний)
                 </label>
               </div>
               <div class="tb-field">
                 <label class="tb-inline">
-                  <input type="checkbox" v-model="kbSettings.allow_general" />
+                  <input type="checkbox" v-model="kbSettings.allow_general" :disabled="!kbSettings.advanced_tuning_available" />
                   Разрешить общий ответ, если база знаний пуста
                 </label>
               </div>
               <div class="tb-field">
                 <label class="tb-inline">
-                  <input type="checkbox" v-model="kbSettings.use_cache" />
+                  <input type="checkbox" v-model="kbSettings.use_cache" :disabled="!kbSettings.advanced_tuning_available" />
                   Использовать кэш релевантности
                 </label>
               </div>
               <div class="tb-info">
                 Бот отвечает только по вашей базе знаний (файлы и URL‑источники).
               </div>
+              <div v-if="kbSettings.billing_policy?.plan_name" class="tb-info">
+                Текущий тариф: {{ kbSettings.billing_policy.plan_name }}
+                <span v-if="kbSettings.billing_policy.plan_code">({{ kbSettings.billing_policy.plan_code }})</span>
+              </div>
             </div>
 
             <details class="tb-accordion">
               <summary class="tb-accordion-summary">Продвинутые параметры</summary>
+              <div v-if="!kbSettings.advanced_tuning_available" class="tb-info" style="margin-bottom: 12px;">
+                Продвинутая настройка модели недоступна на текущем тарифе.
+              </div>
               <div class="tb-settings-grid">
                 <div class="tb-field">
                   <label class="tb-label">
@@ -680,7 +719,7 @@
                       <span class="tb-help-balloon">Чем выше, тем более креативные ответы. Обычно 0.2–0.5.</span>
                     </span>
                   </label>
-                  <input v-model="kbSettings.temperature" type="number" step="0.05" min="0" max="1.5" class="tb-input" />
+                  <input v-model="kbSettings.temperature" type="number" step="0.05" min="0" max="1.5" class="tb-input" :disabled="!kbSettings.advanced_tuning_available" />
                 </div>
                 <div class="tb-field">
                   <label class="tb-label">
@@ -690,7 +729,7 @@
                       <span class="tb-help-balloon">Ограничение длины ответа.</span>
                     </span>
                   </label>
-                  <input v-model="kbSettings.max_tokens" type="number" min="0" class="tb-input" />
+                  <input v-model="kbSettings.max_tokens" type="number" min="0" class="tb-input" :disabled="!kbSettings.advanced_tuning_available" />
                 </div>
                 <div class="tb-field">
                   <label class="tb-label">
@@ -700,7 +739,7 @@
                       <span class="tb-help-balloon">Альтернатива температуре для управления случайностью.</span>
                     </span>
                   </label>
-                  <input v-model="kbSettings.top_p" type="number" step="0.05" min="0" max="1" class="tb-input" />
+                  <input v-model="kbSettings.top_p" type="number" step="0.05" min="0" max="1" class="tb-input" :disabled="!kbSettings.advanced_tuning_available" />
                 </div>
                 <div class="tb-field">
                   <label class="tb-label">
@@ -710,7 +749,7 @@
                       <span class="tb-help-balloon">Снижает повторяемость тем в ответах.</span>
                     </span>
                   </label>
-                  <input v-model="kbSettings.presence_penalty" type="number" step="0.1" class="tb-input" />
+                  <input v-model="kbSettings.presence_penalty" type="number" step="0.1" class="tb-input" :disabled="!kbSettings.advanced_tuning_available" />
                 </div>
                 <div class="tb-field">
                   <label class="tb-label">
@@ -720,7 +759,7 @@
                       <span class="tb-help-balloon">Снижает повторяемость слов и фраз.</span>
                     </span>
                   </label>
-                  <input v-model="kbSettings.frequency_penalty" type="number" step="0.1" class="tb-input" />
+                  <input v-model="kbSettings.frequency_penalty" type="number" step="0.1" class="tb-input" :disabled="!kbSettings.advanced_tuning_available" />
                 </div>
               </div>
               <div class="tb-settings-grid">
@@ -732,7 +771,7 @@
                       <span class="tb-help-balloon">Сколько фрагментов базы знаний передавать в модель.</span>
                     </span>
                   </label>
-                  <input v-model.number="kbSettings.retrieval_top_k" type="number" min="1" class="tb-input" />
+                  <input v-model.number="kbSettings.retrieval_top_k" type="number" min="1" class="tb-input" :disabled="!kbSettings.advanced_tuning_available" />
                 </div>
                 <div class="tb-field">
                   <label class="tb-label">
@@ -742,7 +781,7 @@
                       <span class="tb-help-balloon">Ограничение объёма найденных фрагментов.</span>
                     </span>
                   </label>
-                  <input v-model.number="kbSettings.retrieval_max_chars" type="number" min="0" class="tb-input" />
+                  <input v-model.number="kbSettings.retrieval_max_chars" type="number" min="0" class="tb-input" :disabled="!kbSettings.advanced_tuning_available" />
                 </div>
                 <div class="tb-field">
                   <label class="tb-label">
@@ -752,7 +791,7 @@
                       <span class="tb-help-balloon">Усиливает точное совпадение ключевых слов.</span>
                     </span>
                   </label>
-                  <input v-model="kbSettings.lex_boost" type="number" step="0.01" min="0" class="tb-input" />
+                  <input v-model="kbSettings.lex_boost" type="number" step="0.01" min="0" class="tb-input" :disabled="!kbSettings.advanced_tuning_available" />
                 </div>
               </div>
             </details>
@@ -796,19 +835,22 @@
                 </div>
               </div>
               <div class="tb-field">
+                <div v-if="!clientBotAllowed" class="tb-info" style="margin-bottom: 10px;">
+                  Клиентский бот недоступен на тарифе "{{ currentPlanName }}".
+                </div>
                 <label>
-                  <input type="checkbox" v-model="tgClientEnabled" />
+                  <input type="checkbox" v-model="tgClientEnabled" :disabled="!clientBotAllowed" />
                   Бот для клиентов (RAG: client)
                 </label>
                 <label class="tb-inline">
-                  <input type="checkbox" v-model="tgClientAllowUploads" />
+                  <input type="checkbox" v-model="tgClientAllowUploads" :disabled="!clientBotAllowed" />
                   Разрешить загрузку файлов
                 </label>
                 <div class="tb-muted" v-if="tgClientMasked">Токен: {{ tgClientMasked }}</div>
                 <div class="tb-muted" v-if="tgClientWebhook">Webhook: {{ tgClientWebhook }}</div>
-                <input v-model="tgClientToken" class="tb-input" placeholder="Bot token" />
+                <input v-model="tgClientToken" class="tb-input" placeholder="Bot token" :disabled="!clientBotAllowed" />
                 <div class="tb-actions">
-                  <button class="tb-btn tb-btn-primary" @click="saveTelegram('client')">Сохранить</button>
+                  <button class="tb-btn tb-btn-primary" @click="saveTelegram('client')" :disabled="!clientBotAllowed">Сохранить</button>
                   <span class="tb-muted" v-if="tgClientStatus">{{ tgClientStatus }}</span>
                 </div>
               </div>
@@ -828,31 +870,38 @@
             </div>
           </div>
           <div v-else class="tb-info">
-            Настройки интеграции AmoCRM появятся здесь.
+            <template v-if="amoAllowed">Настройки интеграции AmoCRM появятся здесь.</template>
+            <template v-else>Интеграция AmoCRM недоступна на тарифе "{{ currentPlanName }}".</template>
           </div>
         </div>
       </section>
 
       <section v-if="currentTab === 'flow' && isWebMode" class="tb-flow" key="flow">
+        <div v-if="!clientBotAllowed" class="tb-info" style="margin-bottom: 12px;">
+          Конструктор клиентского бота недоступен на тарифе "{{ currentPlanName }}".
+        </div>
+        <div v-else-if="hasWebhookNodes && !webhookAllowed" class="tb-info" style="margin-bottom: 12px;">
+          В текущем сценарии есть webhook-ноды, но вебхуки недоступны на тарифе "{{ currentPlanName }}".
+        </div>
         <div class="tb-flow-toolbar">
-          <button class="tb-btn" @click="addFlowNode('start')">Start</button>
-          <button class="tb-btn" @click="addFlowNode('ask')">Question</button>
-          <button class="tb-btn" @click="addFlowNode('branch')">Intent</button>
-          <button class="tb-btn" @click="addFlowNode('kb_answer')">RAG Search</button>
-          <button class="tb-btn" @click="addFlowNode('message')">Answer</button>
-          <button class="tb-btn" @click="addFlowNode('webhook')">Webhook</button>
-          <button class="tb-btn" @click="addFlowNode('bitrix_lead')">Bitrix Lead</button>
-          <button class="tb-btn" @click="addFlowNode('bitrix_deal')">Bitrix Deal</button>
-          <button class="tb-btn" @click="addFlowNode('handoff')">CTA / Handoff</button>
+          <button class="tb-btn" @click="addFlowNode('start')" :disabled="!clientBotAllowed">Start</button>
+          <button class="tb-btn" @click="addFlowNode('ask')" :disabled="!clientBotAllowed">Question</button>
+          <button class="tb-btn" @click="addFlowNode('branch')" :disabled="!clientBotAllowed">Intent</button>
+          <button class="tb-btn" @click="addFlowNode('kb_answer')" :disabled="!clientBotAllowed">RAG Search</button>
+          <button class="tb-btn" @click="addFlowNode('message')" :disabled="!clientBotAllowed">Answer</button>
+          <button class="tb-btn" @click="addFlowNode('webhook')" :disabled="!clientBotAllowed || !webhookAllowed">Webhook</button>
+          <button class="tb-btn" @click="addFlowNode('bitrix_lead')" :disabled="!clientBotAllowed">Bitrix Lead</button>
+          <button class="tb-btn" @click="addFlowNode('bitrix_deal')" :disabled="!clientBotAllowed">Bitrix Deal</button>
+          <button class="tb-btn" @click="addFlowNode('handoff')" :disabled="!clientBotAllowed">CTA / Handoff</button>
           <div class="tb-flow-zoom">
             <button class="tb-mini" @click="zoomOut">−</button>
             <span class="tb-muted">{{ Math.round(flowScale * 100) }}%</span>
             <button class="tb-mini" @click="zoomIn">+</button>
           </div>
-          <button class="tb-btn tb-btn-primary" @click="saveFlowDraft" :disabled="flowSaving">
+          <button class="tb-btn tb-btn-primary" @click="saveFlowDraft" :disabled="flowSaving || !clientBotAllowed || (hasWebhookNodes && !webhookAllowed)">
             {{ flowSaving ? 'Сохраняю...' : 'Сохранить' }}
           </button>
-          <button class="tb-btn" @click="publishFlow" :disabled="flowPublishing">
+          <button class="tb-btn" @click="publishFlow" :disabled="flowPublishing || !clientBotAllowed || (hasWebhookNodes && !webhookAllowed)">
             {{ flowPublishing ? 'Публикую...' : 'Опубликовать' }}
           </button>
           <span class="tb-muted" v-if="flowMessage">{{ flowMessage }}</span>
@@ -947,7 +996,7 @@
                   </div>
                   <div class="tb-flow-port-stub">
                     <div class="tb-flow-port-line"></div>
-                    <button class="tb-flow-plus" @click.stop="addFlowNodeAfter(node)">+</button>
+                    <button class="tb-flow-plus" :disabled="!clientBotAllowed" @click.stop="addFlowNodeAfter(node)">+</button>
                   </div>
                 </div>
               </div>
@@ -965,7 +1014,7 @@
                 <input v-model="flowTestInput" class="tb-input" placeholder="Введите сообщение клиента" />
               </div>
               <div class="tb-actions">
-                <button class="tb-btn tb-btn-primary" @click="runFlowTest" :disabled="flowTesting">
+                <button class="tb-btn tb-btn-primary" @click="runFlowTest" :disabled="flowTesting || !clientBotAllowed || (hasWebhookNodes && !webhookAllowed)">
                   {{ flowTesting ? 'Тестирую...' : 'Тестовый прогон' }}
                 </button>
                 <button class="tb-btn" @click="resetFlowTest">Сбросить контекст</button>
@@ -1186,6 +1235,17 @@ type DialogItem = { body?: string; direction?: 'tx' | 'rx' };
     top_p: number | '';
     presence_penalty: number | '';
     frequency_penalty: number | '';
+    media_transcription_enabled?: boolean;
+    speaker_diarization_enabled?: boolean;
+    media_transcription_available?: boolean;
+    media_transcription_reason?: string;
+    speaker_diarization_available?: boolean;
+    speaker_diarization_reason?: string;
+    model_selection_available?: boolean;
+    model_selection_reason?: string;
+    advanced_tuning_available?: boolean;
+    advanced_tuning_reason?: string;
+    billing_policy?: { plan_code?: string | null; plan_name?: string | null; source?: string | null } | null;
   };
 type FlowNode = { id: string; type: string; title?: string; config?: any; x?: number; y?: number };
 type FlowEdge = { id: string; from: string; to: string; condition?: any };
@@ -1194,6 +1254,14 @@ type FlowDraft = {
   settings: { mood: string; custom_prompt: string; use_history: boolean };
   nodes: FlowNode[];
   edges: FlowEdge[];
+};
+type PortalBillingState = {
+  billing_policy?: { plan_code?: string | null; plan_name?: string | null; features?: Record<string, boolean> } | null;
+  feature_gates?: {
+    client_bot?: { allowed?: boolean; reason?: string };
+    amocrm_integration?: { allowed?: boolean; reason?: string };
+    webhooks?: { allowed?: boolean; reason?: string };
+  } | null;
 };
 
 const statusMessage = ref('Загрузка...');
@@ -1316,6 +1384,17 @@ const currentTab = ref<'overview' | 'kb' | 'sources' | 'users' | 'analytics' | '
     top_p: '',
     presence_penalty: '',
     frequency_penalty: '',
+    media_transcription_enabled: true,
+    speaker_diarization_enabled: false,
+    media_transcription_available: true,
+    media_transcription_reason: '',
+    speaker_diarization_available: true,
+    speaker_diarization_reason: '',
+    model_selection_available: true,
+    model_selection_reason: '',
+    advanced_tuning_available: true,
+    advanced_tuning_reason: '',
+    billing_policy: null,
   });
 const embedModels = ref<string[]>([]);
 const chatModels = ref<string[]>([]);
@@ -1336,6 +1415,7 @@ const integrationTab = ref<'telegram' | 'bitrix' | 'amocrm'>('telegram');
 const bitrixClientId = ref('');
 const bitrixClientSecret = ref('');
 const bitrixCredsStatus = ref('');
+const portalBilling = ref<PortalBillingState>({});
 const flowDraft = ref<FlowDraft>({
   version: 1,
   settings: { mood: 'нейтральный', custom_prompt: '', use_history: true },
@@ -1361,6 +1441,11 @@ const connectPreview = ref<{ x: number; y: number } | null>(null);
 const flowTestInput = ref('');
 const flowTestState = ref<Record<string, any> | null>(null);
 const flowChatLog = ref<{ role: 'user' | 'bot'; text: string; trace?: string }[]>([]);
+const clientBotAllowed = computed(() => !!(portalBilling.value.feature_gates?.client_bot?.allowed ?? true));
+const webhookAllowed = computed(() => !!(portalBilling.value.feature_gates?.webhooks?.allowed ?? true));
+const amoAllowed = computed(() => !!(portalBilling.value.feature_gates?.amocrm_integration?.allowed ?? true));
+const currentPlanName = computed(() => portalBilling.value.billing_policy?.plan_name || 'текущий тариф');
+const hasWebhookNodes = computed(() => flowDraft.value.nodes.some((n) => n.type === 'webhook'));
 
 const tabTitle = computed(() => {
   switch (currentTab.value) {
@@ -1597,7 +1682,7 @@ async function runSmartSearch() {
   smartSearchAnswer.value = '';
   const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/ask`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-Api-Schema': 'v2' },
     body: JSON.stringify({ query: q }),
   });
   smartSearchLoading.value = false;
@@ -1605,7 +1690,7 @@ async function runSmartSearch() {
     smartSearchError.value = data?.error || data?.detail || 'Ошибка умного поиска';
     return;
   }
-  smartSearchAnswer.value = data?.answer || '';
+  smartSearchAnswer.value = data?.data?.answer || data?.answer || '';
 }
 
 function toggleSmartSearch() {
@@ -1787,6 +1872,10 @@ function newNodeId() {
 }
 
 function addFlowNode(type: string) {
+  if (type === 'webhook' && !webhookAllowed.value) {
+    flowMessage.value = 'Webhook-ноды недоступны на текущем тарифе';
+    return;
+  }
   const idx = flowDraft.value.nodes.length;
   const node: FlowNode = {
     id: newNodeId(),
@@ -1808,6 +1897,10 @@ function addFlowNode(type: string) {
 }
 
 function addFlowNodeAfter(node: FlowNode) {
+  if (!clientBotAllowed.value) {
+    flowMessage.value = 'Конструктор клиентского бота недоступен на текущем тарифе';
+    return;
+  }
   const next = {
     id: newNodeId(),
     type: 'message',
@@ -2522,6 +2615,17 @@ async function loadKbSources() {
         top_p: data.top_p ?? '',
         presence_penalty: data.presence_penalty ?? '',
         frequency_penalty: data.frequency_penalty ?? '',
+        media_transcription_enabled: data.media_transcription_enabled !== false,
+        speaker_diarization_enabled: !!data.speaker_diarization_enabled,
+        media_transcription_available: data.media_transcription_available !== false,
+        media_transcription_reason: data.media_transcription_reason || '',
+        speaker_diarization_available: data.speaker_diarization_available !== false,
+        speaker_diarization_reason: data.speaker_diarization_reason || '',
+        model_selection_available: data.model_selection_available !== false,
+        model_selection_reason: data.model_selection_reason || '',
+        advanced_tuning_available: data.advanced_tuning_available !== false,
+        advanced_tuning_reason: data.advanced_tuning_reason || '',
+        billing_policy: data.billing_policy || null,
       };
     }
   }
@@ -2603,8 +2707,22 @@ async function loadTelegramSettings() {
   }
 }
 
+async function loadPortalBillingPolicy() {
+  if (!portalId.value || !portalToken.value) return;
+  const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/billing/policy`, {
+    headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+  });
+  if (ok && data) {
+    portalBilling.value = data;
+  }
+}
+
 async function saveTelegram(kind: 'staff' | 'client') {
   if (!portalId.value || !portalToken.value) return;
+  if (kind === 'client' && !clientBotAllowed.value) {
+    tgClientStatus.value = 'Недоступно на текущем тарифе';
+    return;
+  }
   const payload = kind === 'staff'
     ? { bot_token: tgStaffToken.value || null, enabled: tgStaffEnabled.value, allow_uploads: tgStaffAllowUploads.value }
     : { bot_token: tgClientToken.value || null, enabled: tgClientEnabled.value, allow_uploads: tgClientAllowUploads.value };
@@ -2639,6 +2757,10 @@ async function saveTelegram(kind: 'staff' | 'client') {
 
 async function loadFlow() {
   if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
+  if (!clientBotAllowed.value) {
+    flowMessage.value = 'Конструктор клиентского бота недоступен на текущем тарифе';
+    return;
+  }
   const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/botflow/client`, {
     headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
   });
@@ -2673,6 +2795,14 @@ async function loadFlow() {
 
 async function saveFlowDraft() {
   if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
+  if (!clientBotAllowed.value) {
+    flowMessage.value = 'Конструктор клиентского бота недоступен на текущем тарифе';
+    return;
+  }
+  if (hasWebhookNodes.value && !webhookAllowed.value) {
+    flowMessage.value = 'Webhook-ноды недоступны на текущем тарифе';
+    return;
+  }
   flowSaving.value = true;
   flowMessage.value = '';
   const payload = JSON.parse(JSON.stringify(flowDraft.value));
@@ -2687,6 +2817,14 @@ async function saveFlowDraft() {
 
 async function publishFlow() {
   if (!portalId.value || !portalToken.value || !isPortalAdmin.value) return;
+  if (!clientBotAllowed.value) {
+    flowMessage.value = 'Конструктор клиентского бота недоступен на текущем тарифе';
+    return;
+  }
+  if (hasWebhookNodes.value && !webhookAllowed.value) {
+    flowMessage.value = 'Webhook-ноды недоступны на текущем тарифе';
+    return;
+  }
   flowPublishing.value = true;
   flowMessage.value = '';
   const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/botflow/client/publish`, {
@@ -2699,6 +2837,14 @@ async function publishFlow() {
 
 async function runFlowTest() {
   if (!portalId.value || !portalToken.value || !isPortalAdmin.value || !flowTestInput.value.trim()) return;
+  if (!clientBotAllowed.value) {
+    flowChatLog.value.push({ role: 'bot', text: 'Конструктор клиентского бота недоступен на текущем тарифе.' });
+    return;
+  }
+  if (hasWebhookNodes.value && !webhookAllowed.value) {
+    flowChatLog.value.push({ role: 'bot', text: 'Webhook-ноды недоступны на текущем тарифе.' });
+    return;
+  }
   flowTesting.value = true;
   const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/botflow/client/test`, {
     method: 'POST',
@@ -2971,6 +3117,7 @@ async function init() {
     await loadKbFiles();
     await loadKbSources();
     await loadKbSettings();
+    await loadPortalBillingPolicy();
     await loadKbModels();
     await loadTelegramSettings();
     await loadFlow();
@@ -3005,6 +3152,7 @@ async function init() {
     await loadKbFiles();
     await loadKbSources();
     await loadKbSettings();
+    await loadPortalBillingPolicy();
     await loadKbModels();
     await loadTelegramSettings();
   }

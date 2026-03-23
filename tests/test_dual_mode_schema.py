@@ -71,7 +71,18 @@ def test_kb_ask_v2_schema_header(test_db_session, override_get_db):
     portal, portal_token = _portal_and_token(test_db_session)
     app.dependency_overrides[get_db] = override_get_db
     try:
-        with patch("apps.backend.routers.bitrix.answer_from_kb", return_value=("ok", None, None)):
+        with patch(
+            "apps.backend.routers.bitrix.answer_from_kb",
+            return_value=(
+                "ok",
+                None,
+                {
+                    "sources": [],
+                    "line_refs": {},
+                    "rag_debug": {"confidence": 0.77, "strict_mode": True},
+                },
+            ),
+        ):
             r = client.post(
                 f"/v1/bitrix/portals/{portal.id}/kb/ask",
                 headers={
@@ -87,6 +98,7 @@ def test_kb_ask_v2_schema_header(test_db_session, override_get_db):
     data = r.json()
     assert data.get("ok") is True
     assert data.get("data", {}).get("answer") == "ok"
+    assert data.get("data", {}).get("rag_debug", {}).get("confidence") == 0.77
     assert data.get("meta", {}).get("schema") == "v2"
 
 

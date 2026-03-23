@@ -4,8 +4,12 @@ import sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 ROOTS = [
+    os.path.join(ROOT, "apps", "frontend", "src"),
     os.path.join(ROOT, "apps", "backend"),
     os.path.join(ROOT, "apps", "iframe-vue"),
+    os.path.join(ROOT, "alembic"),
+    os.path.join(ROOT, "docs"),
+    os.path.join(ROOT, "infra"),
     os.path.join(ROOT, "scripts"),
 ]
 
@@ -19,7 +23,7 @@ IGNORE_DIRS = {
     "node_modules", "dist", "build", ".git", ".venv", "venv", "__pycache__",
 }
 
-BAD_SEQ = ["???", "�"]
+BAD_SEQ = ["???", "\u043f\u0457\u0405", "\ufffd"]
 
 SUPPLEMENT_RANGES = [
     (0x0400, 0x040F),
@@ -66,6 +70,13 @@ def scan_file(path: str, errors: list[str]) -> None:
 
 def walk() -> list[str]:
     errors: list[str] = []
+    for name in os.listdir(ROOT):
+        if name.startswith("_tmp_"):
+            continue
+        path = os.path.join(ROOT, name)
+        if os.path.isdir(path) or not is_text_file(path):
+            continue
+        scan_file(path, errors)
     for root in ROOTS:
         if not os.path.exists(root):
             continue

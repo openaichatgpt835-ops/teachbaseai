@@ -70,6 +70,27 @@ docker builder prune -af
 docker compose -f docker-compose.prod.yml up -d --no-deps --scale worker-ingest=8 worker-ingest
 ```
 
+## Smoke: ingest recovery
+
+Цель: убедиться, что зависшие `processing`-задачи/файлы не остаются навсегда и переочередяются.
+
+1. Проверить watchdog-конфиг в env (или значения по умолчанию):
+```bash
+grep -n 'KB_WATCHDOG\|KB_PROCESSING_STALE\|KB_JOB_TIMEOUT' /opt/teachbaseai/.env
+```
+
+2. Проверить очередь/воркеры:
+```bash
+curl -sS http://127.0.0.1:8080/api/v1/admin/system/queue
+```
+
+3. После загрузки длинного media-файла контролировать переходы:
+- `uploaded -> queued -> processing -> ready` (или `error`);
+- если `processing` зависает дольше таймаута, watchdog должен:
+  - пометить старый job как `failed` с `stuck_processing_timeout`,
+  - вернуть файл в `queued`,
+  - создать новый ingest job.
+
 ## Роутинг admin/api
 - `:8080` — web SPA (public)
 - API через nginx: `/api/v1/...`

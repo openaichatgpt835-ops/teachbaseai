@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import re
 import json
+from functools import lru_cache
 from typing import Iterable, Any
 
 from sqlalchemy import select, update, or_
@@ -22,6 +23,19 @@ except Exception:  # pragma: no cover - optional
     pymorphy3 = None
 
 _MORPH = pymorphy3.MorphAnalyzer() if pymorphy3 else None
+
+
+@lru_cache(maxsize=20000)
+def _normalize_ru_token(token: str) -> str:
+    tok = (token or "").strip().lower()
+    if not tok or not _MORPH:
+        return tok
+    if not re.fullmatch(r"[а-яё\-]+", tok, flags=re.IGNORECASE):
+        return tok
+    try:
+        return _MORPH.parse(tok)[0].normal_form
+    except Exception:
+        return tok
 
 def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
@@ -117,12 +131,143 @@ def _trigger_mode(text: str) -> str | None:
     return None
 
 
+def _detect_answer_profile(query: str, *, req_top_n: int | None, numeric_query: bool) -> str:
+    q = (query or "").strip().lower()
+    if numeric_query:
+        return "fact"
+    if req_top_n:
+        return "list"
+    instruction_markers = (
+        "как ",
+        "инструкц",
+        "шаг",
+        "порядок действий",
+        "что сделать",
+        "как настроить",
+        "как создать",
+        "как применить",
+    )
+    if any(m in q for m in instruction_markers):
+        return "instruction"
+    overview_markers = (
+        "расскажи",
+        "объясни",
+        "подробно",
+        "всю информацию",
+        "что известно",
+        "кто такой",
+        "кто такая",
+        "что такое",
+        "про ",
+    )
+    if any(m in q for m in overview_markers):
+        return "overview"
+    return "default"
+
+
+def _answer_style_from_preset(preset: str | None) -> str:
+    value = (preset or "").strip().lower()
+    if value in {"concise", "balanced", "detailed"}:
+        return value
+    if value in {"summary", "faq", "timeline"}:
+        return "balanced"
+    return "balanced"
+
+
+def _is_product_settings_query(query: str) -> bool:
+    q = (query or "").strip().lower()
+    if not q:
+        return False
+    markers = (
+        "доступ",
+        "права",
+        "пользовател",
+        "настрой",
+        "раздел",
+        "база знаний",
+        "кабинет",
+        "портал",
+        "интеграц",
+        "меню",
+    )
+    return any(m in q for m in markers)
+
+
 def _is_greeting(text: str) -> bool:
     t = (text or "").strip().lower()
     if not t:
         return False
     greetings = ("привет", "здравств", "добрый", "hello", "hi", "доброе утро", "добрый день", "добрый вечер")
     return any(t.startswith(g) for g in greetings) and len(t) <= 20
+
+
+_RU_NUM_WORDS = {
+    "ноль": 0,
+    "один": 1,
+    "одна": 1,
+    "одно": 1,
+    "два": 2,
+    "две": 2,
+    "три": 3,
+    "четыре": 4,
+    "пять": 5,
+    "шесть": 6,
+    "семь": 7,
+    "восемь": 8,
+    "девять": 9,
+    "десять": 10,
+}
+
+
+def _evaluate_simple_arithmetic(query: str) -> str | None:
+    q = (query or "").strip().lower().replace("?", " ")
+    if not q:
+        return None
+    allowed_markers = (
+        "сколько будет",
+        "чему равно",
+        "посчитай",
+        "вычисли",
+        "плюс",
+        "минус",
+        "умножить",
+        "разделить",
+        "+",
+        "-",
+        "*",
+        "/",
+    )
+    if not any(m in q for m in allowed_markers):
+        return None
+    if re.search(r"[a-z]", q, flags=re.IGNORECASE):
+        return None
+    tokens = re.findall(r"\d+|[а-яё]+|[+\-*/]", q, flags=re.IGNORECASE)
+    mapped: list[str] = []
+    ops = {"плюс": "+", "минус": "-", "умножить": "*", "разделить": "/"}
+    for tok in tokens:
+        low = tok.lower()
+        if low.isdigit():
+            mapped.append(low)
+        elif low in _RU_NUM_WORDS:
+            mapped.append(str(_RU_NUM_WORDS[low]))
+        elif low in ops:
+            mapped.append(ops[low])
+        elif low in {"сколько", "будет", "чему", "равно", "посчитай", "вычисли", "на"}:
+            continue
+        elif low in {"+", "-", "*", "/"}:
+            mapped.append(low)
+        else:
+            return None
+    expr = " ".join(mapped).strip()
+    if not re.fullmatch(r"\d+(?:\s*[+\-*/]\s*\d+)+", expr):
+        return None
+    try:
+        value = eval(expr, {"__builtins__": {}}, {})
+    except Exception:
+        return None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return f"Ответ: {value}"
 
 
 def _strip_markdown_basic(text: str) -> str:
@@ -177,11 +322,8 @@ def _extract_keywords(text: str) -> list[str]:
             continue
         if w in _RU_STOPWORDS:
             continue
-        if _MORPH and re.fullmatch(r"[а-яё\-]+", w, flags=re.IGNORECASE):
-            try:
-                w = _MORPH.parse(w)[0].normal_form
-            except Exception:
-                pass
+        if _MORPH:
+            w = _normalize_ru_token(w)
         out.append(w)
     # uniq while preserving order
     seen = set()
@@ -199,6 +341,10 @@ def _keyword_hits(text: str, keywords: list[str]) -> int:
         return 0
     low = text.lower()
     token_set = set(re.findall(r"[a-zа-яё0-9]+", low, flags=re.IGNORECASE))
+    normalized_token_set = set(token_set)
+    if _MORPH:
+        for tok in list(token_set):
+            normalized_token_set.add(_normalize_ru_token(tok))
     hits = 0
     for k in keywords:
         kk = (k or "").strip().lower()
@@ -209,10 +355,10 @@ def _keyword_hits(text: str, keywords: list[str]) -> int:
             continue
         if len(parts) == 1:
             p = parts[0]
-            if p in token_set or p in low:
+            if p in normalized_token_set or p in low:
                 hits += 1
         else:
-            if all(p in token_set for p in parts):
+            if all(p in normalized_token_set for p in parts):
                 hits += 1
     return hits
 
@@ -379,7 +525,10 @@ def _extract_numeric_fact_answer(query: str, chunks: list[dict[str, Any]]) -> st
             num_hits = len(re.findall(r"\d+(?:[.,]\d+)?", s))
             if num_hits <= 0:
                 continue
-            score = (_keyword_hits(s, qk) * 4) + (num_hits * 3)
+            kw_hits = _keyword_hits(s, qk)
+            if qk and kw_hits <= 0:
+                continue
+            score = (kw_hits * 4) + (num_hits * 3)
             low = s.lower()
             if "кг" in low or "килограмм" in low or "подня" in low or "жим" in low:
                 score += 5
@@ -455,7 +604,10 @@ def _extract_numeric_fact_structured(query: str, chunks: list[dict[str, Any]]) -
             for val, has_kg in candidates:
                 if lift_query and not has_kg:
                     continue
-                score = (_keyword_hits(low, qk) * 3) + (6 if has_kg else 0)
+                kw_hits = _keyword_hits(low, qk)
+                if qk and kw_hits <= 0:
+                    continue
+                score = (kw_hits * 3) + (6 if has_kg else 0)
                 if ("анти" in qlow or "тренер" in qlow) and ("анти" in low or "тренер" in low):
                     score += 4
                 if "позитивная музыка" in low or "промокод" in low:
@@ -543,6 +695,56 @@ def _extract_fact_notes(query: str, chunks: list[dict[str, Any]], limit: int = 5
     return [s for _sc, s in scored[: max(1, limit)]]
 
 
+def _extract_topn_notes(chunks: list[dict[str, Any]], limit: int) -> list[str]:
+    if not chunks:
+        return []
+    banned = ("позитивная музыка", "промокод", "подпишись", "ставьте лайк")
+    scored: list[tuple[float, str]] = []
+    seen: set[str] = set()
+    for rank, c in enumerate(chunks[: max(limit * 3, 12)]):
+        txt = str(c.get("text") or "").replace("\n", " ").strip()
+        if not txt:
+            continue
+        src_score = float(c.get("_score") or 0.0)
+        for sent in _split_sentences(txt):
+            low = sent.lower().strip()
+            if not low or len(low) < 20:
+                continue
+            if any(b in low for b in banned):
+                continue
+            key = re.sub(r"\s+", " ", low)
+            if key in seen:
+                continue
+            seen.add(key)
+            score = src_score * 10.0
+            if re.search(r"\d+(?:[.,]\d+)?", low):
+                score += 1.0
+            if any(w in low for w in ("заклин", "проклят", "оруж", "знак", "цепоч", "престол", "некромант")):
+                score += 1.2
+            score -= rank * 0.08
+            scored.append((score, sent.strip()))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [s for _sc, s in scored[: max(1, limit)]]
+
+
+def _ensure_topn_breadth(query: str, answer: str, chunks: list[dict[str, Any]], requested_n: int | None) -> str:
+    req = int(requested_n or 0)
+    if req <= 0:
+        return answer
+    current = str(answer or "").strip()
+    current_items = _count_numbered_items(current)
+    if current_items >= req:
+        return current
+    notes = _extract_fact_notes(query, chunks, limit=max(req, 6))
+    if len(notes) <= max(1, current_items):
+        notes = _extract_topn_notes(chunks, limit=max(req, 6))
+    if len(notes) <= max(1, current_items):
+        return current
+    items = [f"{i + 1}. {note}" for i, note in enumerate(notes[:req])]
+    rebuilt = "\n\n".join(items).strip()
+    return rebuilt or current
+
+
 def _split_sentences(text: str) -> list[str]:
     raw = re.split(r"(?<=[\.\!\?])\s+", (text or "").strip())
     return [s.strip() for s in raw if s and s.strip()]
@@ -594,9 +796,71 @@ def _sentence_support_score(sentence: str, query_keywords: list[str], chunk_text
     return score, has_number_match
 
 
+def _split_numbered_blocks(text: str) -> list[str]:
+    lines = str(text or "").splitlines()
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        raw = line.rstrip()
+        stripped = raw.strip()
+        if not stripped:
+            if current:
+                current.append("")
+            continue
+        if re.match(r"^\s*\d+[\)\.]\s+", stripped):
+            if current:
+                blocks.append(current)
+            current = [stripped]
+        elif current:
+            current.append(stripped)
+        else:
+            current = [stripped]
+    if current:
+        blocks.append(current)
+    return ["\n".join(part).strip() for part in blocks if any(x.strip() for x in part)]
+
+
+def _filter_numbered_blocks_by_evidence(query: str, answer: str, chunks: list[dict[str, Any]]) -> str | None:
+    blocks = _split_numbered_blocks(answer)
+    numbered = [b for b in blocks if re.match(r"^\s*\d+[\)\.]\s+", b)]
+    if len(numbered) < 2:
+        return None
+    qk = _extract_keywords(query)
+    kept: list[str] = []
+    for block in numbered:
+        sents = _split_sentences(block.replace("\n", " "))
+        if not sents:
+            continue
+        total = 0
+        supported = 0
+        for s in sents:
+            if len((s or "").strip()) < 3:
+                continue
+            total += 1
+            ok = False
+            for c in chunks[:12]:
+                txt = str(c.get("text") or "")
+                if not txt:
+                    continue
+                if _claim_is_supported(s, qk, txt):
+                    ok = True
+                    break
+            if ok:
+                supported += 1
+        ratio = (supported / float(total)) if total > 0 else 0.0
+        if supported >= 1 or ratio >= 0.34:
+            kept.append(block)
+    if not kept:
+        return None
+    return "\n\n".join(kept).strip()
+
+
 def _verify_and_ground_answer(query: str, answer: str, chunks: list[dict[str, Any]]) -> str:
     if not answer or not chunks:
         return answer
+    list_filtered = _filter_numbered_blocks_by_evidence(query, answer, chunks)
+    if list_filtered:
+        return list_filtered
     qk = _extract_keywords(query)
     out_lines: list[str] = []
     kept_sentences = 0
@@ -639,6 +903,48 @@ def _verify_and_ground_answer(query: str, answer: str, chunks: list[dict[str, An
             return "Подтверждено в базе знаний:\n" + "\n".join([f"{i+1}) {n}" for i, n in enumerate(notes)])
         return "В базе знаний не найдено достаточно релевантной информации по запросу. Уточните вопрос или загрузите материалы по этой теме."
     return grounded
+
+
+def _enforce_paragraph_evidence(query: str, answer: str, chunks: list[dict[str, Any]]) -> str:
+    raw = str(answer or "").strip()
+    if not raw or not chunks:
+        return raw
+    list_filtered = _filter_numbered_blocks_by_evidence(query, raw, chunks)
+    if list_filtered:
+        return list_filtered
+    qk = _expand_query_keywords(_extract_keywords(query))
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", raw) if p.strip()]
+    if not paragraphs:
+        return raw
+    kept: list[str] = []
+    for p in paragraphs:
+        sents = _split_sentences(p)
+        if not sents:
+            continue
+        total = 0
+        supported = 0
+        for s in sents:
+            if len((s or "").strip()) < 3:
+                continue
+            total += 1
+            ok = False
+            for c in chunks[:12]:
+                txt = str(c.get("text") or "")
+                if not txt:
+                    continue
+                if _claim_is_supported(s, qk, txt):
+                    ok = True
+                    break
+            if ok:
+                supported += 1
+        if total <= 0:
+            continue
+        ratio = supported / float(total)
+        if supported >= 2 or ratio >= 0.45:
+            kept.append(p)
+    if kept:
+        return "\n\n".join(kept).strip()
+    return "Недостаточно подтвержденных данных в базе знаний по этому запросу."
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -751,6 +1057,435 @@ def _build_claims_answer(
     return "\n".join(lines)
 
 
+def _build_topn_answer(
+    query: str,
+    chunks: list[dict[str, Any]],
+    *,
+    req_top_n: int,
+    api_base: str,
+    token: str,
+    chat_model: str,
+    temperature: float,
+    max_tokens: int,
+    top_p: Any,
+    presence_penalty: Any,
+    frequency_penalty: Any,
+) -> str | None:
+    if not chunks or req_top_n <= 0:
+        return None
+    context = "\n\n".join([f"[{i+1}] {str(c.get('text') or '')}" for i, c in enumerate(chunks[:12])])
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты собираешь список пунктов только из контекста базы знаний. "
+                "Верни только JSON вида "
+                "{\"items\":[{\"title\":\"...\",\"summary\":\"...\",\"evidence\":[1,2]}]}. "
+                "Количество items — не больше запрошенного. "
+                "Каждый пункт должен быть отдельным осмысленным объектом из контекста. "
+                "Не добавляй ничего кроме JSON."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Запрос: {query}\n"
+                f"Нужно пунктов: {req_top_n}\n\n"
+                f"Контекст:\n{context}"
+            ),
+        },
+    ]
+    raw, err, _u = chat_complete(
+        api_base,
+        token,
+        chat_model,
+        messages,
+        temperature=max(0.0, min(float(temperature), 0.15)),
+        max_tokens=max(400, min(max_tokens, 1200)),
+        top_p=top_p,
+        presence_penalty=presence_penalty,
+        frequency_penalty=frequency_penalty,
+    )
+    if err or not raw:
+        return None
+    obj = _extract_json_object(raw)
+    if not obj:
+        return None
+    items_raw = obj.get("items")
+    if not isinstance(items_raw, list):
+        return None
+    qk = _expand_query_keywords(_extract_keywords(query))
+    lines: list[str] = []
+    seen_titles: set[str] = set()
+    for item in items_raw[: max(1, req_top_n)]:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip(" \n\t-—")
+        summary = str(item.get("summary") or "").strip()
+        ev = item.get("evidence") or []
+        if not isinstance(ev, list):
+            continue
+        ev_idx: list[int] = []
+        for x in ev:
+            if isinstance(x, int):
+                ev_idx.append(x - 1)
+            elif isinstance(x, str) and x.isdigit():
+                ev_idx.append(int(x) - 1)
+        ev_idx = sorted(set([i for i in ev_idx if 0 <= i < len(chunks)]))
+        if not title or not summary or not ev_idx:
+            continue
+        title_key = re.sub(r"\s+", " ", title.lower())
+        if title_key in seen_titles:
+            continue
+        text = f"{title}. {summary}"
+        if not _claim_supported(text, ev_idx, chunks, qk):
+            continue
+        seen_titles.add(title_key)
+        refs = "".join([f" [{i+1}]" for i in ev_idx[:6]])
+        lines.append(f"{len(lines) + 1}. {title} — {summary}{refs}")
+    if len(lines) < 2:
+        return None
+    return "\n\n".join(lines)
+
+
+def _build_entity_list_answer(
+    query: str,
+    chunks: list[dict[str, Any]],
+    *,
+    req_top_n: int,
+    api_base: str,
+    token: str,
+    chat_model: str,
+    temperature: float,
+    max_tokens: int,
+    top_p: Any,
+    presence_penalty: Any,
+    frequency_penalty: Any,
+) -> str | None:
+    if not chunks or req_top_n <= 0:
+        return None
+    context = "\n\n".join([f"[{i+1}] {str(c.get('text') or '')}" for i, c in enumerate(chunks[:14])])
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты извлекаешь из контекста конкретные сущности для ответа списком. "
+                "Верни только JSON: "
+                "{\"items\":[{\"title\":\"...\",\"summary\":\"...\",\"instruction\":\"...\",\"evidence\":[1,2]}]}. "
+                "Не выдумывай рейтинг, если он явно не дан в контексте. "
+                "Если инструкция отсутствует, оставь instruction пустой строкой. "
+                "Выбирай только реально подтвержденные сущности из контекста."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Запрос: {query}\n\n"
+                f"Контекст:\n{context}\n\n"
+                f"Нужно вернуть до {int(req_top_n)} подтвержденных пунктов."
+            ),
+        },
+    ]
+    raw, err, _usage = chat_complete(
+        api_base,
+        token,
+        chat_model,
+        messages,
+        temperature=max(0.0, min(temperature, 0.2)),
+        max_tokens=max(300, min(max_tokens, 1400)),
+        top_p=top_p,
+        presence_penalty=presence_penalty,
+        frequency_penalty=frequency_penalty,
+    )
+    if err or not raw:
+        return None
+    obj = _extract_json_object(raw)
+    items = obj.get("items") if isinstance(obj, dict) else None
+    if not isinstance(items, list) or not items:
+        return None
+    qk = _expand_query_keywords(_extract_keywords(query))
+    lines: list[str] = []
+    seen_titles: set[str] = set()
+    for idx, item in enumerate(items, start=1):
+        if idx > req_top_n or not isinstance(item, dict):
+            break
+        title = str(item.get("title") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        instruction = str(item.get("instruction") or "").strip()
+        evidence = item.get("evidence") or []
+        if not title or not summary or not isinstance(evidence, list):
+            continue
+        title_key = re.sub(r"\s+", " ", title.lower())
+        if title_key in seen_titles:
+            continue
+        ev_idxs = [int(i) - 1 for i in evidence if isinstance(i, int) or (isinstance(i, str) and str(i).isdigit())]
+        combined = " ".join([title, summary, instruction]).strip()
+        if not _claim_supported(combined, ev_idxs, chunks, qk):
+            continue
+        seen_titles.add(title_key)
+        body = summary
+        if instruction:
+            body += f" Как создать или применить: {instruction}"
+        refs = "".join([f"[{i+1}]" for i in ev_idxs if 0 <= i < len(chunks)])
+        line = f"{len(lines)+1}. {title}"
+        if refs:
+            line += f" {refs}"
+        lines.append(line)
+        lines.append(body)
+    if len(lines) < 4:
+        return None
+    return "\n\n".join(lines).strip()
+
+
+def _build_kb_answer_messages(
+    *,
+    query: str,
+    numbered_context: str,
+    req_top_n: int | None,
+    mode: str,
+    show_sources: bool,
+    sources_format: str,
+    system_prompt_extra: str,
+    history: str,
+    follow_up: bool,
+    use_history: bool,
+    answer_profile: str,
+    answer_style: str,
+) -> tuple[str, str]:
+    system_text = (
+        "Ты помощник базы знаний компании. Отвечай только по контексту. "
+        "Не используй внешние знания, домыслы и общие факты вне контекста. "
+        "Если в контексте нет точного ответа — прямо скажи, какой именно части данных не хватает, "
+        "но сначала извлеки и структурируй все подтвержденные факты из контекста. "
+        "Пиши живым человеческим языком. "
+        "Формат: простой текст, без Markdown, без ** и ###. "
+        "Если нужны шаги — используй нумерацию 1), 2), 3) в одну строку."
+    )
+    if answer_style == "concise":
+        system_text += (
+            " Держи ответ компактным: без длинных вступлений, только суть, 1-2 предложения на мысль."
+        )
+    elif answer_style == "detailed":
+        system_text += (
+            " Давай более развернутый ответ: раскрывай детали и связи между фактами, если они подтверждены контекстом. "
+            "Не перескакивай на общие знания вне контекста."
+        )
+    else:
+        system_text += (
+            " Держи ответ сбалансированным: достаточно подробным, чтобы быть полезным, но без лишней воды."
+        )
+    if answer_profile == "overview":
+        system_text += (
+            " Если вопрос широкий или обзорный, а контекст содержит несколько связанных фактов, "
+            "дай связный обзор: раскрой ключевые сущности, связи между ними и важные детали только из контекста. "
+            "Не придумывай новых персонажей, ролей и событий."
+        )
+    elif answer_profile == "instruction":
+        system_text += (
+            " Если вопрос про настройку, создание, применение или порядок действий, "
+            "дай практический ответ: короткое объяснение и затем шаги 1), 2), 3). "
+            "Если часть шагов не подтверждена в контексте, честно укажи пробел внутри ответа и не заменяй ответ общими рекомендациями."
+        )
+    elif answer_profile == "fact":
+        system_text += (
+            " Если вопрос на точный факт, число или короткое подтверждение, "
+            "отвечай прямо и коротко, без лишней воды."
+        )
+    if answer_profile == "list" and req_top_n and req_top_n > 0:
+        system_text += (
+            f" Пользователь просит список или топ. Постарайся дать до {int(req_top_n)} подтвержденных пунктов из контекста. "
+            "Не заменяй весь ответ отказом, если в контексте есть хотя бы несколько релевантных кандидатов. "
+            "Для каждого пункта дай короткое понятное название и 2-3 предложения по сути, если контекст это позволяет. "
+            "Если точная инструкция не описана, так и напиши внутри конкретного пункта, но не выбрасывай подтвержденный пункт целиком."
+        )
+    if sources_format in ("none", "off", "false") or not show_sources:
+        system_text += " Не упоминай источники, книги, внешние базы и названия документов в ответе."
+    if system_prompt_extra:
+        system_text += " " + system_prompt_extra
+    if mode == "summary":
+        system_text += " Сформируй краткий обзор."
+    elif mode == "faq":
+        system_text += " Сформируй FAQ: 5-10 вопросов и ответы."
+    elif mode == "timeline":
+        system_text += " Сформируй таймлайн (хронологию) по контексту."
+    if history and follow_up and use_history:
+        user_content = f"История диалога:\n{history}\n\nКонтекст:\n{numbered_context}\n\nЗапрос: {query}\nОтвет:"
+    else:
+        user_content = f"Контекст:\n{numbered_context}\n\nЗапрос: {query}\nОтвет:"
+    if req_top_n and req_top_n > 0:
+        user_content += (
+            f"\n\nТребование к форме ответа: дай до {int(req_top_n)} пунктов. "
+            "Если подтверждено меньше пунктов, перечисли подтвержденные и кратко поясни пробелы внутри ответа."
+        )
+    return system_text, user_content
+
+
+def _should_replace_with_claims_answer(
+    query: str,
+    current_answer: str,
+    claims_answer: str | None,
+    chunks: list[dict[str, Any]],
+) -> bool:
+    candidate = str(claims_answer or "").strip()
+    if not candidate:
+        return False
+    current = str(current_answer or "").strip()
+    if not current:
+        return True
+    if (
+        _looks_like_model_disclaimer(current)
+        or _looks_low_quality_answer(current)
+        or _looks_like_generic_non_answer(query, current, chunks)
+        or _looks_like_insufficient_answer(current)
+    ):
+        return True
+    req_top_n = _requested_top_n(query)
+    if req_top_n:
+        current_items = _count_numbered_items(current)
+        candidate_items = _count_numbered_items(candidate)
+        # For list-style questions keep the richer answer shape unless claims mode
+        # clearly preserves at least the same breadth.
+        if current_items >= 2 and candidate_items < current_items:
+            return False
+        if candidate_items >= max(2, current_items):
+            return True
+    return False
+
+
+def _should_replace_with_topn_answer(
+    query: str,
+    current_answer: str,
+    topn_answer: str | None,
+    *,
+    requested_n: int,
+    chunks: list[dict[str, Any]],
+) -> bool:
+    candidate = str(topn_answer or "").strip()
+    if not candidate:
+        return False
+    current = str(current_answer or "").strip()
+    if not current:
+        return True
+    current_items = _count_numbered_items(current)
+    candidate_items = _count_numbered_items(candidate)
+    min_acceptable = max(2, int(requested_n or 0))
+    if current_items >= min_acceptable:
+        # Preserve a healthy list-shaped answer unless it is clearly low-quality.
+        if not (
+            _looks_like_model_disclaimer(current)
+            or _looks_low_quality_answer(current)
+            or _looks_like_generic_non_answer(query, current, chunks)
+            or _looks_like_insufficient_answer(current)
+            or _looks_like_chunk_dump(current)
+        ):
+            return False
+    if candidate_items <= current_items and current_items >= 2:
+        return False
+    return (
+        candidate_items >= min_acceptable
+        or current_items < 2
+        or _looks_low_quality_answer(current)
+        or _looks_like_generic_non_answer(query, current, chunks)
+        or _looks_like_insufficient_answer(current)
+        or _looks_like_chunk_dump(current)
+    )
+
+
+def _looks_like_healthy_topn_answer(
+    query: str,
+    answer: str,
+    *,
+    requested_n: int,
+    chunks: list[dict[str, Any]],
+) -> bool:
+    text = str(answer or "").strip()
+    if not text:
+        return False
+    item_count = _count_numbered_items(text)
+    if item_count < max(3, min(int(requested_n or 0), 5) - 1):
+        return False
+    if (
+        _looks_like_model_disclaimer(text)
+        or _looks_low_quality_answer(text)
+        or _looks_like_generic_non_answer(query, text, chunks)
+        or _looks_like_insufficient_answer(text)
+        or _looks_like_chunk_dump(text)
+    ):
+        return False
+    return True
+
+
+def _should_replace_with_entity_list_answer(
+    query: str,
+    current_answer: str,
+    entity_answer: str | None,
+    *,
+    requested_n: int,
+    chunks: list[dict[str, Any]],
+) -> bool:
+    candidate = str(entity_answer or "").strip()
+    if not candidate:
+        return False
+    current = str(current_answer or "").strip()
+    candidate_items = _count_numbered_items(candidate)
+    current_items = _count_numbered_items(current)
+    if candidate_items < max(2, min(int(requested_n or 0), 5) - 1):
+        return False
+    insuff_markers = (
+        "отсутствует исчерпывающая информация",
+        "хотя достоверной информации",
+        "хотя полной информации",
+        "нельзя точно определить",
+        "необходимы дополнительные сведения",
+        "данных недостаточно",
+    )
+    current_low = (
+        not current
+        or _looks_like_model_disclaimer(current)
+        or _looks_like_generic_non_answer(query, current, chunks)
+        or _looks_like_insufficient_answer(current)
+        or any(m in current.lower() for m in insuff_markers)
+    )
+    if current_low:
+        return True
+    return candidate_items > current_items
+
+
+def _strip_topn_caveat_paragraphs(answer: str, requested_n: int | None) -> str:
+    text = str(answer or "").strip()
+    if not text or not requested_n:
+        return text
+    if _count_numbered_items(text) < 2:
+        return text
+    caveat_markers = (
+        "отсутствует исчерпывающая информация",
+        "хотя достоверной информации",
+        "хотя полной информации",
+        "нельзя точно определить",
+        "необходимы дополнительные сведения",
+        "данных недостаточно",
+        "не хватает данных",
+        "для полноценного рейтинга",
+        "чтобы сформировать полноценный список",
+    )
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if not paragraphs:
+        return text
+    while paragraphs and not re.match(r"^\s*\d+[\)\.]\s+", paragraphs[0]):
+        low = paragraphs[0].lower()
+        if any(marker in low for marker in caveat_markers):
+            paragraphs.pop(0)
+            continue
+        break
+    while paragraphs and not re.match(r"^\s*\d+[\)\.]\s+", paragraphs[-1]):
+        low = paragraphs[-1].lower()
+        if any(marker in low for marker in caveat_markers):
+            paragraphs.pop()
+            continue
+        break
+    return "\n\n".join(paragraphs).strip() or text
+
+
 def _style_rewrite_answer(
     *,
     query: str,
@@ -814,9 +1549,450 @@ def _style_rewrite_answer(
         return None
     # Guardrail: if rewritten drops all query keywords, keep factual answer.
     qk = _expand_query_keywords(_extract_keywords(query))
-    if qk and _keyword_hits(rewritten, qk) == 0:
+    if qk and _keyword_hits(rewritten, qk) == 0 and _count_numbered_items(rewritten) < _count_numbered_items(base):
         return None
     return rewritten
+
+
+def _style_rewrite_topn_answer(
+    *,
+    query: str,
+    factual_answer: str,
+    requested_n: int,
+    chunks: list[dict[str, Any]],
+    api_base: str,
+    token: str,
+    chat_model: str,
+    max_tokens: int,
+    top_p: Any,
+    presence_penalty: Any,
+    frequency_penalty: Any,
+) -> str | None:
+    base = (factual_answer or "").strip()
+    if not base or _count_numbered_items(base) < 2:
+        return None
+    ctx_parts: list[str] = []
+    for i, c in enumerate(chunks[:6], start=1):
+        txt = str(c.get("text") or "").strip()
+        if not txt:
+            continue
+        if len(txt) > 220:
+            txt = txt[:220].rstrip() + "..."
+        ctx_parts.append(f"[{i}] {txt}")
+    context = "\n".join(ctx_parts)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты редактор ответа по базе знаний. Твоя задача - только улучшить читаемость уже проверенного списка. "
+                "Строго запрещено добавлять новые факты, новые пункты, новые числа, новые имена и менять порядок пунктов. "
+                "Сохрани нумерованный список. Для каждого пункта оставь короткое название и 1-2 предложения по сути. "
+                "Если список уже содержит полезные пункты, убери лишние вводные и финальные оговорки. "
+                "Формат: обычный текст без markdown."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Вопрос: {query}\n"
+                f"Нужно сохранить список до {int(requested_n)} пунктов в том же порядке.\n\n"
+                f"Проверенный фактический ответ:\n{base}\n\n"
+                f"Контекст для контроля:\n{context}\n\n"
+                "Сделай более чистую и понятную редакцию ответа:"
+            ),
+        },
+    ]
+    out, err, _u = chat_complete(
+        api_base,
+        token,
+        chat_model,
+        messages,
+        temperature=0.05,
+        max_tokens=max(250, min(max_tokens, 1400)),
+        top_p=top_p,
+        presence_penalty=presence_penalty,
+        frequency_penalty=frequency_penalty,
+    )
+    if err or not out:
+        return None
+    rewritten = _strip_markdown_basic(str(out).strip())
+    if not rewritten:
+        return None
+    if _count_numbered_items(rewritten) < max(2, min(_count_numbered_items(base), int(requested_n or 0))):
+        return None
+    qk = _expand_query_keywords(_extract_keywords(query))
+    if qk and _keyword_hits(rewritten, qk) == 0 and _count_numbered_items(rewritten) < _count_numbered_items(base):
+        return None
+    return rewritten
+
+
+def _noninitial_capitalized_tokens(text: str) -> set[str]:
+    out: set[str] = set()
+    for sent in re.split(r"(?<=[\.\!\?\n])\s+", str(text or "").strip()):
+        words = re.findall(r"[A-Za-zА-ЯЁа-яё][A-Za-zА-ЯЁа-яё\-]{2,}", sent)
+        for idx, w in enumerate(words):
+            if idx == 0:
+                continue
+            if re.match(r"^[A-ZА-ЯЁ][a-zа-яё\-]+$", w):
+                out.add(w)
+    return out
+
+
+def _has_unseen_named_entities(text: str, allowed_text: str) -> bool:
+    allowed_caps = _noninitial_capitalized_tokens(allowed_text)
+    text_caps = _noninitial_capitalized_tokens(text)
+    return any(tok not in allowed_caps for tok in text_caps)
+
+
+def _expand_short_grounded_answer(
+    *,
+    query: str,
+    factual_answer: str,
+    chunks: list[dict[str, Any]],
+    api_base: str,
+    token: str,
+    chat_model: str,
+    max_tokens: int,
+    top_p: Any,
+    presence_penalty: Any,
+    frequency_penalty: Any,
+) -> str | None:
+    base = (factual_answer or "").strip()
+    if not base:
+        return None
+    snippets = _build_grounded_windows(query, chunks, limit=6, neighbor_radius=1)
+    if not snippets:
+        return None
+    ctx_parts = [f"[{i}] {txt}" for i, txt in enumerate(snippets, start=1)]
+    if not ctx_parts:
+        return None
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты расширяешь краткий ответ по базе знаний. "
+                "Строго запрещено добавлять факты, которых нет в контексте. "
+                "Нужно сделать ответ содержательнее и полезнее: раскрыть связанные сущности, важные детали и контекст, "
+                "если они явно подтверждаются фрагментами. "
+                "Не добавляй новые имена, персонажей, сущности или роли, если их нет в подтвержденных фрагментах. "
+                "Формат: 2-4 абзаца обычного текста без markdown."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Вопрос: {query}\n\n"
+                f"Текущий краткий ответ:\n{base}\n\n"
+                f"Подтвержденные фрагменты:\n" + "\n\n".join(ctx_parts) + "\n\n"
+                "Сделай ответ более полным, но не выходи за пределы подтвержденных фактов:"
+            ),
+        },
+    ]
+    out, err, _u = chat_complete(
+        api_base,
+        token,
+        chat_model,
+        messages,
+        temperature=0.08,
+        max_tokens=max(280, min(max_tokens, 1400)),
+        top_p=top_p,
+        presence_penalty=presence_penalty,
+        frequency_penalty=frequency_penalty,
+    )
+    if err or not out:
+        return None
+    rewritten = _strip_markdown_basic(str(out).strip())
+    if not rewritten:
+        return None
+    if _looks_like_model_disclaimer(rewritten) or _looks_like_insufficient_answer(rewritten):
+        return None
+    qk = _expand_query_keywords(_extract_keywords(query))
+    if qk and _keyword_hits(rewritten, qk) == 0:
+        return None
+    if _has_unseen_named_entities(rewritten, " ".join(ctx_parts) + " " + query + " " + base):
+        return None
+    return rewritten
+
+
+def _build_grounded_overview_answer(
+    *,
+    query: str,
+    chunks: list[dict[str, Any]],
+    current_answer: str,
+    api_base: str,
+    token: str,
+    chat_model: str,
+    max_tokens: int,
+    top_p: Any,
+    presence_penalty: Any,
+    frequency_penalty: Any,
+) -> str | None:
+    snippets = _build_grounded_windows(query, chunks, limit=7, neighbor_radius=1)
+    if len(snippets) < 1:
+        return None
+    ctx = "\n\n".join([f"[{i}] {txt}" for i, txt in enumerate(snippets, start=1)])
+    base = (current_answer or "").strip()
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты делаешь обзорный ответ по базе знаний только на основе подтвержденных фрагментов. "
+                "Нужно дать обзорный ответ: кто или что является главным в вопросе, какие есть связанные сущности, "
+                "что между ними происходит и какие важные детали прямо подтверждаются фрагментами. "
+                "Сначала группируй связанные факты вокруг одних и тех же сущностей, потом формулируй ответ. "
+                "Не придумывай новые имена, персонажей, роли, события или выводы, которых нет в фрагментах. "
+                "Не делай искусственный список, если вопрос просит обзор. "
+                "Формат: обычный связный текст без markdown."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Вопрос: {query}\n\n"
+                f"Текущий ответ:\n{base}\n\n"
+                f"Подтвержденные фрагменты:\n{ctx}\n\n"
+                "Собери более полный обзорный ответ:"
+            ),
+        },
+    ]
+    out, err, _u = chat_complete(
+        api_base,
+        token,
+        chat_model,
+        messages,
+        temperature=0.06,
+        max_tokens=max(320, min(max_tokens, 1400)),
+        top_p=top_p,
+        presence_penalty=presence_penalty,
+        frequency_penalty=frequency_penalty,
+    )
+    if err or not out:
+        return None
+    rewritten = _strip_markdown_basic(str(out).strip())
+    if not rewritten:
+        return None
+    if _looks_like_model_disclaimer(rewritten) or _looks_like_insufficient_answer(rewritten):
+        return None
+    if _count_numbered_items(rewritten) >= 2:
+        return None
+    qk = _expand_query_keywords(_extract_keywords(query))
+    if qk and _keyword_hits(rewritten, qk) == 0:
+        return None
+    if _has_unseen_named_entities(rewritten, ctx + " " + query + " " + base):
+        return None
+    if len(rewritten) < max(140, int(len(base) * 1.15)):
+        return None
+    return rewritten
+
+
+def _build_grounded_instruction_answer(
+    *,
+    query: str,
+    chunks: list[dict[str, Any]],
+    api_base: str,
+    token: str,
+    chat_model: str,
+    max_tokens: int,
+    top_p: Any,
+    presence_penalty: Any,
+    frequency_penalty: Any,
+) -> str | None:
+    snippets = _build_grounded_windows(query, chunks, limit=6, neighbor_radius=1)
+    if not snippets:
+        return None
+    ctx = "\n\n".join([f"[{i}] {txt}" for i, txt in enumerate(snippets, start=1)])
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты составляешь практический ответ только по подтвержденным фрагментам базы знаний. "
+                "Если в контексте есть явные шаги или порядок действий - оформи их как 1), 2), 3). "
+                "Если явных шагов нет, дай краткое объяснение и перечисли только подтвержденные действия или условия. "
+                "Строго запрещено добавлять внешние best practices, общие рекомендации и новые сущности, которых нет во фрагментах. "
+                "Формат: обычный текст без markdown."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Вопрос: {query}\n\nПодтвержденные фрагменты:\n{ctx}\n\nСформируй практический grounded-ответ:",
+        },
+    ]
+    if _is_product_settings_query(query):
+        messages[0]["content"] += (
+            " Если запрос относится к продукту, настройкам, доступам или разделам интерфейса, "
+            "описывай только те элементы интерфейса, действия и ограничения, которые прямо подтверждены фрагментами. "
+            "Не подменяй ответ общими советами по организации документов, ролей или процессов."
+        )
+    out, err, _u = chat_complete(
+        api_base,
+        token,
+        chat_model,
+        messages,
+        temperature=0.05,
+        max_tokens=max(240, min(max_tokens, 1200)),
+        top_p=top_p,
+        presence_penalty=presence_penalty,
+        frequency_penalty=frequency_penalty,
+    )
+    if err or not out:
+        return None
+    rewritten = _strip_markdown_basic(str(out).strip())
+    if not rewritten or _looks_like_model_disclaimer(rewritten) or _looks_like_insufficient_answer(rewritten):
+        return None
+    qk = _expand_query_keywords(_extract_keywords(query))
+    if qk and _keyword_hits(rewritten, qk) == 0:
+        return None
+    if _has_unseen_named_entities(rewritten, ctx + " " + query):
+        return None
+    return rewritten
+
+
+def _build_grounded_snippets(query: str, chunks: list[dict[str, Any]], *, limit: int = 8) -> list[str]:
+    if not chunks:
+        return []
+    qk = _expand_query_keywords(_extract_keywords(query))
+    if not qk:
+        qk = _extract_keywords(query)
+    scored: list[tuple[float, str]] = []
+    seen: set[str] = set()
+    for c in chunks[:14]:
+        txt = str(c.get("text") or "").strip()
+        if not txt:
+            continue
+        src_score = float(c.get("_score") or 0.0)
+        for sent in _split_sentences(txt):
+            low = sent.lower().strip()
+            if len(low) < 24:
+                continue
+            if _is_noise_chunk_text(low):
+                continue
+            line_hits = _keyword_hits(low, qk)
+            if qk and line_hits <= 0:
+                continue
+            key = re.sub(r"\s+", " ", low)
+            if key in seen:
+                continue
+            seen.add(key)
+            score = float(line_hits * 3) + src_score
+            if re.search(r"\d+(?:[.,]\d+)?", low):
+                score += 1.5
+            scored.append((score, sent.strip()))
+    if not scored:
+        return []
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [s for _sc, s in scored[: max(3, limit)]]
+
+
+def _build_grounded_windows(
+    query: str,
+    chunks: list[dict[str, Any]],
+    *,
+    limit: int = 6,
+    neighbor_radius: int = 1,
+) -> list[str]:
+    if not chunks:
+        return []
+    qk = _expand_query_keywords(_extract_keywords(query))
+    if not qk:
+        qk = _extract_keywords(query)
+    scored: list[tuple[float, str]] = []
+    seen: set[str] = set()
+    for c in chunks[:12]:
+        txt = str(c.get("text") or "").strip()
+        if not txt:
+            continue
+        sentences = _split_sentences(txt)
+        if not sentences:
+            continue
+        src_score = float(c.get("_score") or 0.0)
+        meta = " ".join(
+            [
+                str(c.get("filename") or "").strip(),
+                str(c.get("source_title") or "").strip(),
+                str(c.get("file_summary") or "").strip(),
+            ]
+        ).strip()
+        for idx, sent in enumerate(sentences):
+            low = sent.lower().strip()
+            if len(low) < 24 or _is_noise_chunk_text(low):
+                continue
+            hits = _keyword_hits(low, qk)
+            if qk and hits <= 0:
+                continue
+            left = max(0, idx - max(0, neighbor_radius))
+            right = min(len(sentences), idx + max(0, neighbor_radius) + 1)
+            window = " ".join(s.strip() for s in sentences[left:right] if s.strip()).strip()
+            if meta:
+                window = f"{meta}. {window}".strip()
+            key = re.sub(r"\s+", " ", window.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            score = float(hits * 3) + src_score + (_keyword_hits(meta, qk) * 1.5)
+            if re.search(r"\d+(?:[.,]\d+)?", low):
+                score += 1.0
+            scored.append((score, window))
+    if not scored:
+        return []
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [s for _sc, s in scored[: max(2, limit)]]
+
+
+def _grounded_synthesis_answer(
+    *,
+    query: str,
+    chunks: list[dict[str, Any]],
+    api_base: str,
+    token: str,
+    chat_model: str,
+    max_tokens: int,
+    top_p: Any,
+    presence_penalty: Any,
+    frequency_penalty: Any,
+) -> str | None:
+    snippets = _build_grounded_snippets(query, chunks, limit=9)
+    if not snippets:
+        return None
+    evidence_lines = "\n".join([f"- {s}" for s in snippets])
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты редактор ответов по базе знаний. "
+                "Отвечай ТОЛЬКО на основе приведенных фрагментов. "
+                "Запрещено добавлять факты, которых нет во фрагментах. "
+                "Если данных недостаточно, так и напиши кратко. "
+                "Без markdown, без дисклеймеров про модель, без 'как языковая модель'."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Запрос: {query}\n\n"
+                f"Фактические фрагменты:\n{evidence_lines}\n\n"
+                "Сформируй связный ответ для пользователя:"
+            ),
+        },
+    ]
+    out, err, _u = chat_complete(
+        api_base,
+        token,
+        chat_model,
+        messages,
+        temperature=0.1,
+        max_tokens=max(220, min(max_tokens, 1200)),
+        top_p=top_p,
+        presence_penalty=presence_penalty,
+        frequency_penalty=frequency_penalty,
+    )
+    if err or not out:
+        return None
+    text = _strip_markdown_basic(str(out).strip())
+    if not text:
+        return None
+    if _looks_like_model_disclaimer(text):
+        return None
+    return text
 
 
 def _normalize_answer_readability(text: str) -> str:
@@ -826,9 +2002,19 @@ def _normalize_answer_readability(text: str) -> str:
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     if not lines:
         return ""
-    # Keep explicit list formatting as is.
+    # Keep explicit list formatting, but renumber numeric lists sequentially
+    # after grounding (items may be dropped, leaving gaps like 4., 5.).
     if any(re.match(r"^\s*(\d+[\)\.]|[-*•])\s+", ln) for ln in lines):
-        return "\n".join(lines)
+        out_lines: list[str] = []
+        idx = 1
+        for ln in lines:
+            m = re.match(r"^\s*(\d+)([\)\.])\s+(.*)$", ln)
+            if m:
+                out_lines.append(f"{idx}{m.group(2)} {m.group(3).strip()}")
+                idx += 1
+            else:
+                out_lines.append(ln)
+        return "\n".join(out_lines)
     joined = re.sub(r"\s+", " ", " ".join(lines)).strip()
     if len(joined) <= 240:
         return joined
@@ -874,6 +2060,32 @@ def _looks_like_insufficient_answer(text: str) -> bool:
         "в предоставленном контексте",
     )
     return any(m in t for m in markers)
+
+
+def _requested_top_n(query: str) -> int | None:
+    q = (query or "").lower()
+    if not q:
+        return None
+    patterns = (
+        r"\bтоп\s*(\d{1,2})\b",
+        r"\b(\d{1,2})\s+сам(ых|ые|ый)\b",
+        r"\bдай\s+(\d{1,2})\b",
+    )
+    for p in patterns:
+        m = re.search(p, q)
+        if m:
+            try:
+                n = int(m.group(1))
+                if 1 <= n <= 20:
+                    return n
+            except Exception:
+                pass
+    return None
+
+
+def _count_numbered_items(text: str) -> int:
+    lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+    return sum(1 for ln in lines if re.match(r"^\s*\d+[\)\.]\s+", ln))
 
 
 def _chunks_have_concrete_evidence(query: str, chunks: list[dict[str, Any]]) -> bool:
@@ -1054,7 +2266,13 @@ def _render_claim_context(chunks: list[dict[str, Any]]) -> str:
     return "\n\n".join(out)
 
 
-def _rerank_candidates(query: str, candidates: list[dict[str, Any]], *, top_k: int) -> list[dict[str, Any]]:
+def _rerank_candidates(
+    query: str,
+    candidates: list[dict[str, Any]],
+    *,
+    top_k: int,
+    list_intent: bool = False,
+) -> list[dict[str, Any]]:
     if not candidates:
         return []
     qk = _extract_keywords(query)
@@ -1115,11 +2333,24 @@ def _rerank_candidates(query: str, candidates: list[dict[str, Any]], *, top_k: i
                 file_diversity_bonus -= 0.01
         if idx == 0:
             file_diversity_bonus += 0.02
+        sem_weight = 0.72
+        body_weight = 0.16
+        meta_weight = 0.22
+        file_weight = 0.30
+        if list_intent:
+            sem_weight = 0.58
+            body_weight = 0.24
+            meta_weight = 0.28
+            file_weight = 0.34
+            if body_hits >= 2:
+                focus_bonus += 0.08
+            if meta_hits >= 1 or file_hits >= 1:
+                focus_bonus += 0.06
         final = (
-            (sem * 0.72)
-            + (body_hits * 0.16)
-            + (meta_hits * 0.22)
-            + (file_hits * 0.30)
+            (sem * sem_weight)
+            + (body_hits * body_weight)
+            + (meta_hits * meta_weight)
+            + (file_hits * file_weight)
             + focus_bonus
             + file_diversity_bonus
             + entity_bonus
@@ -1132,9 +2363,78 @@ def _rerank_candidates(query: str, candidates: list[dict[str, Any]], *, top_k: i
     return [c for _s, c in ranked[: max(1, top_k)]]
 
 
+def _diversify_top_chunks_by_file(
+    chunks: list[dict[str, Any]],
+    *,
+    top_k: int,
+    max_per_file: int = 2,
+) -> list[dict[str, Any]]:
+    if not chunks:
+        return []
+    limit = max(1, int(top_k or 1))
+    per_file_limit = max(1, int(max_per_file or 1))
+    effective_limit = per_file_limit
+
+    # If top evidence is clearly concentrated in one file, keep more chunks from it.
+    # This prevents single-document questions from losing the strongest evidence
+    # only because of an overly rigid per-file cap.
+    head = chunks[: max(limit * 2, 6)]
+    dominant_file_id: int | None = None
+    dominant_count = 0
+    head_counts: dict[int, int] = {}
+    for c in head:
+        fid = c.get("file_id")
+        if not isinstance(fid, int):
+            continue
+        cnt = head_counts.get(fid, 0) + 1
+        head_counts[fid] = cnt
+        if cnt > dominant_count:
+            dominant_count = cnt
+            dominant_file_id = fid
+
+    if dominant_file_id is not None and dominant_count >= max(3, min(limit, 4)):
+        dominant_scores = [
+            float(c.get("_score") or 0.0)
+            for c in head
+            if c.get("file_id") == dominant_file_id
+        ]
+        other_scores = [
+            float(c.get("_score") or 0.0)
+            for c in head
+            if isinstance(c.get("file_id"), int) and c.get("file_id") != dominant_file_id
+        ]
+        dominant_avg = (sum(dominant_scores) / len(dominant_scores)) if dominant_scores else 0.0
+        other_avg = (sum(other_scores) / len(other_scores)) if other_scores else 0.0
+        if not other_scores or dominant_avg >= (other_avg - 0.03):
+            effective_limit = max(per_file_limit, min(limit, 4))
+
+    out: list[dict[str, Any]] = []
+    file_counts: dict[int, int] = {}
+    skipped: list[dict[str, Any]] = []
+
+    for c in chunks:
+        fid = c.get("file_id")
+        if isinstance(fid, int):
+            cnt = file_counts.get(fid, 0)
+            if cnt < effective_limit:
+                out.append(c)
+                file_counts[fid] = cnt + 1
+            else:
+                skipped.append(c)
+        else:
+            out.append(c)
+        if len(out) >= limit:
+            return out[:limit]
+
+    if len(out) < limit:
+        need = limit - len(out)
+        out.extend(skipped[:need])
+    return out[:limit]
+
+
 def _build_file_summaries(scored: list[tuple[float, bool, dict[str, Any]]]) -> dict[int, str]:
     out: dict[int, str] = {}
-    for _score, _is_lex, item in scored:
+    for _score, _is_lex, item in scored[:120]:
         fid = item.get("file_id")
         if not isinstance(fid, int) or fid in out:
             continue
@@ -1231,15 +2531,45 @@ def _build_line_refs(answer: str, source_items: list[dict[str, Any]], query: str
     qk = _expand_query_keywords(_extract_keywords(query or ""))
     has_list = any(re.match(r"^\s*(\d+[\)\.]|[-*•])\s+", (ln or "").strip()) for ln in lines)
     refs: dict[str, list[int]] = {}
+    non_empty_lines: list[int] = []
+    current_item_refs: list[int] = []
+    current_item_k: list[str] = []
+
+    def _top_ref_indexes(scored_pairs: list[tuple[float, int]], max_refs: int = 3) -> list[int]:
+        if not scored_pairs:
+            return []
+        scored_pairs.sort(key=lambda x: (-x[0], x[1]))
+        best = scored_pairs[0][0]
+        cutoff = max(2.2, best * 0.6)
+        picked: list[int] = []
+        used: set[int] = set()
+        for sc, si in scored_pairs:
+            if sc < cutoff:
+                continue
+            if si in used:
+                continue
+            used.add(si)
+            picked.append(si)
+            if len(picked) >= max_refs:
+                break
+        return picked
+
     for i, ln in enumerate(lines):
         t = (ln or "").strip()
         if not t:
             continue
-        if has_list and (not re.match(r"^\s*(\d+[\)\.]|[-*•])\s+", t)) and len(t) < 40:
+        non_empty_lines.append(i)
+        is_item_title = bool(re.match(r"^\s*(\d+[\)\.]|[-*•])\s+", t))
+        if has_list and (not is_item_title) and len(t) < 40:
             # In mixed answers (list + paragraphs) keep only meaningful paragraphs.
             continue
         line_k = _expand_query_keywords(_extract_keywords(t))
-        if not line_k:
+        if is_item_title:
+            current_item_k = line_k[:]
+        effective_k = line_k[:]
+        if has_list and not is_item_title and current_item_k:
+            effective_k = list(dict.fromkeys(current_item_k + effective_k))
+        if not effective_k:
             continue
         scored: list[tuple[float, int]] = []
         for si, s in enumerate(source_items):
@@ -1250,24 +2580,54 @@ def _build_line_refs(answer: str, source_items: list[dict[str, Any]], query: str
                     str(s.get("source_title") or ""),
                 ]
             )
-            line_hits = _keyword_hits(text_scope, line_k)
+            line_hits = _keyword_hits(text_scope, effective_k)
             query_hits = _keyword_hits(text_scope, qk)
-            meta_hits = _keyword_hits(meta_scope, line_k)
+            meta_hits = _keyword_hits(meta_scope, effective_k)
             src_score = float(s.get("score") or 0.0)
             # hybrid ranking: line relevance + query relevance + source retrieval weight
             score = (line_hits * 3.0) + (query_hits * 1.5) + (meta_hits * 0.5) + (src_score * 2.0)
             if score >= 2.2:
                 scored.append((score, si))
         if not scored:
+            if has_list and (not is_item_title) and current_item_refs:
+                refs[str(i)] = current_item_refs[:]
             continue
-        scored.sort(key=lambda x: (-x[0], x[1]))
-        best = scored[0][0]
-        cutoff = max(2.2, best * 0.5)
-        refs[str(i)] = [si for sc, si in scored if sc >= cutoff]
+        mapped = _top_ref_indexes(scored, max_refs=3)
+        if mapped:
+            refs[str(i)] = mapped
+            if is_item_title:
+                current_item_refs = mapped[:]
+    # Fallback for short "insufficient evidence" answers: attach strongest query-relevant sources
+    # so inline [n] links still open the best evidence instead of showing nothing.
+    if not refs and source_items and non_empty_lines:
+        q_line = (query or "").strip()
+        qk2 = _expand_query_keywords(_extract_keywords(q_line))
+        scored_global: list[tuple[float, int]] = []
+        for si, s in enumerate(source_items):
+            text_scope = str(s.get("text") or "")
+            meta_scope = " ".join(
+                [
+                    str(s.get("filename") or ""),
+                    str(s.get("source_title") or ""),
+                ]
+            )
+            score = (_keyword_hits(text_scope, qk2) * 3.0) + (_keyword_hits(meta_scope, qk2) * 1.8) + (float(s.get("score") or 0.0) * 2.0)
+            if score > 0:
+                scored_global.append((score, si))
+        if scored_global:
+            scored_global.sort(key=lambda x: (-x[0], x[1]))
+            top = [idx for _sc, idx in scored_global[: min(4, len(scored_global))]]
+            refs[str(non_empty_lines[0])] = top
     return refs
 
 
-def _prune_sources_by_line_refs(source_items: list[dict[str, Any]], line_refs: dict[str, list[int]], *, max_items: int = 12) -> list[dict[str, Any]]:
+def _prune_sources_by_line_refs(
+    source_items: list[dict[str, Any]],
+    line_refs: dict[str, list[int]],
+    *,
+    max_items: int = 12,
+    include_unreferenced: bool = True,
+) -> list[dict[str, Any]]:
     if not source_items:
         return []
     ordered: list[int] = []
@@ -1285,7 +2645,7 @@ def _prune_sources_by_line_refs(source_items: list[dict[str, Any]], line_refs: d
     if not ordered:
         return source_items[:max_items]
     out = [source_items[i] for i in ordered]
-    if len(out) < max_items:
+    if include_unreferenced and len(out) < max_items:
         for i, item in enumerate(source_items):
             if i in seen:
                 continue
@@ -1293,6 +2653,71 @@ def _prune_sources_by_line_refs(source_items: list[dict[str, Any]], line_refs: d
             if len(out) >= max_items:
                 break
     return out[:max_items]
+
+
+def _prune_sources_with_line_ref_remap(
+    source_items: list[dict[str, Any]],
+    line_refs: dict[str, list[int]],
+    *,
+    max_items: int = 12,
+    include_unreferenced: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, list[int]]]:
+    if not source_items:
+        return [], {}
+    if not line_refs:
+        pruned = _prune_sources_by_line_refs(
+            source_items,
+            line_refs,
+            max_items=max_items,
+            include_unreferenced=include_unreferenced,
+        )
+        return pruned, {}
+
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for refs in line_refs.values():
+        for idx in refs:
+            if not isinstance(idx, int):
+                continue
+            if idx < 0 or idx >= len(source_items):
+                continue
+            if idx in seen:
+                continue
+            seen.add(idx)
+            ordered.append(idx)
+
+    if not ordered:
+        pruned = source_items[:max_items]
+        return pruned, {}
+
+    keep_indexes = ordered[:]
+    if include_unreferenced and len(keep_indexes) < max_items:
+        for i in range(len(source_items)):
+            if i in seen:
+                continue
+            keep_indexes.append(i)
+            if len(keep_indexes) >= max_items:
+                break
+    keep_indexes = keep_indexes[:max_items]
+
+    old_to_new = {old: new for new, old in enumerate(keep_indexes)}
+    pruned = [source_items[i] for i in keep_indexes]
+
+    remapped: dict[str, list[int]] = {}
+    for line_no, refs in line_refs.items():
+        mapped: list[int] = []
+        used_new: set[int] = set()
+        for old_idx in refs:
+            new_idx = old_to_new.get(old_idx)
+            if new_idx is None:
+                continue
+            if new_idx in used_new:
+                continue
+            used_new.add(new_idx)
+            mapped.append(new_idx)
+        if mapped:
+            remapped[line_no] = mapped
+    return pruned, remapped
 
 
 def _is_follow_up(text: str) -> bool:
@@ -1378,10 +2803,21 @@ def answer_from_kb(
         return None, "empty_query", None
     if _is_greeting(query):
         return "Привет! Чем могу помочь по вашей базе знаний?", None, None
+    arithmetic_answer = _evaluate_simple_arithmetic(query)
+    if arithmetic_answer:
+        return arithmetic_answer, None, {
+            "used_chunks": [],
+            "sources": [],
+            "confidence": 1.0,
+            "evidence_count": 0,
+            "top_chunks": [],
+            "line_refs": {},
+        }
     mode = _trigger_mode(query)
     settings = get_effective_gigachat_settings(db, portal_id)
     preset = (settings.get("prompt_preset") or "").strip().lower()
-    if preset and preset != "auto":
+    answer_style = _answer_style_from_preset(preset)
+    if preset in {"summary", "faq", "timeline"}:
         mode = preset
     embed_model = (settings.get("embedding_model") or settings.get("model") or "").strip()
     chat_model = (settings.get("chat_model") or "").strip()
@@ -1406,7 +2842,6 @@ def answer_from_kb(
     use_history = bool(settings.get("use_history")) if settings.get("use_history") is not None else True
     use_cache = bool(settings.get("use_cache")) if settings.get("use_cache") is not None else True
     rag_v2_enabled = bool(settings.get("rag_v2_enabled")) if settings.get("rag_v2_enabled") is not None else False
-    style_pass_enabled = bool(settings.get("style_pass_enabled")) if settings.get("style_pass_enabled") is not None else True
     system_prompt_extra = (settings.get("system_prompt_extra") or "").strip()
     show_sources = bool(settings.get("show_sources")) if settings.get("show_sources") is not None else True
     sources_format = (settings.get("sources_format") or "detailed").strip().lower()
@@ -1445,8 +2880,6 @@ def answer_from_kb(
         sources_format = str(overrides.get("sources_format") or "none").strip().lower()
     if overrides.get("rag_v2_enabled") is not None:
         rag_v2_enabled = bool(overrides.get("rag_v2_enabled"))
-    if overrides.get("style_pass_enabled") is not None:
-        style_pass_enabled = bool(overrides.get("style_pass_enabled"))
     import logging
     logging.getLogger(__name__).warning(
         "kb_rag_models portal_id=%s embed=%s chat=%s api_base=%s",
@@ -1611,15 +3044,32 @@ def answer_from_kb(
                     "source_title": source_title or "",
                 }
             ))
-    _append_lexical_recall_rows(
-        db,
-        portal_id=portal_id,
-        audience=aud,
-        keywords=keywords,
-        scored=scored,
-        limit=max(300, retrieval_top_k * 80),
-        file_ids_filter=scoped_ids,
-    )
+    lexical_seed = 0
+    for _s, is_lex, it in scored[: max(16, retrieval_top_k * 3)]:
+        if is_lex:
+            lexical_seed += 1
+            continue
+        probe_text = str(it.get("text") or "")
+        probe_meta = " ".join(
+            [
+                str(it.get("filename") or ""),
+                str(it.get("source_title") or ""),
+                str(it.get("source_url") or ""),
+            ]
+        )
+        if (_keyword_hits(probe_text, keywords) + _keyword_hits(probe_meta, keywords)) > 0:
+            lexical_seed += 1
+    required_lexical_seed = 1 if len(scored) <= max(8, retrieval_top_k * 2) else max(2, min(6, retrieval_top_k))
+    if lexical_seed < required_lexical_seed:
+        _append_lexical_recall_rows(
+            db,
+            portal_id=portal_id,
+            audience=aud,
+            keywords=keywords,
+            scored=scored,
+            limit=max(120, retrieval_top_k * 24),
+            file_ids_filter=scoped_ids,
+        )
     if not scored:
         return None, "kb_empty", None
     file_summaries = _build_file_summaries(scored)
@@ -1681,7 +3131,17 @@ def answer_from_kb(
 
     if not relevant_scored:
         if strict_mode:
-            usage = {"sources": [], "reason": "low_relevance_context"}
+            usage = {
+                "sources": [],
+                "reason": "low_relevance_context",
+                "rag_debug": {
+                    "strict_mode": bool(strict_mode),
+                    "query_keywords": keywords[:16],
+                    "retrieval_min_score": float(adaptive_min_score),
+                    "candidate_count": int(len(scored)),
+                    "relevant_count": 0,
+                },
+            }
             return "В базе знаний не найдено достаточно релевантной информации по запросу. Уточните вопрос или загрузите материалы по этой теме.", None, usage
         relevant_scored = scored
 
@@ -1690,7 +3150,13 @@ def answer_from_kb(
     if "собери" in query.lower() or "всю информацию" in query.lower():
         top_k = max(8, retrieval_top_k)
         max_chars = max(6000, retrieval_max_chars)
-    candidate_pool = [t for _s, _is_lex, t in relevant_scored[: max(20, top_k * 4)]]
+    req_top_n = _requested_top_n(query)
+    list_intent = bool(req_top_n and not numeric_query)
+    answer_profile = _detect_answer_profile(query, req_top_n=req_top_n, numeric_query=numeric_query)
+    if req_top_n and not numeric_query:
+        top_k = max(top_k, min(16, max(10, req_top_n * 3)))
+        max_chars = max(max_chars, 8000)
+    candidate_pool = [t for _s, _is_lex, t in relevant_scored[: max(20, top_k * (6 if list_intent else 4))]]
     if keywords:
         if numeric_query:
             lex = [t for _s, _is_lex, t in relevant_scored if int(t.get("_keyword_hits") or 0) > 0][: min(8, max(8, top_k))]
@@ -1698,10 +3164,12 @@ def answer_from_kb(
             lex = [t for _s, is_lex, t in relevant_scored if is_lex][: min(8, max(8, top_k))]
         sem = [t for t in candidate_pool if t not in lex]
         candidate_pool = lex + sem
-    top_chunks = _rerank_candidates(query, candidate_pool, top_k=top_k)
+    top_chunks = _rerank_candidates(query, candidate_pool, top_k=top_k, list_intent=list_intent)
     if follow_up and cached_chunk_ids and use_cache:
         cached = [t for _s, _is_lex, t in relevant_scored if t.get("chunk_id") in cached_chunk_ids]
-        top_chunks = _rerank_candidates(query, cached + top_chunks, top_k=top_k)
+        top_chunks = _rerank_candidates(query, cached + top_chunks, top_k=top_k, list_intent=list_intent)
+    # Keep retrieval diversified so one file does not dominate all evidence slots.
+    top_chunks = _diversify_top_chunks_by_file(top_chunks, top_k=top_k, max_per_file=(4 if list_intent else 2))
     context, used_chunks = _build_context(top_chunks, max_chars=max_chars)
     conf, evidence = _retrieval_confidence(
         top_chunks,
@@ -1715,6 +3183,27 @@ def answer_from_kb(
             "confidence": conf,
             "confidence_min": confidence_min,
             "evidence_count": evidence,
+            "rag_debug": {
+                "strict_mode": bool(strict_mode),
+                "query_keywords": keywords[:16],
+                "retrieval_min_score": float(adaptive_min_score),
+                "candidate_count": int(len(scored)),
+                "relevant_count": int(len(relevant_scored)),
+                "top_chunks": [
+                    {
+                        "file_id": c.get("file_id"),
+                        "filename": c.get("filename"),
+                        "chunk_id": c.get("chunk_id"),
+                        "chunk_index": c.get("chunk_index"),
+                        "page_num": c.get("page_num"),
+                        "start_ms": c.get("start_ms"),
+                        "score": float(c.get("_score") or 0.0),
+                        "keyword_hits": int(c.get("_keyword_hits") or 0),
+                        "meta_keyword_hits": int(c.get("_meta_keyword_hits") or 0),
+                    }
+                    for c in top_chunks[:8]
+                ],
+            },
         }
         return "В базе знаний не найдено достаточно релевантной информации по запросу. Уточните вопрос или загрузите материалы по этой теме.", None, usage
     if not context:
@@ -1750,30 +3239,21 @@ def answer_from_kb(
         [f"[{i+1}] {c.get('text','')}" for i, c in enumerate(used_chunks)]
     )
 
-    system_text = (
-        "Ты помощник базы знаний компании. Отвечай только по контексту. "
-        "Не используй внешние знания, домыслы и общие факты вне контекста. "
-        "Если в контексте нет точного ответа — прямо скажи, что данных недостаточно. "
-        "Пиши живым человеческим языком. "
-        "Формат: простой текст, без Markdown, без ** и ###. "
-        "Если нужны шаги — используй нумерацию 1), 2), 3) в одну строку. "
-        "Ссылки на источники не встраивай в текст, а вынеси отдельным блоком 'Источники:' в конце."
-    )
-    if sources_format in ("none", "off", "false") or not show_sources:
-        system_text += " Не упоминай источники, книги, внешние базы и названия документов в ответе."
-    if system_prompt_extra:
-        system_text += " " + system_prompt_extra
-    if mode == "summary":
-        system_text += " Сформируй краткий обзор."
-    elif mode == "faq":
-        system_text += " Сформируй FAQ: 5-10 вопросов и ответы."
-    elif mode == "timeline":
-        system_text += " Сформируй таймлайн (хронологию) по контексту."
     history = _load_dialog_history(db, dialog_id, limit=context_messages) if (dialog_id and use_history) else ""
-    if history and follow_up and use_history:
-        user_content = f"История диалога:\n{history}\n\nКонтекст:\n{numbered_context}\n\nЗапрос: {query}\nОтвет:"
-    else:
-        user_content = f"Контекст:\n{numbered_context}\n\nЗапрос: {query}\nОтвет:"
+    system_text, user_content = _build_kb_answer_messages(
+        query=query,
+        numbered_context=numbered_context,
+        req_top_n=req_top_n,
+        mode=mode,
+        show_sources=show_sources,
+        sources_format=sources_format,
+        system_prompt_extra=system_prompt_extra,
+        history=history,
+        follow_up=follow_up,
+        use_history=use_history,
+        answer_profile=answer_profile,
+        answer_style=answer_style,
+    )
     messages = [
         {"role": "system", "content": system_text},
         {"role": "user", "content": user_content},
@@ -1808,133 +3288,24 @@ def answer_from_kb(
     if err or not answer:
         return None, err or "empty_answer", usage
     out = _strip_markdown_basic(answer.strip())
-    used_rag_v2 = False
-    if strict_mode and rag_v2_enabled:
-        claims_answer = _build_claims_answer(
-            query,
-            used_chunks,
-            api_base=api_base,
-            token=token,
-            chat_model=chat_model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            top_p=top_p,
-            presence_penalty=presence_penalty,
-            frequency_penalty=frequency_penalty,
-        )
-        if claims_answer:
-            out = claims_answer
-        elif _is_numeric_fact_query(query):
-            out = _extract_numeric_fact_structured(query, used_chunks) or "В базе знаний нет подтвержденного числового значения по запросу."
-        else:
-            out = "В базе знаний не найдено достаточно релевантной информации по запросу. Уточните вопрос или загрузите материалы по этой теме."
-        used_rag_v2 = True
-    if (not used_rag_v2) and strict_mode and _is_numeric_fact_query(query):
-        claim_chunks = _select_claim_chunks(query, used_chunks, limit=max(6, retrieval_top_k))
-        if claim_chunks:
-            claim_context = _render_claim_context(claim_chunks)
-            refine_messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "Ты редактор ответов по базе знаний. Используй только факты из контекста. "
-                        "Дай содержательный, развернутый ответ на вопрос пользователя, но без выдумок и без внешних знаний. "
-                        "Если в контексте есть несколько чисел/вариантов — аккуратно объясни, что именно к чему относится."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"Вопрос: {query}\n\nКонтекст фактов:\n{claim_context}\n\nСформируй ответ:",
-                },
-            ]
-            refined, ref_err, _ref_usage = chat_complete(
-                api_base,
-                token,
-                chat_model,
-                refine_messages,
-                temperature=max(0.0, min(temperature, 0.2)),
-                max_tokens=max_tokens,
-                top_p=top_p,
-                presence_penalty=presence_penalty,
-                frequency_penalty=frequency_penalty,
-            )
-            if refined and not ref_err:
-                out = _strip_markdown_basic(refined.strip())
-    if not used_rag_v2:
-        out = re.sub(r"\[\d+\]", "", out).strip()
-    if (not used_rag_v2) and (
-        _looks_like_model_disclaimer(out)
-        or (strict_mode and _looks_like_generic_non_answer(query, out, used_chunks))
-        or (strict_mode and _looks_like_insufficient_answer(out) and _chunks_have_concrete_evidence(query, used_chunks))
-    ):
-        if _is_numeric_fact_query(query):
-            numeric = _extract_numeric_fact_structured(query, used_chunks) or _extract_numeric_fact_answer(query, used_chunks)
-            out = numeric or _extractive_answer_from_chunks(query, used_chunks, limit=min(6, max(3, retrieval_top_k)))
-        else:
-            out = _extractive_answer_from_chunks(query, used_chunks, limit=min(6, max(3, retrieval_top_k)))
-    elif (not used_rag_v2) and _is_numeric_fact_query(query) and (_looks_like_chunk_dump(out) or _looks_like_low_quality_numeric_answer(out)):
+    out = re.sub(r"\[\d+\]", "", out).strip()
+
+    if _is_numeric_fact_query(query):
         numeric = _extract_numeric_fact_structured(query, used_chunks) or _extract_numeric_fact_answer(query, used_chunks)
         if numeric:
             out = numeric
-    if (not used_rag_v2) and strict_mode:
-        out = _verify_and_ground_answer(query, out, used_chunks)
-    if (not used_rag_v2) and _is_numeric_fact_query(query):
-        forced_numeric = _extract_numeric_fact_structured(query, used_chunks)
-        if forced_numeric:
-            out = forced_numeric
-        else:
-            fallback_numeric = _extract_numeric_fact_answer(query, used_chunks)
-            if fallback_numeric and not _looks_like_low_quality_numeric_answer(fallback_numeric):
-                out = fallback_numeric
-            else:
-                out = "В базе знаний нет подтвержденного числового значения по запросу."
-    if strict_mode and _looks_low_quality_answer(out):
-        notes = _extract_fact_notes(query, used_chunks, limit=6)
-        if notes:
-            out = "Подтверждено в базе знаний:\n" + "\n".join([f"{i+1}) {n}" for i, n in enumerate(notes)])
-    if style_pass_enabled and out and not _looks_like_insufficient_answer(out):
-        styled = _style_rewrite_answer(
-            query=query,
-            factual_answer=out,
-            chunks=used_chunks,
-            api_base=api_base,
-            token=token,
-            chat_model=chat_model,
-            max_tokens=max_tokens,
-            top_p=top_p,
-            presence_penalty=presence_penalty,
-            frequency_penalty=frequency_penalty,
-        )
-        if styled:
-            out = styled
-    # Person/entity queries are forced to extractive mode to avoid biographical hallucinations.
-    person_answer = _extract_person_entity_answer(query, used_chunks)
-    if person_answer:
-        out = person_answer
+        elif (
+            _looks_like_model_disclaimer(out)
+            or _looks_like_generic_non_answer(query, out, used_chunks)
+            or _looks_like_chunk_dump(out)
+            or _looks_like_low_quality_numeric_answer(out)
+            or _looks_like_insufficient_answer(out)
+        ):
+            out = "В базе знаний нет подтвержденного числового значения по запросу."
+
     out = _normalize_answer_readability(out)
-    answer_keywords = _extract_keywords(out)[:40]
-    validated_chunks: list[tuple[int, dict[str, Any]]] = []
-    for c in used_chunks:
-        txt = str(c.get("text") or "")
-        meta = " ".join(
-            [
-                str(c.get("filename") or ""),
-                str(c.get("source_title") or ""),
-                str(c.get("source_url") or ""),
-                str(c.get("file_summary") or ""),
-            ]
-        )
-        score = (
-            (_keyword_hits(txt, keywords) * 2)
-            + (_keyword_hits(meta, keywords) * 3)
-            + _keyword_hits(txt, answer_keywords)
-            + _keyword_hits(meta, answer_keywords)
-        )
-        if score > 0:
-            validated_chunks.append((score, c))
-    if validated_chunks:
-        validated_chunks.sort(key=lambda x: x[0], reverse=True)
-        used_chunks = [c for _s, c in validated_chunks]
+    if req_top_n:
+        out = _strip_topn_caveat_paragraphs(out, req_top_n)
     used_chunks = _dedup_used_chunks(used_chunks)
     source_items = [
         {
@@ -1967,7 +3338,12 @@ def answer_from_kb(
     source_items = _dedup_source_items(source_items)
     source_items = _attach_support_chunks(source_items, used_chunks)
     line_refs = _build_line_refs(out, source_items, query=query)
-    source_items = _prune_sources_by_line_refs(source_items, line_refs, max_items=max(8, retrieval_top_k * 2))
+    source_items, line_refs = _prune_sources_with_line_ref_remap(
+        source_items,
+        line_refs,
+        max_items=max(8, retrieval_top_k * 2),
+        include_unreferenced=False,
+    )
     if show_sources and sources_format not in ("none", "off", "false"):
         if sources_format == "short":
             short_list = _format_citations_short(source_items)
@@ -1980,6 +3356,30 @@ def answer_from_kb(
     if usage is None:
         usage = {}
     if isinstance(usage, dict):
+        usage["rag_debug"] = {
+            "strict_mode": bool(strict_mode),
+            "rag_v2_enabled": bool(rag_v2_enabled),
+            "query_keywords": keywords[:16],
+            "retrieval_min_score": float(adaptive_min_score),
+            "candidate_count": int(len(scored)),
+            "relevant_count": int(len(relevant_scored)),
+            "confidence": float(conf),
+            "evidence_count": int(evidence),
+            "top_chunks": [
+                {
+                    "file_id": c.get("file_id"),
+                    "filename": c.get("filename"),
+                    "chunk_id": c.get("chunk_id"),
+                    "chunk_index": c.get("chunk_index"),
+                    "page_num": c.get("page_num"),
+                    "start_ms": c.get("start_ms"),
+                    "score": float(c.get("_score") or 0.0),
+                    "keyword_hits": int(c.get("_keyword_hits") or 0),
+                    "meta_keyword_hits": int(c.get("_meta_keyword_hits") or 0),
+                }
+                for c in top_chunks[:8]
+            ],
+        }
         usage["sources"] = source_items
         usage["line_refs"] = line_refs
     if dialog_id and use_cache:

@@ -15,15 +15,24 @@ from apps.backend.deps import get_db
 from apps.backend.models.account import (
     Account,
     AccountInvite,
+    AccountIntegration,
     AccountMembership,
     AccountPermission,
+    AppSession,
     AppUser,
     AppUserIdentity,
     AppUserWebCredential,
 )
 from apps.backend.models.web_user import WebSession, WebUser
-from apps.backend.models.portal import Portal
+from apps.backend.models.portal import Portal, PortalUsersAccess
 from apps.backend.services.web_email import build_invite_accept_url, send_account_invite_email
+from apps.backend.services.billing import (
+    get_account_effective_policy,
+    get_account_subscription_payload,
+    get_account_usage_summary,
+    is_account_user_limit_reached,
+    list_billing_plans,
+)
 from apps.backend.services.rbac_service import (
     get_account_id_by_portal_id,
     get_membership_ctx,
@@ -82,6 +91,23 @@ def _get_current_web_user(
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+def _get_current_web_session(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    db: Session = Depends(get_db),
+) -> WebSession:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    token = credentials.credentials
+    session = db.execute(
+        select(WebSession).where(WebSession.token == token)
+    ).scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    if session.expires_at and session.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=401, detail="Token expired")
+    return session
 
 
 class InviteEmailBody(BaseModel):
@@ -231,6 +257,119 @@ def _resolve_account_portal_id(db: Session, account_id: int) -> int | None:
     return int(row[0])
 
 
+def _build_account_users_items(db: Session, account_id: int) -> list[dict]:
+    memberships = db.execute(
+        select(AccountMembership).where(
+            AccountMembership.account_id == account_id,
+            AccountMembership.status.in_(["active", "invited"]),
+        )
+    ).scalars().all()
+    if not memberships:
+        return []
+
+    user_ids = [int(m.user_id) for m in memberships]
+    membership_ids = [int(m.id) for m in memberships]
+    users = db.execute(select(AppUser).where(AppUser.id.in_(user_ids))).scalars().all()
+    creds = db.execute(
+        select(AppUserWebCredential).where(AppUserWebCredential.user_id.in_(user_ids))
+    ).scalars().all()
+    perms = db.execute(
+        select(AccountPermission).where(AccountPermission.membership_id.in_(membership_ids))
+    ).scalars().all()
+    identities = db.execute(
+        select(AppUserIdentity).where(AppUserIdentity.user_id.in_(user_ids))
+    ).scalars().all()
+    integrations = db.execute(
+        select(AccountIntegration).where(AccountIntegration.account_id == account_id)
+    ).scalars().all()
+    integration_ids_by_provider: dict[str, set[int]] = {}
+    for integration in integrations:
+        provider = (integration.provider or "").strip().lower()
+        if not provider:
+            continue
+        integration_ids_by_provider.setdefault(provider, set()).add(int(integration.id))
+    portal_id = _resolve_account_portal_id(db, account_id)
+    portal_bitrix_external_ids: set[str] = set()
+    if portal_id:
+        portal_bitrix_external_ids = {
+            str(row.user_id).strip()
+            for row in db.execute(
+                select(PortalUsersAccess).where(
+                    PortalUsersAccess.portal_id == int(portal_id),
+                    PortalUsersAccess.kind == "bitrix",
+                )
+            ).scalars().all()
+            if str(row.user_id).strip()
+        }
+
+    users_by_id = {int(u.id): u for u in users}
+    creds_by_user = {int(c.user_id): c for c in creds}
+    perms_by_membership = {int(p.membership_id): p for p in perms}
+    ids_by_user: dict[int, list[AppUserIdentity]] = {}
+    for ident in identities:
+        ids_by_user.setdefault(int(ident.user_id), []).append(ident)
+
+    items = []
+    for m in memberships:
+        uid = int(m.user_id)
+        u = users_by_id.get(uid)
+        c = creds_by_user.get(uid)
+        p = perms_by_membership.get(int(m.id))
+        idents = ids_by_user.get(uid, [])
+        def _identity_visible(x: AppUserIdentity) -> bool:
+            provider = (x.provider or "").strip().lower()
+            scoped = integration_ids_by_provider.get(provider, set())
+            if x.integration_id is not None:
+                return int(x.integration_id) in scoped
+            if provider == "bitrix":
+                return str(x.external_id or "").strip() in portal_bitrix_external_ids
+            return False
+
+        bitrix = [
+            {"id": x.id, "external_id": x.external_id, "display_value": x.display_value, "integration_id": x.integration_id}
+            for x in idents
+            if (x.provider or "").lower() == "bitrix" and _identity_visible(x)
+        ]
+        telegram = [
+            {"id": x.id, "external_id": x.external_id, "display_value": x.display_value, "integration_id": x.integration_id}
+            for x in idents
+            if (x.provider or "").lower() == "telegram" and _identity_visible(x)
+        ]
+        amo = [
+            {"id": x.id, "external_id": x.external_id, "display_value": x.display_value, "integration_id": x.integration_id}
+            for x in idents
+            if (x.provider or "").lower() == "amo" and _identity_visible(x)
+        ]
+        items.append(
+            {
+                "membership_id": m.id,
+                "user_id": uid,
+                "display_name": (u.display_name if u else None),
+                "role": m.role,
+                "status": m.status,
+                "permissions": {
+                    "kb_access": (p.kb_access if p else "none"),
+                    "can_invite_users": bool(p.can_invite_users) if p else False,
+                    "can_manage_settings": bool(p.can_manage_settings) if p else False,
+                    "can_view_finance": bool(p.can_view_finance) if p else False,
+                },
+                "web": (
+                    {
+                        "login": c.login,
+                        "email": c.email,
+                        "email_verified_at": c.email_verified_at.isoformat() if c.email_verified_at else None,
+                    }
+                    if c
+                    else None
+                ),
+                "bitrix": bitrix,
+                "telegram": telegram,
+                "amo": amo,
+            }
+        )
+    return items
+
+
 def _ensure_legacy_web_user(
     db: Session,
     *,
@@ -269,10 +408,16 @@ def _ensure_legacy_web_user(
 
 @router.get("/auth/me")
 def web_v2_me(
+    session: WebSession = Depends(_get_current_web_session),
     user: WebUser = Depends(_get_current_web_user),
     db: Session = Depends(get_db),
 ):
-    account_id = get_account_id_by_portal_id(db, int(user.portal_id or 0)) if user.portal_id else None
+    account_id = None
+    app_session = db.execute(select(AppSession).where(AppSession.token == session.token)).scalar_one_or_none()
+    if app_session and app_session.active_account_id:
+        account_id = int(app_session.active_account_id)
+    elif user.portal_id:
+        account_id = get_account_id_by_portal_id(db, int(user.portal_id or 0))
     membership = get_membership_ctx(db, int(account_id), user) if account_id else None
     acc = db.get(Account, int(account_id)) if account_id else None
     return {
@@ -306,6 +451,41 @@ def web_v2_permissions_schema(
     }
 
 
+@router.get("/billing/plans")
+def web_v2_billing_plans(
+    user: WebUser = Depends(_get_current_web_user),
+    db: Session = Depends(get_db),
+):
+    return {
+        "items": [item for item in list_billing_plans(db) if item.get("is_active")],
+    }
+
+
+@router.get("/accounts/{account_id}/billing")
+def web_v2_account_billing(
+    account_id: int,
+    user: WebUser = Depends(_get_current_web_user),
+    db: Session = Depends(get_db),
+):
+    membership = require_membership_ctx(db, account_id, user)
+    account = db.get(Account, account_id)
+    return {
+        "account": {
+            "id": account_id,
+            "name": account.name if account else None,
+            "account_no": account.account_no if account else None,
+            "slug": account.slug if account else None,
+        },
+        "membership": {
+            "role": membership.role,
+            "can_view_finance": membership.can_view_finance,
+        },
+        "subscription": get_account_subscription_payload(db, account_id).get("subscription"),
+        "effective_policy": get_account_effective_policy(db, account_id),
+        "usage": get_account_usage_summary(db, account_id),
+    }
+
+
 @router.get("/accounts/{account_id}/users")
 def web_v2_list_users(
     account_id: int,
@@ -313,88 +493,49 @@ def web_v2_list_users(
     db: Session = Depends(get_db),
 ):
     require_membership_ctx(db, account_id, user)
+    return {"items": _build_account_users_items(db, account_id)}
 
-    memberships = db.execute(
-        select(AccountMembership).where(
-            AccountMembership.account_id == account_id,
-            AccountMembership.status.in_(["active", "invited"]),
-        )
-    ).scalars().all()
-    if not memberships:
-        return {"items": []}
 
-    user_ids = [int(m.user_id) for m in memberships]
-    membership_ids = [int(m.id) for m in memberships]
-    users = db.execute(
-        select(AppUser).where(AppUser.id.in_(user_ids))
-    ).scalars().all()
-    creds = db.execute(
-        select(AppUserWebCredential).where(AppUserWebCredential.user_id.in_(user_ids))
-    ).scalars().all()
-    perms = db.execute(
-        select(AccountPermission).where(AccountPermission.membership_id.in_(membership_ids))
-    ).scalars().all()
-    identities = db.execute(
-        select(AppUserIdentity).where(AppUserIdentity.user_id.in_(user_ids))
-    ).scalars().all()
+@router.get("/accounts/{account_id}/access-center")
+def web_v2_access_center(
+    account_id: int,
+    user: WebUser = Depends(_get_current_web_user),
+    db: Session = Depends(get_db),
+):
+    require_membership_ctx(db, account_id, user)
+    items = _build_account_users_items(db, account_id)
+    portal_id = _resolve_account_portal_id(db, account_id)
+    access_rows = []
+    if portal_id:
+        access_rows = db.execute(
+            select(PortalUsersAccess).where(PortalUsersAccess.portal_id == int(portal_id))
+        ).scalars().all()
+    bitrix_access = [r for r in access_rows if (r.kind or "bitrix") == "bitrix"]
+    legacy_web = [r for r in access_rows if (r.kind or "") == "web"]
+    bitrix_by_uid = {str(r.user_id): r for r in bitrix_access}
 
-    users_by_id = {int(u.id): u for u in users}
-    creds_by_user = {int(c.user_id): c for c in creds}
-    perms_by_membership = {int(p.membership_id): p for p in perms}
-    ids_by_user: dict[int, list[AppUserIdentity]] = {}
-    for ident in identities:
-        ids_by_user.setdefault(int(ident.user_id), []).append(ident)
+    for item in items:
+        bitrix_ids = [str(x.get("external_id") or "").strip() for x in (item.get("bitrix") or []) if str(x.get("external_id") or "").strip()]
+        matched_rows = [bitrix_by_uid[x] for x in bitrix_ids if x in bitrix_by_uid]
+        item["access_center"] = {
+            "portal_id": portal_id,
+            "bitrix_linked": bool(bitrix_ids),
+            "bitrix_allowlist": bool(matched_rows),
+            "bitrix_user_ids": bitrix_ids,
+            "telegram_username": next((r.telegram_username for r in matched_rows if r.telegram_username), None),
+        }
 
-    items = []
-    for m in memberships:
-        uid = int(m.user_id)
-        u = users_by_id.get(uid)
-        c = creds_by_user.get(uid)
-        p = perms_by_membership.get(int(m.id))
-        idents = ids_by_user.get(uid, [])
-        bitrix = [
-            {"id": x.id, "external_id": x.external_id, "display_value": x.display_value, "integration_id": x.integration_id}
-            for x in idents
-            if (x.provider or "").lower() == "bitrix"
-        ]
-        telegram = [
-            {"id": x.id, "external_id": x.external_id, "display_value": x.display_value, "integration_id": x.integration_id}
-            for x in idents
-            if (x.provider or "").lower() == "telegram"
-        ]
-        amo = [
-            {"id": x.id, "external_id": x.external_id, "display_value": x.display_value, "integration_id": x.integration_id}
-            for x in idents
-            if (x.provider or "").lower() == "amo"
-        ]
-        items.append(
-            {
-                "membership_id": m.id,
-                "user_id": uid,
-                "display_name": (u.display_name if u else None),
-                "role": m.role,
-                "status": m.status,
-                "permissions": {
-                    "kb_access": (p.kb_access if p else "none"),
-                    "can_invite_users": bool(p.can_invite_users) if p else False,
-                    "can_manage_settings": bool(p.can_manage_settings) if p else False,
-                    "can_view_finance": bool(p.can_view_finance) if p else False,
-                },
-                "web": (
-                    {
-                        "login": c.login,
-                        "email": c.email,
-                        "email_verified_at": c.email_verified_at.isoformat() if c.email_verified_at else None,
-                    }
-                    if c
-                    else None
-                ),
-                "bitrix": bitrix,
-                "telegram": telegram,
-                "amo": amo,
-            }
-        )
-    return {"items": items}
+    extras = [
+        {
+            "id": r.id,
+            "user_id": r.user_id,
+            "display_name": r.display_name,
+            "telegram_username": r.telegram_username,
+            "kind": r.kind,
+        }
+        for r in legacy_web
+    ]
+    return {"portal_id": portal_id, "items": items, "legacy_web_users": extras}
 
 
 @router.post("/accounts/{account_id}/users/manual")
@@ -426,6 +567,8 @@ def web_v2_create_manual_user(
         ).first()
         if email_exists:
             raise HTTPException(status_code=409, detail="email_exists")
+    if is_account_user_limit_reached(db, account_id, extra_users=1):
+        raise HTTPException(status_code=403, detail="max_users_limit_reached")
 
     app_user = AppUser(
         display_name=(body.display_name or "").strip() or (email or login),
@@ -738,6 +881,8 @@ def web_v2_accept_invite(
 
     membership = _membership_by_account_user(db, int(invite.account_id), int(app_user_id))
     role = _normalize_role(invite.role, allow_owner=False)
+    if (membership is None or membership.status != "active") and is_account_user_limit_reached(db, int(invite.account_id), extra_users=1):
+        raise HTTPException(status_code=403, detail="max_users_limit_reached")
     if not membership:
         membership = AccountMembership(
             account_id=int(invite.account_id),

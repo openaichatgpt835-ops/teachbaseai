@@ -23,6 +23,7 @@ class Account(Base):
     id = Column(Integer, primary_key=True, index=True)
     account_no = Column(BigInteger, unique=True, nullable=True, index=True)
     name = Column(String(255), nullable=True)
+    slug = Column(String(128), unique=True, nullable=True, index=True)
     status = Column(String(32), nullable=False, default="active")
     owner_user_id = Column(Integer, ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -50,6 +51,17 @@ class AppUserWebCredential(Base):
     must_change_password = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class AppSession(Base):
+    __tablename__ = "app_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False, index=True)
+    active_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True)
+    token = Column(String(128), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=True)
 
 
 class AccountMembership(Base):

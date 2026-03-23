@@ -19,6 +19,7 @@ from apps.backend.models.account import (
 )
 from apps.backend.models.portal import Portal
 from apps.backend.models.web_user import WebUser
+from apps.backend.services.account_workspace import build_unique_account_slug
 
 
 @dataclass
@@ -79,6 +80,7 @@ def ensure_rbac_for_web_user(
         acc = Account(
             account_no=_next_account_no(db),
             name=(account_name or portal.domain or "").strip() or None,
+            slug=None,
             status="active",
             owner_user_id=None,
             created_at=now,
@@ -86,6 +88,13 @@ def ensure_rbac_for_web_user(
         )
         db.add(acc)
         db.flush()
+        acc.slug = build_unique_account_slug(
+            db,
+            acc.name or portal.domain or None,
+            fallback=f"workspace-{int(acc.account_no or acc.id)}",
+            exclude_account_id=int(acc.id),
+        )
+        db.add(acc)
         account_id = int(acc.id)
         portal.account_id = account_id
         db.add(portal)
@@ -185,8 +194,16 @@ def ensure_rbac_for_web_user(
         db.add(perm)
 
     acc = db.get(Account, account_id)
-    if acc and owner_mode and int(acc.owner_user_id or 0) != app_user_id:
-        acc.owner_user_id = app_user_id
+    if acc:
+        if owner_mode and int(acc.owner_user_id or 0) != app_user_id:
+            acc.owner_user_id = app_user_id
+        if not (acc.slug or "").strip():
+            acc.slug = build_unique_account_slug(
+                db,
+                acc.name or portal.domain or None,
+                fallback=f"workspace-{int(acc.account_no or acc.id)}",
+                exclude_account_id=int(acc.id),
+            )
         acc.updated_at = now
         db.add(acc)
 
@@ -229,6 +246,57 @@ def get_account_id_by_portal_id(db: Session, portal_id: int) -> int | None:
         return None
     account_id = row[0]
     return int(account_id) if account_id is not None else None
+
+
+def ensure_account_member(
+    db: Session,
+    *,
+    account_id: int,
+    user_id: int,
+    role: str = "member",
+    status: str = "active",
+    kb_access: str = "none",
+    can_invite_users: bool = False,
+    can_manage_settings: bool = False,
+    can_view_finance: bool = False,
+) -> tuple[AccountMembership, bool]:
+    now = datetime.utcnow()
+    membership = db.execute(
+        select(AccountMembership).where(
+            AccountMembership.account_id == int(account_id),
+            AccountMembership.user_id == int(user_id),
+        )
+    ).scalar_one_or_none()
+    created = False
+    if not membership:
+        membership = AccountMembership(
+            account_id=int(account_id),
+            user_id=int(user_id),
+            role=(role or "member").strip().lower() or "member",
+            status=(status or "active").strip().lower() or "active",
+            invited_by_user_id=None,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(membership)
+        db.flush()
+        created = True
+
+    perm = db.execute(
+        select(AccountPermission).where(AccountPermission.membership_id == int(membership.id))
+    ).scalar_one_or_none()
+    if not perm:
+        db.add(
+            AccountPermission(
+                membership_id=int(membership.id),
+                kb_access=(kb_access or "none").strip().lower() or "none",
+                can_invite_users=bool(can_invite_users),
+                can_manage_settings=bool(can_manage_settings),
+                can_view_finance=bool(can_view_finance),
+                updated_at=now,
+            )
+        )
+    return membership, created
 
 
 def get_app_user_id_by_web_user(db: Session, web_user: WebUser) -> int | None:

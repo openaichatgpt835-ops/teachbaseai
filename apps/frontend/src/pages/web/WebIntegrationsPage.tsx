@@ -1,4 +1,5 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import { LockedSection } from "../../components/LockedSection";
 import { fetchPortal, getWebPortalInfo } from "./auth";
 
 type TelegramConfig = {
@@ -13,6 +14,26 @@ type IntegrationsCacheState = {
   staffConfig: TelegramConfig;
   clientConfig: TelegramConfig;
   bitrixMasked: string;
+};
+
+type BillingPolicy = {
+  plan_code?: string;
+  plan_name?: string;
+  features?: Record<string, boolean>;
+};
+
+type FeatureGate = {
+  allowed?: boolean;
+  reason?: string;
+};
+
+type PortalBillingState = {
+  billing_policy?: BillingPolicy;
+  feature_gates?: {
+    client_bot?: FeatureGate;
+    amocrm_integration?: FeatureGate;
+    webhooks?: FeatureGate;
+  };
 };
 
 const refreshErrorMap: Record<string, string> = {
@@ -44,11 +65,11 @@ export function WebIntegrationsPage() {
   const [clientToken, setClientToken] = useState("");
   const [staffStatus, setStaffStatus] = useState("");
   const [clientStatus, setClientStatus] = useState("");
-
   const [bitrixClientId, setBitrixClientId] = useState("");
   const [bitrixClientSecret, setBitrixClientSecret] = useState("");
   const [bitrixStatus, setBitrixStatus] = useState("");
   const [bitrixMasked, setBitrixMasked] = useState(cached?.bitrixMasked || "");
+  const [portalBilling, setPortalBilling] = useState<PortalBillingState>({});
 
   useEffect(() => {
     if (!portalId || !portalToken) return;
@@ -59,6 +80,7 @@ export function WebIntegrationsPage() {
       setClientConfig(state.clientConfig);
       setBitrixMasked(state.bitrixMasked);
     }
+
     const loadTelegram = async (kind: "staff" | "client") => {
       try {
         const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/telegram/${kind}`);
@@ -77,6 +99,7 @@ export function WebIntegrationsPage() {
         // ignore
       }
     };
+
     const loadBitrixMask = async () => {
       try {
         const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/bitrix/credentials`);
@@ -88,15 +111,33 @@ export function WebIntegrationsPage() {
         // ignore
       }
     };
+
+    const loadBilling = async () => {
+      try {
+        const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/billing/policy`);
+        const data = await res.json().catch(() => null);
+        if (res.ok && data) {
+          setPortalBilling(data);
+        }
+      } catch {
+        // ignore
+      }
+    };
+
     loadTelegram("staff");
     loadTelegram("client");
     loadBitrixMask();
+    loadBilling();
   }, [portalId, portalToken]);
 
   useEffect(() => {
     if (!portalId) return;
     integrationsCache.set(portalId, { integrationTab, staffConfig, clientConfig, bitrixMasked });
   }, [portalId, integrationTab, staffConfig, clientConfig, bitrixMasked]);
+
+  const clientBotAllowed = !!(portalBilling.feature_gates?.client_bot?.allowed ?? true);
+  const amoAllowed = !!(portalBilling.feature_gates?.amocrm_integration?.allowed ?? true);
+  const planName = portalBilling.billing_policy?.plan_name || "текущий тариф";
 
   const saveTelegram = async (kind: "staff" | "client") => {
     if (!portalId || !portalToken) return;
@@ -121,16 +162,17 @@ export function WebIntegrationsPage() {
           webhook_url: data?.webhook_url || prev.webhook_url,
         }));
       }
-    } else {
-      setClientStatus(ok ? "Сохранено" : (data?.detail || data?.error || "Ошибка"));
-      if (ok) {
-        setClientToken("");
-        setClientConfig((prev) => ({
-          ...prev,
-          token_masked: data?.token_masked || prev.token_masked,
-          webhook_url: data?.webhook_url || prev.webhook_url,
-        }));
-      }
+      return;
+    }
+
+    setClientStatus(ok ? "Сохранено" : (data?.detail || data?.error || "Ошибка"));
+    if (ok) {
+      setClientToken("");
+      setClientConfig((prev) => ({
+        ...prev,
+        token_masked: data?.token_masked || prev.token_masked,
+        webhook_url: data?.webhook_url || prev.webhook_url,
+      }));
     }
   };
 
@@ -155,16 +197,16 @@ export function WebIntegrationsPage() {
       } else {
         setBitrixStatus("Сохранено");
       }
-    } else {
-      setBitrixStatus(data?.error || "Ошибка");
+      return;
     }
+    setBitrixStatus(data?.error || "Ошибка");
   };
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold text-slate-900">Интеграции</h1>
-        <p className="text-sm text-slate-500 mt-1">Подключайте внешние каналы и настраивайте доступы.</p>
+        <p className="mt-1 text-sm text-slate-500">Подключайте внешние каналы и настраивайте доступы.</p>
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -177,9 +219,7 @@ export function WebIntegrationsPage() {
             key={tab.key}
             type="button"
             className={`rounded-full px-4 py-2 text-xs font-semibold transition ${
-              integrationTab === tab.key
-                ? "bg-sky-600 text-white shadow-sm"
-                : "border border-slate-200 text-slate-600 hover:bg-slate-50"
+              integrationTab === tab.key ? "bg-sky-600 text-white shadow-sm" : "border border-slate-200 text-slate-600 hover:bg-slate-50"
             }`}
             onClick={() => setIntegrationTab(tab.key as typeof integrationTab)}
           >
@@ -236,41 +276,75 @@ export function WebIntegrationsPage() {
             </div>
 
             <div className="space-y-3">
-              <label className="flex items-center gap-2 text-sm text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={clientConfig.enabled}
-                  onChange={(e) => setClientConfig((prev) => ({ ...prev, enabled: e.target.checked }))}
-                />
-                Бот для клиентов (RAG: client)
-              </label>
-              <label className="flex items-center gap-2 text-sm text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={clientConfig.allow_uploads}
-                  onChange={(e) => setClientConfig((prev) => ({ ...prev, allow_uploads: e.target.checked }))}
-                />
-                Разрешить загрузку файлов
-              </label>
-              {clientConfig.token_masked && <div className="text-xs text-slate-500">Токен: {clientConfig.token_masked}</div>}
-              {clientConfig.webhook_url && <div className="text-xs text-slate-500">Webhook: {clientConfig.webhook_url}</div>}
-              <input
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
-                placeholder="Bot token"
-                value={clientToken}
-                onChange={(e) => setClientToken(e.target.value)}
-                autoComplete="off"
-                name="tg-client-token"
-              />
-              <div className="flex items-center gap-3">
-                <button
-                  className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700"
-                  onClick={() => saveTelegram("client")}
+              {clientBotAllowed ? (
+                <>
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={clientConfig.enabled}
+                      onChange={(e) => setClientConfig((prev) => ({ ...prev, enabled: e.target.checked }))}
+                    />
+                    Бот для клиентов (RAG: client)
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={clientConfig.allow_uploads}
+                      onChange={(e) => setClientConfig((prev) => ({ ...prev, allow_uploads: e.target.checked }))}
+                    />
+                    Разрешить загрузку файлов
+                  </label>
+                  {clientConfig.token_masked && <div className="text-xs text-slate-500">Токен: {clientConfig.token_masked}</div>}
+                  {clientConfig.webhook_url && <div className="text-xs text-slate-500">Webhook: {clientConfig.webhook_url}</div>}
+                  <input
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                    placeholder="Bot token"
+                    value={clientToken}
+                    onChange={(e) => setClientToken(e.target.value)}
+                    autoComplete="off"
+                    name="tg-client-token"
+                  />
+                  <div className="flex items-center gap-3">
+                    <button
+                      className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700"
+                      onClick={() => saveTelegram("client")}
+                    >
+                      Сохранить
+                    </button>
+                    {clientStatus && <div className="text-xs text-slate-500">{clientStatus}</div>}
+                  </div>
+                </>
+              ) : (
+                <LockedSection
+                  title="Клиентский Telegram-бот"
+                  summary="В этом блоке включается клиентский бот, загрузка файлов и webhook для внешнего канала. На текущем тарифе раздел закрыт."
+                  planName={planName}
                 >
-                  Сохранить
-                </button>
-                {clientStatus && <div className="text-xs text-slate-500">{clientStatus}</div>}
-              </div>
+                  <div className="space-y-3 p-1">
+                    <label className="flex items-center gap-2 text-sm text-slate-700">
+                      <input type="checkbox" checked={clientConfig.enabled} disabled onChange={() => null} />
+                      Бот для клиентов (RAG: client)
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-slate-700">
+                      <input type="checkbox" checked={clientConfig.allow_uploads} disabled onChange={() => null} />
+                      Разрешить загрузку файлов
+                    </label>
+                    {clientConfig.token_masked && <div className="text-xs text-slate-500">Токен: {clientConfig.token_masked}</div>}
+                    <input
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                      placeholder="Bot token"
+                      value={clientToken}
+                      disabled
+                      onChange={() => null}
+                    />
+                    <div className="flex items-center gap-3">
+                      <button className="rounded-xl bg-slate-300 px-4 py-2 text-sm font-semibold text-white" disabled>
+                        Сохранить
+                      </button>
+                    </div>
+                  </div>
+                </LockedSection>
+              )}
             </div>
           </div>
         )}
@@ -330,7 +404,21 @@ export function WebIntegrationsPage() {
 
         {integrationTab === "amocrm" && (
           <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-            Настройки интеграции AmoCRM добавим позже.
+            {amoAllowed ? (
+              "Настройки интеграции AmoCRM добавим позже."
+            ) : (
+              <LockedSection
+                title="Интеграция AmoCRM"
+                summary="Здесь будет подключение AmoCRM, настройка канала, статусов и обмена событиями. На текущем тарифе раздел закрыт."
+                planName={planName}
+                className="border-none bg-transparent"
+              >
+                <div className="rounded-xl border border-slate-100 bg-white px-4 py-4 text-sm text-slate-600">
+                  <div className="font-semibold text-slate-800">AmoCRM</div>
+                  <div className="mt-2">Подключение аккаунта, настройка канала, вебхуков и передачи лидов.</div>
+                </div>
+              </LockedSection>
+            )}
           </div>
         )}
       </div>

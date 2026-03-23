@@ -33,6 +33,26 @@ type CredsStatus = {
   auth_key_mismatch?: boolean;
 };
 
+type CredsHealth = {
+  status: "ok" | "warning" | "broken";
+  issues: string[];
+  has_auth_key: boolean;
+  has_scope: boolean;
+  scope: string;
+  has_access_token: boolean;
+  access_token_expires_at?: number | null;
+  access_token_ttl_sec?: number | null;
+  token_is_expired: boolean;
+  can_refresh: boolean;
+  oauth_probe?: {
+    attempted: boolean;
+    ok: boolean;
+    status?: number | null;
+    error?: string | null;
+    expires_at?: number | null;
+  };
+};
+
 type ModelItem = { id?: string; name?: string; model?: string; object?: string };
 type PortalKbSettings = { embedding_model?: string; chat_model?: string; api_base?: string; prompt_preset?: string };
 type Pricing = { chat_rub_per_1k: number; embed_rub_per_1k: number };
@@ -45,6 +65,7 @@ export function KnowledgeBasePage() {
   const [portalId, setPortalId] = useState<number | "">("");
   const [loading, setLoading] = useState(false);
   const [creds, setCreds] = useState<CredsStatus | null>(null);
+  const [credsHealth, setCredsHealth] = useState<CredsHealth | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [portalSettings, setPortalSettings] = useState<PortalKbSettings | null>(null);
   const [tokenError, setTokenError] = useState<string>("");
@@ -74,6 +95,7 @@ export function KnowledgeBasePage() {
         scope: d.scope || f.scope,
       }));
     });
+    api.get("/v1/admin/kb/credentials/health").then((d) => setCredsHealth(d));
     api.get("/v1/admin/billing/pricing").then((d) => {
       if (d) setPricing(d);
     });
@@ -135,6 +157,8 @@ export function KnowledgeBasePage() {
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     setCreds(data);
+    const health = await api.get("/v1/admin/kb/credentials/health");
+    setCredsHealth(health);
     setForm((f) => ({ ...f, auth_key: "" }));
     if (data?.token_error) {
       setTokenError(data.token_error);
@@ -158,6 +182,8 @@ export function KnowledgeBasePage() {
     await res.json().catch(() => null);
     const updated = await api.get("/v1/admin/kb/credentials");
     setCreds(updated);
+    const health = await api.get("/v1/admin/kb/credentials/health");
+    setCredsHealth(health);
   };
 
   const handleLoadModels = async () => {
@@ -254,6 +280,23 @@ export function KnowledgeBasePage() {
       return "—";
     }
   };
+
+  const formatTtl = (v?: number | null) => {
+    if (v === null || v === undefined) return "—";
+    if (v <= 0) return "истек";
+    const minutes = Math.floor(v / 60);
+    if (minutes < 60) return `${minutes} мин`;
+    const hours = Math.floor(minutes / 60);
+    const remMinutes = minutes % 60;
+    return remMinutes ? `${hours} ч ${remMinutes} мин` : `${hours} ч`;
+  };
+
+  const healthTone =
+    credsHealth?.status === "ok"
+      ? "text-green-700 bg-green-50 border-green-200"
+      : credsHealth?.status === "warning"
+        ? "text-amber-700 bg-amber-50 border-amber-200"
+        : "text-red-700 bg-red-50 border-red-200";
 
   return (
     <div className="space-y-6">
@@ -375,6 +418,27 @@ export function KnowledgeBasePage() {
           </div>
         )}
         {tokenError && <div className="text-sm text-red-600 mt-2">{tokenError}</div>}
+        {credsHealth && (
+          <div className={`mt-4 rounded border p-3 text-sm ${healthTone}`}>
+            <div className="font-medium">
+              Health: {credsHealth.status}
+            </div>
+            <div className="mt-1">
+              auth_key {credsHealth.has_auth_key ? "ok" : "нет"}, scope {credsHealth.has_scope ? credsHealth.scope : "нет"},
+              token {credsHealth.has_access_token ? "ok" : "нет"}, ttl {formatTtl(credsHealth.access_token_ttl_sec)}
+            </div>
+            <div className="mt-1">
+              oauth probe: {credsHealth.oauth_probe?.attempted ? (credsHealth.oauth_probe?.ok ? "ok" : "fail") : "not_run"}
+              {typeof credsHealth.oauth_probe?.status === "number" ? `, status ${credsHealth.oauth_probe.status}` : ""}
+              {credsHealth.oauth_probe?.error ? `, error ${credsHealth.oauth_probe.error}` : ""}
+            </div>
+            {credsHealth.issues?.length > 0 && (
+              <div className="mt-1">
+                issues: {credsHealth.issues.join(", ")}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="bg-white rounded shadow p-6">

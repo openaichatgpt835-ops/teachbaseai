@@ -1,5 +1,5 @@
 ﻿import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { fetchPortal, getWebPortalInfo, getWebUser } from "./auth";
+import { fetchPortal, getActiveAccountId, getWebPortalInfo, getWebUser } from "./auth";
 
 type ChatSource = {
   file_id?: number | null;
@@ -45,14 +45,14 @@ type PdfJsDoc = {
   destroy?: () => void;
 };
 
-function chatStorageKey(portalId: number) {
+function chatStorageKey(scopeId: number) {
   const email = (getWebUser()?.email || "").trim().toLowerCase() || "anonymous";
-  return `tb_web_chat_history:${portalId}:${email}`;
+  return `tb_web_chat_history:${scopeId}:${email}`;
 }
 
-function chatScrollKey(portalId: number) {
+function chatScrollKey(scopeId: number) {
   const email = (getWebUser()?.email || "").trim().toLowerCase() || "anonymous";
-  return `tb_web_chat_scroll:${portalId}:${email}`;
+  return `tb_web_chat_scroll:${scopeId}:${email}`;
 }
 
 function fileExt(name: string | undefined) {
@@ -324,18 +324,23 @@ function PdfHighlightViewer({
   page,
   pageDisplayOffset = 0,
   needle,
+  supportNeedles = [],
+  anchorPage = null,
   onResolvedPage,
 }: {
   url: string;
   page: number;
   pageDisplayOffset?: number;
   needle?: string;
+  supportNeedles?: string[];
+  anchorPage?: number | null;
   onResolvedPage?: (page: number) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const docRef = useRef<PdfJsDoc | null>(null);
   const renderingRef = useRef<Set<number>>(new Set());
   const lastJumpKeyRef = useRef<string>("");
+  const lastHighlightJumpKeyRef = useRef<string>("");
   const autoHitJumpedRef = useRef(false);
   const pageTextCacheRef = useRef<Map<number, string>>(new Map());
   const [loading, setLoading] = useState(true);
@@ -345,6 +350,17 @@ function PdfHighlightViewer({
   const [firstHitPage, setFirstHitPage] = useState<number | null>(null);
   const [resolvedPage, setResolvedPage] = useState<number | null>(null);
   const effectivePage = Math.max(1, Number(resolvedPage || page || 1));
+  const lowerUrl = String(url || "").toLowerCase();
+  const isBookPreview =
+    lowerUrl.includes(".fb2") ||
+    lowerUrl.includes(".epub") ||
+    lowerUrl.includes("book_preview") ||
+    lowerUrl.includes(".preview.pdf");
+
+  useEffect(() => {
+    autoHitJumpedRef.current = false;
+    lastHighlightJumpKeyRef.current = "";
+  }, [needle, supportNeedles, effectivePage, url]);
 
   const appendRange = (from: number, to: number) => {
     if (!numPages) return;
@@ -454,6 +470,42 @@ function PdfHighlightViewer({
   }, [firstHitPage, renderedPages]);
 
   useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const jumpKey = `${url}|${effectivePage}|${String(needle || "").slice(0, 48)}`;
+    if (lastHighlightJumpKeyRef.current === jumpKey) return;
+    let cancelled = false;
+    let attempts = 0;
+    const run = () => {
+      if (cancelled) return true;
+      const pageEl = host.querySelector(`[data-page='${effectivePage}']`) as HTMLElement | null;
+      const targetEl = pageEl?.querySelector("[data-highlight-role='target']") as HTMLElement | null;
+      if (!pageEl || !targetEl) {
+        attempts += 1;
+        if (attempts < 8) window.setTimeout(run, 120 + attempts * 60);
+        return false;
+      }
+      const hostRect = host.getBoundingClientRect();
+      const targetRect = targetEl.getBoundingClientRect();
+      const delta = targetRect.top - hostRect.top;
+      const desiredTop = Math.max(0, host.scrollTop + delta - (host.clientHeight * 0.22));
+      host.scrollTo({ top: desiredTop, behavior: "auto" });
+      lastHighlightJumpKeyRef.current = jumpKey;
+      return true;
+    };
+    const t1 = window.requestAnimationFrame(() => {
+      if (run()) return;
+      window.setTimeout(() => {
+        run();
+      }, 120);
+    });
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(t1);
+    };
+  }, [effectivePage, renderedPages, needle, supportNeedles, url]);
+
+  useEffect(() => {
     const doc = docRef.current;
     if (!doc || !renderedPages.length) return;
     let cancelled = false;
@@ -489,55 +541,88 @@ function PdfHighlightViewer({
           const targetPage = effectivePage;
           // Keep highlight strictly bound to anchor page to avoid drifting to neighbor pages.
           const isSearchScope = pno === targetPage;
-          const needleNorm = _norm(String(needle || "")).slice(0, 1200);
-          const needleSets = isSearchScope
-            ? [Array.from(new Set(needleNorm.split(" ").filter((x) => x.length >= 4).slice(0, 40)))]
+          const targetNeedle = String(needle || "").trim();
+          const supportNeedleList = supportNeedles.map((x) => String(x || "").trim());
+          const targetSets = isSearchScope && targetNeedle.length >= 8
+            ? [Array.from(new Set(_norm(targetNeedle).split(" ").filter((x) => x.length >= 4).slice(0, 40)))]
+            : [];
+          const supportSets = isSearchScope
+            ? supportNeedleList
+                .filter((x) => x.length >= 8)
+                .slice(0, 4)
+                .map((n) => Array.from(new Set(_norm(n).split(" ").filter((x) => x.length >= 4).slice(0, 40))))
                 .filter((arr) => arr.length > 0)
             : [];
           const items = (content.items || []) as any[];
           const normItems = items.map((it) => _norm(String(it?.str || "")));
-          const ranges: Array<[number, number]> = [];
-          for (const uniqTokens of needleSets) {
-            const needCover = Math.max(2, Math.min(uniqTokens.length, Math.ceil(uniqTokens.length * 0.4)));
-            const itemTokens: string[][] = normItems.map((s) => uniqTokens.filter((t) => s.includes(t)));
-            let l = 0;
-            let covered = 0;
-            const freq = new Map<string, number>();
-            let best: { l: number; r: number; w: number; covered: number } | null = null;
-            for (let r = 0; r < itemTokens.length; r += 1) {
-              for (const t of itemTokens[r]) {
-                const n = (freq.get(t) || 0) + 1;
-                freq.set(t, n);
-                if (n === 1) covered += 1;
-              }
-              while (covered >= needCover && l <= r) {
-                const w = r - l;
-                if (!best || w < best.w || (w === best.w && covered > best.covered)) {
-                  best = { l, r, w, covered };
+          const targetRanges: Array<[number, number]> = [];
+          const supportRanges: Array<[number, number]> = [];
+          const collectRanges = (
+            tokenSets: string[][],
+            target: Array<[number, number]>,
+            fallbackPad: number,
+            leadPad: number,
+            stretchToPageEnd: boolean,
+          ) => {
+            for (const uniqTokens of tokenSets) {
+              if (!uniqTokens.length) continue;
+              const needCover = Math.max(2, Math.min(uniqTokens.length, Math.ceil(uniqTokens.length * 0.4)));
+              const itemTokens: string[][] = normItems.map((s) => uniqTokens.filter((t) => s.includes(t)));
+              let l = 0;
+              let covered = 0;
+              const freq = new Map<string, number>();
+              let best: { l: number; r: number; w: number; covered: number } | null = null;
+              for (let r = 0; r < itemTokens.length; r += 1) {
+                for (const t of itemTokens[r]) {
+                  const n = (freq.get(t) || 0) + 1;
+                  freq.set(t, n);
+                  if (n === 1) covered += 1;
                 }
-                for (const t of itemTokens[l]) {
-                  const n = (freq.get(t) || 0) - 1;
-                  if (n <= 0) {
-                    freq.delete(t);
-                    covered -= 1;
-                  } else {
-                    freq.set(t, n);
+                while (covered >= needCover && l <= r) {
+                  const w = r - l;
+                  if (!best || w < best.w || (w === best.w && covered > best.covered)) {
+                    best = { l, r, w, covered };
                   }
+                  for (const t of itemTokens[l]) {
+                    const n = (freq.get(t) || 0) - 1;
+                    if (n <= 0) {
+                      freq.delete(t);
+                      covered -= 1;
+                    } else {
+                      freq.set(t, n);
+                    }
+                  }
+                  l += 1;
                 }
-                l += 1;
               }
-            }
-            if (best) {
-              ranges.push([best.l, Math.max(best.l, items.length - 1)]);
-              setFirstHitPage((prev) => prev ?? pno);
-            } else {
+              if (best) {
+                target.push([
+                  Math.max(0, best.l - leadPad),
+                  stretchToPageEnd
+                    ? Math.max(0, items.length - 1)
+                    : Math.min(items.length - 1, Math.max(best.l, best.r + fallbackPad)),
+                ]);
+                setFirstHitPage((prev) => prev ?? pno);
+                continue;
+              }
               const firstIdx = normItems.findIndex((s) => uniqTokens.some((t) => s.includes(t)));
               if (firstIdx >= 0) {
-                ranges.push([firstIdx, Math.max(firstIdx, normItems.length - 1)]);
+                target.push([
+                  Math.max(0, firstIdx - leadPad),
+                  stretchToPageEnd
+                    ? Math.max(0, items.length - 1)
+                    : Math.min(items.length - 1, firstIdx + fallbackPad),
+                ]);
                 setFirstHitPage((prev) => prev ?? pno);
               }
             }
-          }
+          };
+          const targetTailPad = isBookPreview ? 34 : 18;
+          const targetLeadPad = isBookPreview ? 8 : 4;
+          const supportTailPad = isBookPreview ? 12 : 8;
+          const supportLeadPad = isBookPreview ? 2 : 1;
+          collectRanges(targetSets, targetRanges, targetTailPad, targetLeadPad, true);
+          collectRanges(supportSets, supportRanges, supportTailPad, supportLeadPad, false);
           for (let i = 0; i < items.length; i += 1) {
             const item = items[i];
             const str = String(item?.str || "");
@@ -558,10 +643,16 @@ function PdfHighlightViewer({
             span.style.color = "transparent";
             span.style.userSelect = "text";
             span.style.whiteSpace = "pre";
-            const inAnyRange = ranges.some(([a, b]) => i >= a && i <= b);
-            if (inAnyRange) {
-              span.style.background = "rgba(250, 204, 21, 0.45)";
+            const inTargetRange = targetRanges.some(([a, b]) => i >= a && i <= b);
+            const inSupportRange = !inTargetRange && supportRanges.some(([a, b]) => i >= a && i <= b);
+            if (inTargetRange) {
+              span.style.background = "rgba(250, 204, 21, 0.55)";
               span.style.borderRadius = "2px";
+              span.setAttribute("data-highlight-role", "target");
+            } else if (inSupportRange) {
+              span.style.background = "rgba(250, 204, 21, 0.28)";
+              span.style.borderRadius = "2px";
+              span.setAttribute("data-highlight-role", "support");
             }
             textLayer.appendChild(span);
           }
@@ -576,14 +667,18 @@ function PdfHighlightViewer({
     return () => {
       cancelled = true;
     };
-  }, [renderedPages, needle, url, effectivePage]);
+  }, [renderedPages, needle, supportNeedles, url, effectivePage]);
 
   useEffect(() => {
     const doc = docRef.current;
     if (!doc || !numPages) return;
-    const q = _norm(String(needle || "")).slice(0, 1800);
-    const toks = Array.from(new Set(q.split(" ").filter((x) => x.length >= 4))).slice(0, 64);
-    if (toks.length < 3) return;
+    const rawNeedles = [String(needle || "").trim(), ...supportNeedles.map((x) => String(x || "").trim())]
+      .filter((x) => x.length >= 8)
+      .slice(0, 6);
+    const tokenSets = rawNeedles
+      .map((n) => Array.from(new Set(_norm(n).split(" ").filter((x) => x.length >= 4))).slice(0, 64))
+      .filter((arr) => arr.length >= 3);
+    if (!tokenSets.length) return;
     let cancelled = false;
     const resolve = async () => {
       const getPageText = async (pno: number): Promise<string> => {
@@ -609,25 +704,34 @@ function PdfHighlightViewer({
         if (cancelled) return;
         const txt = await getPageText(pno);
         if (!txt) continue;
-        let covered = 0;
-        let pairHits = 0;
-        for (let i = 0; i < toks.length; i += 1) {
-          const t = toks[i];
-          if (txt.includes(t)) covered += 1;
-          if (i < toks.length - 1) {
-            const bi = `${toks[i]} ${toks[i + 1]}`;
-            if (bi.length >= 9 && txt.includes(bi)) pairHits += 1;
+        let localBest = -1;
+        for (const toks of tokenSets) {
+          let covered = 0;
+          let pairHits = 0;
+          for (let i = 0; i < toks.length; i += 1) {
+            const t = toks[i];
+            if (txt.includes(t)) covered += 1;
+            if (i < toks.length - 1) {
+              const bi = `${toks[i]} ${toks[i + 1]}`;
+              if (bi.length >= 9 && txt.includes(bi)) pairHits += 1;
+            }
           }
+          const coverage = covered / Math.max(1, toks.length);
+          const score = (coverage * 10) + pairHits;
+          if (score > localBest) localBest = score;
         }
-        const coverage = covered / Math.max(1, toks.length);
-        const score = (coverage * 10) + pairHits;
+        const distPenalty =
+          Number.isFinite(Number(anchorPage)) && Number(anchorPage) > 0
+            ? Math.min(2.4, Math.abs(pno - Number(anchorPage)) * 0.12)
+            : 0;
+        const score = localBest - distPenalty;
         if (score > bestScore) {
           bestScore = score;
           bestPage = pno;
         }
       }
       if (cancelled || bestPage <= 0) return;
-      if (bestScore < 2.4) return;
+      if (bestScore < 1.6) return;
       setResolvedPage(bestPage);
       onResolvedPage?.(bestPage);
     };
@@ -635,7 +739,7 @@ function PdfHighlightViewer({
     return () => {
       cancelled = true;
     };
-  }, [url, needle, numPages, onResolvedPage]);
+  }, [url, needle, supportNeedles, anchorPage, numPages, onResolvedPage]);
 
   return (
     <div className="relative h-full w-full rounded-xl border border-slate-200 bg-white">
@@ -662,9 +766,12 @@ function PdfHighlightViewer({
 
 export function WebChatPage() {
   const { portalId, portalToken } = getWebPortalInfo();
+  const activeAccountId = getActiveAccountId();
+  const chatScopeId = activeAccountId || portalId;
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [queuedCount, setQueuedCount] = useState(0);
   const [error, setError] = useState("");
 
   const [previewSource, setPreviewSource] = useState<ChatSource | null>(null);
@@ -677,14 +784,20 @@ export function WebChatPage() {
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewNeedle, setPreviewNeedle] = useState<string>("");
-  const [, setPreviewSupportNeedles] = useState<string[]>([]);
-  const [resolvedPreviewPage, setResolvedPreviewPage] = useState<number | null>(null);
+  const [previewSupportNeedles, setPreviewSupportNeedles] = useState<string[]>([]);
+  const [, setResolvedPreviewPage] = useState<number | null>(null);
+  const [previewStartMs, setPreviewStartMs] = useState<number | null>(null);
   const [transcriptAllowed, setTranscriptAllowed] = useState<boolean | null>(null);
   const [transcriptStatus, setTranscriptStatus] = useState<string>("");
   const [transcriptError, setTranscriptError] = useState<string>("");
+  const [transcriptRawCount, setTranscriptRawCount] = useState<number | null>(null);
+  const [transcriptMergedCount, setTranscriptMergedCount] = useState<number | null>(null);
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
+  const pendingSeekMsRef = useRef<number | null>(null);
+  const pendingSeekRetryRef = useRef<number | null>(null);
+  const sendQueueRef = useRef<string[]>([]);
   const chunkRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const leftChunkRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const scrollRestoredRef = useRef(false);
@@ -694,22 +807,22 @@ export function WebChatPage() {
       window.requestAnimationFrame(() => {
         if (!listRef.current) return;
         listRef.current.scrollTop = listRef.current.scrollHeight;
-        if (portalId) localStorage.setItem(chatScrollKey(portalId), String(listRef.current.scrollTop));
+        if (chatScopeId) localStorage.setItem(chatScrollKey(chatScopeId), String(listRef.current.scrollTop));
       });
     });
   };
 
   useEffect(() => {
-    if (!portalId) return;
+    if (!chatScopeId) return;
     try {
-      const raw = localStorage.getItem(chatStorageKey(portalId));
+      const raw = localStorage.getItem(chatStorageKey(chatScopeId));
       const parsed = raw ? JSON.parse(raw) : [];
       setMessages(Array.isArray(parsed) ? parsed : []);
     } catch {
       setMessages([]);
     }
     scrollRestoredRef.current = false;
-  }, [portalId]);
+  }, [chatScopeId]);
 
   useEffect(() => {
     if (!previewSource) return;
@@ -723,20 +836,42 @@ export function WebChatPage() {
   }, [previewSource, previewChunks, selectedChunkIdx]);
 
   useEffect(() => {
-    if (!portalId) return;
+    if (!previewSource) return;
+    if (previewStartMs == null) return;
+    const el = mediaRef.current;
+    if (!el) return;
+    const sec = Math.max(0, Number(previewStartMs) / 1000);
+    const doSeek = () => {
+      try {
+        el.currentTime = sec;
+      } catch {
+        // ignore
+      }
+    };
+    if (el.readyState >= 1) {
+      doSeek();
+      return;
+    }
+    const onLoaded = () => doSeek();
+    el.addEventListener("loadedmetadata", onLoaded, { once: true });
+    return () => el.removeEventListener("loadedmetadata", onLoaded);
+  }, [previewSource, previewStartMs, previewUrl]);
+
+  useEffect(() => {
+    if (!chatScopeId) return;
     try {
-      localStorage.setItem(chatStorageKey(portalId), JSON.stringify(messages.slice(-200)));
+      localStorage.setItem(chatStorageKey(chatScopeId), JSON.stringify(messages.slice(-200)));
     } catch {
       // ignore
     }
-  }, [portalId, messages]);
+  }, [chatScopeId, messages]);
 
   useEffect(() => {
-    if (!portalId || scrollRestoredRef.current) return;
+    if (!chatScopeId || scrollRestoredRef.current) return;
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         if (!listRef.current) return;
-        const raw = localStorage.getItem(chatScrollKey(portalId));
+        const raw = localStorage.getItem(chatScrollKey(chatScopeId));
         const pos = raw != null ? Number(raw) : NaN;
         // If scroll position is unknown/invalid (or stale "0"), open chat at bottom.
         if (Number.isFinite(pos) && pos > 4) listRef.current.scrollTop = pos;
@@ -744,9 +879,18 @@ export function WebChatPage() {
         scrollRestoredRef.current = true;
       });
     });
-  }, [portalId, messages.length]);
+  }, [chatScopeId, messages.length]);
 
-  const canSend = useMemo(() => !!portalId && !!portalToken && !!input.trim() && !sending, [portalId, portalToken, input, sending]);
+  useEffect(() => {
+    return () => {
+      if (pendingSeekRetryRef.current != null) {
+        window.clearTimeout(pendingSeekRetryRef.current);
+        pendingSeekRetryRef.current = null;
+      }
+    };
+  }, []);
+
+  const canSend = useMemo(() => !!portalId && !!portalToken && !!input.trim(), [portalId, portalToken, input]);
 
   const pushMessage = (msg: ChatMsg) => {
     setMessages((prev) => {
@@ -756,13 +900,8 @@ export function WebChatPage() {
     });
   };
 
-  const onSubmit = async (evt: FormEvent) => {
-    evt.preventDefault();
-    if (!canSend || !portalId) return;
-    const q = input.trim();
-    setInput("");
-    setError("");
-    pushMessage({ role: "user", text: q, ts: Date.now() });
+  const runQueuedQuery = async (q: string) => {
+    if (!portalId) return;
     setSending(true);
     try {
       const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/ask`, {
@@ -786,9 +925,32 @@ export function WebChatPage() {
         line_refs: payload?.line_refs && typeof payload.line_refs === "object" ? payload.line_refs : {},
       });
     } finally {
+      const next = sendQueueRef.current.shift() || null;
+      setQueuedCount(sendQueueRef.current.length);
+      if (next) {
+        scrollToBottomPersist();
+        void runQueuedQuery(next);
+        return;
+      }
       setSending(false);
       scrollToBottomPersist();
     }
+  };
+
+  const onSubmit = async (evt: FormEvent) => {
+    evt.preventDefault();
+    if (!canSend || !portalId) return;
+    const q = input.trim();
+    if (!q) return;
+    setInput("");
+    setError("");
+    pushMessage({ role: "user", text: q, ts: Date.now() });
+    if (sending) {
+      sendQueueRef.current.push(q);
+      setQueuedCount(sendQueueRef.current.length);
+      return;
+    }
+    void runQueuedQuery(q);
   };
 
   const onInputKeyDown = (evt: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -810,9 +972,17 @@ export function WebChatPage() {
     setPreviewNeedle("");
     setPreviewSupportNeedles([]);
     setResolvedPreviewPage(null);
+    setPreviewStartMs(null);
     setTranscriptAllowed(null);
     setTranscriptStatus("");
     setTranscriptError("");
+    setTranscriptRawCount(null);
+    setTranscriptMergedCount(null);
+    pendingSeekMsRef.current = null;
+    if (pendingSeekRetryRef.current != null) {
+      window.clearTimeout(pendingSeekRetryRef.current);
+      pendingSeekRetryRef.current = null;
+    }
     chunkRefs.current.clear();
   };
 
@@ -825,6 +995,9 @@ export function WebChatPage() {
     const parsedChunk = Number(src.chunk_index ?? (anchorKind === "chunk_index" ? anchorValue : NaN));
     const parsedPage = Number(src.page_num ?? (anchorKind === "pdf_page" ? anchorValue : NaN));
     const parsedMs = Number(src.start_ms ?? (anchorKind === "media_ms" ? anchorValue : NaN));
+    const initialMs = Number.isFinite(parsedMs) ? Number(parsedMs) : null;
+    setPreviewStartMs(initialMs);
+    pendingSeekMsRef.current = initialMs;
     setSelectedChunkIdx(Number.isFinite(parsedChunk) ? parsedChunk : null);
     setPdfPage(Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : null);
     setPreviewUrl(null);
@@ -837,6 +1010,8 @@ export function WebChatPage() {
     setTranscriptAllowed(null);
     setTranscriptStatus("");
     setTranscriptError("");
+    setTranscriptRawCount(null);
+    setTranscriptMergedCount(null);
 
     if (!portalId || !src.file_id) return;
     const ext = fileExt(src.filename);
@@ -846,25 +1021,21 @@ export function WebChatPage() {
       mime.startsWith("video/") ||
       mime.startsWith("audio/");
 
-    const sourceKind = (src.source_type || "").toLowerCase();
-    const externalPreferred = ["youtube", "rutube", "vk"].includes(sourceKind) && !!(src.source_url || "").trim();
-    if (!externalPreferred) {
-      setPreviewLoading(true);
-      try {
-        const pr = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/signed-url?inline=1`);
-        const pd = await pr.json().catch(() => null);
-        if (pr.ok && pd?.url) setPreviewUrl(String(pd.url));
+    setPreviewLoading(true);
+    try {
+      const pr = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/signed-url?inline=1`);
+      const pd = await pr.json().catch(() => null);
+      if (pr.ok && pd?.url) setPreviewUrl(String(pd.url));
 
-        const ppr = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/signed-url?inline=1&rendition=preview_pdf`);
-        const ppd = await ppr.json().catch(() => null);
-        if (ppr.ok && ppd?.url) setPreviewPdfUrl(String(ppd.url));
+      const ppr = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/signed-url?inline=1&rendition=preview_pdf`);
+      const ppd = await ppr.json().catch(() => null);
+      if (ppr.ok && ppd?.url) setPreviewPdfUrl(String(ppd.url));
 
-        const dr = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/signed-url?inline=0`);
-        const dd = await dr.json().catch(() => null);
-        if (dr.ok && dd?.url) setDownloadUrl(String(dd.url));
-      } finally {
-        setPreviewLoading(false);
-      }
+      const dr = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/signed-url?inline=0`);
+      const dd = await dr.json().catch(() => null);
+      if (dr.ok && dd?.url) setDownloadUrl(String(dd.url));
+    } finally {
+      setPreviewLoading(false);
     }
 
     setChunksLoading(true);
@@ -887,15 +1058,21 @@ export function WebChatPage() {
         }
       }
       const endpoint = isMedia
-        ? `/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/transcript?limit=2000`
+        ? `/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/transcript?limit=2000&mode=merged`
         : `/api/v1/bitrix/portals/${portalId}/kb/files/${src.file_id}/chunks?limit=2000`;
       const res = await fetchPortal(endpoint);
       const data = await res.json().catch(() => null);
+      if (isMedia) {
+        const rc = Number(data?.raw_count);
+        const mc = Number(data?.merged_count);
+        setTranscriptRawCount(Number.isFinite(rc) ? rc : null);
+        setTranscriptMergedCount(Number.isFinite(mc) ? mc : null);
+      }
       if (res.ok && Array.isArray(data?.items)) {
         const items = (data.items as FileChunk[]).map((x: any, idx: number) => ({
           ...x,
           chunk_index: Number.isFinite(Number(x?.chunk_index)) ? Number(x.chunk_index) : idx,
-        }));
+        })).sort((a, b) => Number(a.chunk_index) - Number(b.chunk_index));
         setPreviewChunks(items);
         const srcForMatch: ChatSource = needleFromAnswer ? { ...src, text: needleFromAnswer } : src;
         const target = _selectAnchorChunk(srcForMatch, items, parsedChunkId, parsedChunk, anchorKind, anchorValue);
@@ -920,7 +1097,12 @@ export function WebChatPage() {
             .map((x) => ({ x, sc: _lineMatchScore(needleFromAnswer, String(x.text || "")) }))
             .sort((p, q) => q.sc - p.sc);
           const positive = scored.filter((z) => z.sc > 0).map((z) => z.x);
-          if (positive.length) supportRows = positive;
+          if (positive.length) {
+            const merged = [...positive, ...supportRows].slice(0, 6);
+            const uniq = new Map<number, FileChunk>();
+            for (const row of merged) uniq.set(Number(row.chunk_index), row);
+            supportRows = Array.from(uniq.values()).sort((a, b) => Number(a.chunk_index) - Number(b.chunk_index));
+          }
         }
         const supportNeedles = supportRows
           .map((x) => String(x.text || "").trim())
@@ -954,8 +1136,10 @@ export function WebChatPage() {
         ) {
           setPdfPage(null);
         }
-        if (!(Number.isFinite(parsedMs)) && target?.start_ms != null) {
-          src.start_ms = target.start_ms;
+        if (target?.start_ms != null) {
+          const ms = Number(target.start_ms);
+          setPreviewStartMs(ms);
+          pendingSeekMsRef.current = ms;
         }
       }
     } finally {
@@ -966,16 +1150,17 @@ export function WebChatPage() {
   const renderPreview = () => {
     if (!previewSource || !portalId) return null;
     const src = previewSource;
+    const srcWithAnchor: ChatSource = { ...src, start_ms: previewStartMs ?? src.start_ms ?? null };
     const ext = fileExt(src.filename);
-    const externalUrl = buildTimedExternalUrl(src);
-    const externalEmbedUrl = buildExternalEmbedUrl(src);
+    const externalUrl = buildTimedExternalUrl(srcWithAnchor);
+    const externalEmbedUrl = buildExternalEmbedUrl(srcWithAnchor);
     const sourceKind = (src.source_type || "").toLowerCase();
-    const isExternal = (["youtube", "rutube", "vk"].includes(sourceKind) && !!externalUrl) || (!src.file_id && !!externalUrl);
+    const isExternalSource = ["youtube", "rutube", "vk"].includes(sourceKind) && !!externalUrl;
+    const externalCandidate = isExternalSource || (!src.file_id && !!externalUrl);
 
-    const startSec = src.start_ms ? Math.max(0, Math.floor(Number(src.start_ms) / 1000)) : 0;
     const base = previewUrl || "";
     const basePreviewPdf = previewPdfUrl || "";
-    const mediaSrc = startSec > 0 ? `${base}#t=${startSec}` : base;
+    const mediaSrc = base;
     const officeSrc = buildOfficeViewerUrl(base);
 
     const mime = (src.mime_type || "").toLowerCase();
@@ -988,13 +1173,60 @@ export function WebChatPage() {
     const isChunkTextPreview = [".doc", ".docx", ".epub", ".fb2", ".txt", ".md", ".csv", ".rtf", ".log", ".json", ".xml"].includes(ext);
     const supportsPagedPreview = isOffice || [".epub", ".fb2"].includes(ext);
 
-    const onPickChunk = (ch: FileChunk) => {
-      setSelectedChunkIdx(ch.chunk_index);
-      if (ch.page_num) setPdfPage(ch.page_num);
-      if (mediaRef.current && ch.start_ms != null) {
-        mediaRef.current.currentTime = Number(ch.start_ms) / 1000;
-        void mediaRef.current.play().catch(() => {});
+    const requestMediaSeek = (ms: number, autoplay = true) => {
+      const nms = Math.max(0, Number(ms));
+      const sec = nms / 1000;
+      setPreviewStartMs(nms);
+      pendingSeekMsRef.current = nms;
+      if (pendingSeekRetryRef.current != null) {
+        window.clearTimeout(pendingSeekRetryRef.current);
+        pendingSeekRetryRef.current = null;
       }
+      const el = mediaRef.current;
+      if (!el) return;
+      try {
+        if (el.readyState >= 1) el.currentTime = sec;
+      } catch {
+        // ignore
+      }
+      if (autoplay) void el.play().catch(() => {});
+      // Retry after a short delay: some browsers reset currentTime right after metadata/canplay.
+      pendingSeekRetryRef.current = window.setTimeout(() => {
+        const node = mediaRef.current;
+        if (!node) return;
+        try {
+          node.currentTime = sec;
+        } catch {
+          // ignore
+        }
+      }, 260);
+    };
+
+    const applyPendingSeek = () => {
+      const el = mediaRef.current;
+      const ms = pendingSeekMsRef.current;
+      if (!el || ms == null) return;
+      const sec = Math.max(0, Number(ms) / 1000);
+      try {
+        el.currentTime = sec;
+      } catch {
+        // ignore
+      }
+    };
+
+    const onPickChunk = (ch: FileChunk) => {
+      setResolvedPreviewPage(null);
+      setSelectedChunkIdx(ch.chunk_index);
+      const nearestPage = Number(ch.page_num || _nearestChunkWithPage(previewChunks, ch.chunk_index)?.page_num || 0);
+      if (nearestPage > 0) setPdfPage(nearestPage);
+      if (ch.text) setPreviewNeedle(ch.text);
+      const neighborNeedles = previewChunks
+        .filter((x) => Math.abs(Number(x.chunk_index) - Number(ch.chunk_index)) <= 1)
+        .map((x) => String(x.text || "").trim())
+        .filter((x) => x.length > 0)
+        .slice(0, 4);
+      setPreviewSupportNeedles(neighborNeedles);
+      if (ch.start_ms != null) requestMediaSeek(Number(ch.start_ms), true);
     };
 
     return (
@@ -1015,19 +1247,20 @@ export function WebChatPage() {
             <div className="overflow-auto bg-slate-50 p-3">
               {previewLoading ? (
                 <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">Загрузка файла...</div>
-              ) : isExternal ? (
+              ) : (isExternalSource && !!externalEmbedUrl) ? (
                 <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-                  {externalEmbedUrl ? (
-                    <iframe
-                      title={src.filename || "external-video"}
-                      src={externalEmbedUrl}
-                      className="h-[64vh] w-full rounded-xl border border-slate-200 bg-white"
-                      allow="autoplay; encrypted-media; picture-in-picture"
-                      allowFullScreen
-                    />
-                  ) : (
-                    <div className="text-sm text-slate-700">Встроенный плеер недоступен для этого источника. Можно открыть внешнюю ссылку с таймкодом.</div>
-                  )}
+                  <iframe
+                    title={src.filename || "external-video"}
+                    src={externalEmbedUrl}
+                    className="h-[64vh] w-full rounded-xl border border-slate-200 bg-white"
+                    allow="autoplay; encrypted-media; picture-in-picture"
+                    allowFullScreen
+                  />
+                  <a className="inline-block rounded-lg bg-sky-600 px-3 py-2 text-sm text-white" href={externalUrl} target="_blank" rel="noreferrer">Открыть источник</a>
+                </div>
+              ) : (externalCandidate && !base) ? (
+                <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+                  <div className="text-sm text-slate-700">Встроенный плеер недоступен для этого источника. Можно открыть внешнюю ссылку с таймкодом.</div>
                   <a className="inline-block rounded-lg bg-sky-600 px-3 py-2 text-sm text-white" href={externalUrl} target="_blank" rel="noreferrer">Открыть источник</a>
                 </div>
               ) : !base ? (
@@ -1037,27 +1270,53 @@ export function WebChatPage() {
                   {downloadUrl && <a className="inline-block rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700" href={downloadUrl}>Скачать</a>}
                 </div>
               ) : isVideo ? (
-                <video ref={(n) => (mediaRef.current = n)} key={mediaSrc} src={mediaSrc} controls autoPlay className="h-full w-full rounded-xl border border-slate-200 bg-black" />
+                <video
+                  ref={(n) => (mediaRef.current = n)}
+                  key={mediaSrc}
+                  src={mediaSrc}
+                  controls
+                  autoPlay
+                  preload="metadata"
+                  onLoadedMetadata={applyPendingSeek}
+                  onCanPlay={applyPendingSeek}
+                  onPlay={applyPendingSeek}
+                  className="h-full w-full rounded-xl border border-slate-200 bg-black"
+                />
               ) : isAudio ? (
                 <div className="rounded-xl border border-slate-200 bg-white p-6">
-                  <audio ref={(n) => (mediaRef.current = n)} key={mediaSrc} src={mediaSrc} controls autoPlay className="w-full" />
+                  <audio
+                    ref={(n) => (mediaRef.current = n)}
+                    key={mediaSrc}
+                    src={mediaSrc}
+                    controls
+                    autoPlay
+                    preload="metadata"
+                    onLoadedMetadata={applyPendingSeek}
+                    onCanPlay={applyPendingSeek}
+                    onPlay={applyPendingSeek}
+                    className="w-full"
+                  />
                 </div>
               ) : isPdf ? (
                 <PdfHighlightViewer
-                  key={`pdfjs-${src.file_id || src.filename || "file"}-${pdfPage || 1}`}
+                  key={`pdfjs-${src.file_id || src.filename || "file"}-${pdfPage || 1}-${selectedChunkIdx ?? -1}`}
                   url={base}
                   page={Math.max(1, Number(pdfPage || 1))}
                   pageDisplayOffset={0}
                   needle={previewNeedle || src.text}
+                  supportNeedles={previewSupportNeedles}
+                  anchorPage={pdfPage}
                   onResolvedPage={(p) => setResolvedPreviewPage(p)}
                 />
               ) : supportsPagedPreview && !!basePreviewPdf ? (
                 <PdfHighlightViewer
-                  key={`pdfjs-preview-${src.file_id || src.filename || "file"}-${pdfPage || 1}`}
+                  key={`pdfjs-preview-${src.file_id || src.filename || "file"}-${pdfPage || 1}-${selectedChunkIdx ?? -1}`}
                   url={basePreviewPdf}
                   page={Math.max(1, Number(pdfPage || 1))}
                   pageDisplayOffset={0}
                   needle={previewNeedle || src.text}
+                  supportNeedles={previewSupportNeedles}
+                  anchorPage={pdfPage}
                   onResolvedPage={(p) => setResolvedPreviewPage(p)}
                 />
               ) : isChunkTextPreview ? (
@@ -1118,6 +1377,8 @@ export function WebChatPage() {
                     Статус транскрибации: {transcriptStatus || "unknown"}
                     {transcriptAllowed === false ? " · опция выключена" : ""}
                     {transcriptError ? ` · ${transcriptError}` : ""}
+                    {transcriptRawCount != null ? ` · raw: ${transcriptRawCount}` : ""}
+                    {transcriptMergedCount != null ? ` · merged: ${transcriptMergedCount}` : ""}
                   </div>
                 )}
                 {chunksLoading && <div className="text-sm text-slate-500">{(isVideo || isAudio) ? "Загрузка транскрибации..." : "Загрузка контекста..."}</div>}
@@ -1162,9 +1423,7 @@ export function WebChatPage() {
                     >
                       <div className="mb-1 flex items-center gap-2 text-xs text-slate-500">
                         {isVideo || isAudio ? <span>{(ch as any).speaker || "Спикер A"}</span> : <span>#{ch.chunk_index + 1}</span>}
-                        {!(isVideo || isAudio) && ((selectedChunkIdx === ch.chunk_index && resolvedPreviewPage)
-                          ? <span>стр. {resolvedPreviewPage}</span>
-                          : (ch.page_num ? <span>стр. {ch.page_num}</span> : null))}
+                        {!(isVideo || isAudio) && (ch.page_num ? <span>стр. {ch.page_num}</span> : null)}
                         {ch.start_ms != null ? <span>{fmtMs(ch.start_ms)}</span> : null}
                       </div>
                       <div className={`whitespace-pre-wrap text-slate-700 ${(isVideo || isAudio) ? "" : "line-clamp-5"}`}>
@@ -1193,8 +1452,8 @@ export function WebChatPage() {
           ref={listRef}
           className="h-[56vh] overflow-y-auto rounded-xl border border-slate-100 bg-slate-50 p-4"
           onScroll={() => {
-            if (!portalId || !listRef.current || messages.length === 0) return;
-            localStorage.setItem(chatScrollKey(portalId), String(listRef.current.scrollTop));
+            if (!chatScopeId || !listRef.current || messages.length === 0) return;
+            localStorage.setItem(chatScrollKey(chatScopeId), String(listRef.current.scrollTop));
           }}
         >
           {!messages.length ? (
@@ -1289,7 +1548,7 @@ export function WebChatPage() {
             className="min-h-[92px] flex-1 resize-y rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400"
           />
           <button type="submit" disabled={!canSend} className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">
-            {sending ? "Отправка..." : "Отправить"}
+            {sending ? `Отправка...${queuedCount > 0 ? ` (+${queuedCount})` : ""}` : "Отправить"}
           </button>
         </form>
         {error && <div className="mt-2 text-sm text-rose-600">{error}</div>}

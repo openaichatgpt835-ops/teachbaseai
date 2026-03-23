@@ -6,6 +6,7 @@ import re
 import uuid
 import time
 import hmac
+import math
 import importlib.util
 from urllib.parse import quote
 from pathlib import Path
@@ -26,6 +27,7 @@ from apps.backend.deps import get_db
 from apps.backend.config import get_settings
 from apps.backend.models.portal import Portal, PortalUsersAccess
 from apps.backend.models.dialog import Dialog, Message
+from apps.backend.models.bitrix_log import BitrixHttpLog
 from apps.backend.models.kb import (
     KBFile,
     KBJob,
@@ -48,6 +50,7 @@ from apps.backend.services.bitrix_events import process_imbot_message
 from apps.backend.services.portal_tokens import save_tokens, get_valid_access_token, BitrixAuthError, refresh_portal_tokens
 from apps.backend.services.token_crypto import encrypt_token
 from apps.backend.services.kb_storage import ensure_portal_dir, save_upload
+from apps.backend.services.billing import get_portal_effective_policy, would_exceed_account_media_minutes
 from apps.backend.services.kb_settings import (
     get_portal_kb_settings,
     set_portal_kb_settings,
@@ -73,11 +76,13 @@ from apps.backend.services.telegram_settings import (
     get_portal_telegram_token_plain,
 )
 from apps.backend.models.web_user import WebUser
+from apps.backend.models.account import Account, AppUserWebCredential
 from apps.backend.models.portal_link_request import PortalLinkRequest
 from apps.backend.services.activity import log_activity
 from apps.backend.clients.telegram import telegram_get_me, telegram_set_webhook
 from apps.backend.services.web_email import create_email_token, send_registration_email
 from apps.backend.services.rbac_service import ensure_rbac_for_web_user
+from apps.backend.services.transcript_utils import merge_transcript_items
 from apps.backend.utils.api_errors import error_envelope
 from apps.backend.utils.api_schema import is_schema_v2
 
@@ -86,6 +91,72 @@ router = APIRouter()
 _install_html: str | None = None
 _handler_html: str | None = None
 _app_html: str | None = None
+
+
+def _resolve_linked_web_user(db: Session, portal: Portal | None) -> WebUser | None:
+    if not portal:
+        return None
+
+    owner_email = None
+    if portal.metadata_json:
+        try:
+            meta = json.loads(portal.metadata_json) if isinstance(portal.metadata_json, str) else portal.metadata_json
+            owner_email = (meta.get("owner_email") or "").strip().lower() or None
+        except Exception:
+            owner_email = None
+
+    if owner_email:
+        user = db.execute(select(WebUser).where(WebUser.email == owner_email)).scalars().first()
+        if user and int(user.portal_id or 0) == int(portal.id):
+            return user
+
+    if portal.account_id:
+        owner_row = db.execute(
+            select(AppUserWebCredential.email)
+            .join(Account, Account.owner_user_id == AppUserWebCredential.user_id)
+            .where(Account.id == int(portal.account_id))
+            .limit(1)
+        ).first()
+        owner_account_email = (str(owner_row[0]).strip().lower() if owner_row and owner_row[0] else None)
+        if owner_account_email:
+            user = db.execute(select(WebUser).where(WebUser.email == owner_account_email)).scalars().first()
+            if user and int(user.portal_id or 0) == int(portal.id):
+                return user
+
+    return (
+        db.execute(
+            select(WebUser)
+            .where(WebUser.portal_id == int(portal.id))
+            .order_by(
+                WebUser.email_verified_at.isnot(None).desc(),
+                WebUser.created_at.asc(),
+                WebUser.id.asc(),
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+
+def _portal_product_gates(db: Session, portal_id: int) -> tuple[dict[str, Any], dict[str, Any], Portal | None]:
+    portal = db.get(Portal, portal_id)
+    policy = get_portal_effective_policy(db, portal_id)
+    features = dict(policy.get("features") or {})
+
+    def gate(flag: str) -> dict[str, Any]:
+        allowed = bool(features.get(flag, False))
+        return {
+            "allowed": allowed,
+            "reason": "" if allowed else "not_in_plan",
+        }
+
+    gates = {
+        "client_bot": gate("allow_client_bot"),
+        "amocrm_integration": gate("allow_amocrm_integration"),
+        "webhooks": gate("allow_webhooks"),
+        "bitrix_integration": gate("allow_bitrix_integration"),
+    }
+    return gates, policy, portal
 
 
 def _html_ui_response(html: str) -> HTMLResponse:
@@ -178,6 +249,34 @@ def _err(request: Request | None, code: str, message: str, status_code: int, det
         ),
         status_code=status_code,
     )
+
+
+def _log_kb_ask_rag_debug(
+    db: Session,
+    trace_id: str,
+    portal_id: int,
+    path: str,
+    rag_debug: dict[str, Any] | None,
+) -> None:
+    if not trace_id or not isinstance(rag_debug, dict):
+        return
+    summary = {
+        "rag_debug": rag_debug,
+        "event": "kb_ask_rag_debug",
+    }
+    row = BitrixHttpLog(
+        trace_id=trace_id,
+        portal_id=portal_id,
+        direction="internal",
+        kind="kb_ask_rag_debug",
+        method="POST",
+        path=path,
+        summary_json=json.dumps(summary),
+        status_code=200,
+        latency_ms=0,
+    )
+    db.add(row)
+    db.commit()
 
 
 def _portal_user_id_from_token(request: Request) -> int | None:
@@ -1064,6 +1163,18 @@ def _is_media_file(filename: str | None, mime_type: str | None) -> bool:
     return ext in _MEDIA_EXTS or mt.startswith("audio/") or mt.startswith("video/")
 
 
+def _estimate_media_minutes(src_path: str) -> int:
+    try:
+        from apps.backend.services.kb_ingest import _media_duration_seconds  # type: ignore
+
+        seconds = int(_media_duration_seconds(src_path) or 0)
+        if seconds <= 0:
+            return 1
+        return max(1, int(math.ceil(seconds / 60.0)))
+    except Exception:
+        return 1
+
+
 def _diarization_runtime_status() -> tuple[bool, str]:
     def _has_module(name: str) -> bool:
         try:
@@ -1363,21 +1474,8 @@ async def get_web_link_status(
     if pid != portal_id:
         raise HTTPException(status_code=403, detail="portal_id mismatch")
     _require_portal_admin(db, portal_id, request)
-    owner_email = None
     portal = db.get(Portal, portal_id)
-    if portal and portal.metadata_json:
-        try:
-            meta = json.loads(portal.metadata_json) if isinstance(portal.metadata_json, str) else portal.metadata_json
-            owner_email = (meta.get("owner_email") or "").strip().lower() or None
-        except Exception:
-            owner_email = None
-    user = None
-    if owner_email:
-        user = db.execute(select(WebUser).where(WebUser.email == owner_email)).scalar_one_or_none()
-        if user and user.portal_id != portal_id:
-            user = None
-    if not user:
-        user = db.execute(select(WebUser).where(WebUser.portal_id == portal_id)).scalar_one_or_none()
+    user = _resolve_linked_web_user(db, portal)
     if not user:
         return {"linked": False}
     demo_until = (user.created_at + timedelta(days=7)).date().isoformat()
@@ -1659,12 +1757,21 @@ async def ask_portal_kb(
     if is_schema_v2(request):
         sources = usage.get("sources") if isinstance(usage, dict) else []
         line_refs = usage.get("line_refs") if isinstance(usage, dict) else {}
+        rag_debug = usage.get("rag_debug") if isinstance(usage, dict) else None
+        _log_kb_ask_rag_debug(
+            db=db,
+            trace_id=_trace_id(request),
+            portal_id=portal_id,
+            path=f"/v1/bitrix/portals/{portal_id}/kb/ask",
+            rag_debug=rag_debug if isinstance(rag_debug, dict) else None,
+        )
         return JSONResponse({
             "ok": True,
             "data": {
                 "answer": _strip_sources_block(answer),
                 "sources": sources if isinstance(sources, list) else [],
                 "line_refs": line_refs if isinstance(line_refs, dict) else {},
+                "rag_debug": rag_debug if isinstance(rag_debug, dict) else None,
             },
             "meta": {
                 "schema": "v2",
@@ -1700,6 +1807,15 @@ async def upload_portal_kb_file(
         aud = "staff"
     is_media = _is_media_file(safe_name, file.content_type)
     media_enabled = is_media_transcription_enabled(db, portal_id)
+    account_id = db.execute(select(Portal.account_id).where(Portal.id == portal_id)).scalar()
+    if is_media and media_enabled and account_id:
+        media_minutes = _estimate_media_minutes(dst_path)
+        if would_exceed_account_media_minutes(db, int(account_id), additional_minutes=media_minutes):
+            try:
+                os.remove(dst_path)
+            except Exception:
+                pass
+            return _err(request, "media_minutes_limit_reached", "media_minutes_limit_reached", 403)
     rec = KBFile(
         portal_id=portal_id,
         filename=safe_name,
@@ -1738,6 +1854,7 @@ async def upload_portal_kb_file(
         q.enqueue(
             "apps.worker.jobs.process_kb_job",
             job.id,
+            job_id=f"kbjob:{job.id}",
             job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
         )
     except Exception:
@@ -1763,6 +1880,14 @@ async def reindex_portal_kb(
     ).scalars().all()
     if not files:
         return JSONResponse({"status": "ok", "queued": 0})
+    account_id = db.execute(select(Portal.account_id).where(Portal.id == portal_id)).scalar()
+    media_minutes_total = 0
+    if account_id:
+        for f in files:
+            if _is_media_file(f.filename, f.mime_type) and is_media_transcription_enabled(db, portal_id):
+                media_minutes_total += _estimate_media_minutes(f.storage_path or "")
+        if media_minutes_total > 0 and would_exceed_account_media_minutes(db, int(account_id), additional_minutes=media_minutes_total):
+            return _err(request, "media_minutes_limit_reached", "media_minutes_limit_reached", 403)
     queued = 0
     try:
         from redis import Redis
@@ -1792,6 +1917,7 @@ async def reindex_portal_kb(
                 q.enqueue(
                     "apps.worker.jobs.process_kb_job",
                     job_id,
+                    job_id=f"kbjob:{job_id}",
                     job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
                 )
             except Exception:
@@ -1814,6 +1940,11 @@ async def reindex_kb_file(
     rec = db.execute(select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)).scalar_one_or_none()
     if not rec:
         return _err(request, "not_found", "not_found", 404)
+    account_id = db.execute(select(Portal.account_id).where(Portal.id == portal_id)).scalar()
+    if account_id and _is_media_file(rec.filename, rec.mime_type) and is_media_transcription_enabled(db, portal_id):
+        media_minutes = _estimate_media_minutes(rec.storage_path or "")
+        if would_exceed_account_media_minutes(db, int(account_id), additional_minutes=media_minutes):
+            return _err(request, "media_minutes_limit_reached", "media_minutes_limit_reached", 403)
     rec.status = "queued"
     rec.error_message = None
     if _is_media_file(rec.filename, rec.mime_type):
@@ -1837,6 +1968,7 @@ async def reindex_kb_file(
         q.enqueue(
             "apps.worker.jobs.process_kb_job",
             job.id,
+            job_id=f"kbjob:{job.id}",
             job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
         )
     except Exception:
@@ -2119,6 +2251,11 @@ async def start_kb_file_transcript(
         return _err(request, "not_media_file", "not_media_file", 400)
     if not is_media_transcription_enabled(db, portal_id):
         return _err(request, "feature_not_enabled", "feature_not_enabled", 403)
+    account_id = db.execute(select(Portal.account_id).where(Portal.id == portal_id)).scalar()
+    if account_id:
+        media_minutes = _estimate_media_minutes(rec.storage_path or "")
+        if would_exceed_account_media_minutes(db, int(account_id), additional_minutes=media_minutes):
+            return _err(request, "media_minutes_limit_reached", "media_minutes_limit_reached", 403)
     rec.status = "queued"
     rec.error_message = None
     rec.transcript_status = "queued"
@@ -2142,6 +2279,7 @@ async def start_kb_file_transcript(
         q.enqueue(
             "apps.worker.jobs.process_kb_job",
             job.id,
+            job_id=f"kbjob:{job.id}",
             job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
         )
     except Exception:
@@ -2155,6 +2293,7 @@ async def get_kb_file_transcript(
     file_id: int,
     request: Request,
     limit: int = 2000,
+    mode: str = "merged",
     db: Session = Depends(get_db),
     pid: int = Depends(require_portal_access),
 ):
@@ -2202,10 +2341,26 @@ async def get_kb_file_transcript(
                     )
         except Exception:
             items = []
+
+    raw_items = items
+    is_raw_mode = (mode or "merged").strip().lower() == "raw"
+    if not is_raw_mode:
+        items = merge_transcript_items(items)
+
     status = (rec.transcript_status or "").strip().lower() or "ready"
     if not items and status == "ready":
         status = "missing"
-    return JSONResponse({"items": items, "status": status})
+
+    merged_count = len(merge_transcript_items(raw_items)) if raw_items else 0
+    return JSONResponse(
+        {
+            "items": items,
+            "status": status,
+            "mode": "raw" if is_raw_mode else "merged",
+            "raw_count": len(raw_items),
+            "merged_count": merged_count,
+        }
+    )
 
 
 @router.get("/portals/{portal_id}/kb/collections")
@@ -2576,9 +2731,46 @@ async def get_portal_kb_settings_api(
     _require_portal_admin(db, portal_id, request)
     out = get_portal_kb_settings(db, portal_id)
     available, reason = _diarization_runtime_status()
-    out["speaker_diarization_available"] = available
-    out["speaker_diarization_reason"] = reason
+    diar_gate = ((out.get("feature_gates") or {}).get("speaker_diarization") or {})
+    media_gate = ((out.get("feature_gates") or {}).get("media_transcription") or {})
+    out["model_selection_available"] = bool((((out.get("feature_gates") or {}).get("model_selection") or {}).get("allowed", True)))
+    out["model_selection_reason"] = (((out.get("feature_gates") or {}).get("model_selection") or {}).get("reason") or "")
+    out["advanced_tuning_available"] = bool((((out.get("feature_gates") or {}).get("advanced_model_tuning") or {}).get("allowed", True)))
+    out["advanced_tuning_reason"] = (((out.get("feature_gates") or {}).get("advanced_model_tuning") or {}).get("reason") or "")
+    out["media_transcription_available"] = bool(media_gate.get("allowed", True))
+    out["media_transcription_reason"] = (media_gate.get("reason") or "")
+    out["speaker_diarization_available"] = bool(diar_gate.get("allowed", True)) and available
+    out["speaker_diarization_reason"] = (diar_gate.get("reason") or reason or "")
     return JSONResponse(out)
+
+
+@router.get("/portals/{portal_id}/billing/policy")
+async def get_portal_billing_policy_api(
+    portal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    gates, policy, portal = _portal_product_gates(db, portal_id)
+    account = db.get(Account, int(portal.account_id)) if portal and portal.account_id else None
+    return JSONResponse({
+        "account": {
+            "id": int(account.id) if account else None,
+            "name": account.name if account else None,
+            "account_no": int(account.account_no) if account and account.account_no is not None else None,
+            "slug": account.slug if account else None,
+        },
+        "billing_policy": {
+            "plan_code": policy.get("plan_code") or "default",
+            "plan_name": ((policy.get("plan") or {}).get("name") if isinstance(policy.get("plan"), dict) else None) or "Default",
+            "source": policy.get("source") or "default",
+            "features": dict(policy.get("features") or {}),
+            "limits": dict(policy.get("limits") or {}),
+        },
+        "feature_gates": gates,
+    })
 
 
 class PortalKBSettingsBody(BaseModel):
@@ -2626,6 +2818,29 @@ async def set_portal_kb_settings_api(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    policy = get_portal_effective_policy(db, portal_id)
+    features = dict(policy.get("features") or {})
+    if not bool(features.get("allow_model_selection", True)):
+        body.embedding_model = None
+        body.chat_model = None
+        body.api_base = None
+    if not bool(features.get("allow_advanced_model_tuning", True)):
+        body.temperature = None
+        body.max_tokens = None
+        body.top_p = None
+        body.presence_penalty = None
+        body.frequency_penalty = None
+        body.context_messages = None
+        body.context_chars = None
+        body.retrieval_top_k = None
+        body.retrieval_max_chars = None
+        body.lex_boost = None
+        body.system_prompt_extra = None
+    if not bool(features.get("allow_media_transcription", True)):
+        body.media_transcription_enabled = False
+        body.speaker_diarization_enabled = False
+    elif not bool(features.get("allow_speaker_diarization", True)):
+        body.speaker_diarization_enabled = False
     out = set_portal_kb_settings(
         db,
         portal_id,
@@ -2729,10 +2944,21 @@ async def get_portal_telegram_client_settings(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    gates, policy, _portal = _portal_product_gates(db, portal_id)
     settings = get_portal_telegram_settings(db, portal_id)
     secret = get_portal_telegram_secret(db, portal_id, "client") or ""
     webhook_url = _telegram_webhook_url("client", portal_id, secret) if secret else None
-    return JSONResponse({"kind": "client", **settings.get("client", {}), "webhook_url": webhook_url})
+    return JSONResponse({
+        "kind": "client",
+        **settings.get("client", {}),
+        "webhook_url": webhook_url,
+        "client_bot_available": bool((gates.get("client_bot") or {}).get("allowed", True)),
+        "client_bot_reason": (gates.get("client_bot") or {}).get("reason") or "",
+        "billing_policy": {
+            "plan_code": policy.get("plan_code") or "default",
+            "plan_name": ((policy.get("plan") or {}).get("name") if isinstance(policy.get("plan"), dict) else None) or "Default",
+        },
+    })
 
 
 @router.post("/portals/{portal_id}/telegram/client")
@@ -2746,6 +2972,9 @@ async def set_portal_telegram_client_settings(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    gates, _policy, _portal = _portal_product_gates(db, portal_id)
+    if not bool((gates.get("client_bot") or {}).get("allowed", True)):
+        return _err(request, "client_bot_locked", "client_bot_locked", 403, detail="Feature unavailable on current plan")
     if body.clear_token:
         body.enabled = False
     settings = set_portal_telegram_settings(
@@ -2880,9 +3109,13 @@ async def add_portal_kb_url_source(
         s = get_settings()
         r = Redis(host=s.redis_host, port=s.redis_port)
         q = Queue(s.rq_ingest_queue_name or "ingest", connection=r)
+        source_job_id = int(result.get("job_id") or 0)
+        if source_job_id <= 0:
+            raise ValueError("missing_job_id")
         q.enqueue(
             "apps.worker.jobs.process_kb_job",
-            result.get("job_id"),
+            source_job_id,
+            job_id=f"kbjob:{source_job_id}",
             job_timeout=max(300, int(s.kb_job_timeout_seconds or 3600)),
         )
     except Exception:
@@ -3280,3 +3513,4 @@ async def bitrix_events(request: Request, db: Session = Depends(get_db)):
 @router.post("/placement")
 async def bitrix_placement(request: Request):
     return JSONResponse({"status": "ok"})
+

@@ -15,6 +15,9 @@ import { BotSettingsPage } from "./pages/admin/BotSettingsPage";
 import { RegistrationsPage } from "./pages/admin/RegistrationsPage";
 import { ErrorsPage } from "./pages/admin/ErrorsPage";
 import { RbacOwnersAuditPage } from "./pages/admin/RbacOwnersAuditPage";
+import { OperationsHomePage } from "./pages/admin/OperationsHomePage";
+import { AccountsHomePage } from "./pages/admin/AccountsHomePage";
+import { RevenueHomePage } from "./pages/admin/RevenueHomePage";
 import { B24AppPage } from "./pages/b24/B24AppPage";
 import { RegisterPage } from "./pages/web/RegisterPage";
 import { WebLoginPage } from "./pages/web/WebLoginPage";
@@ -25,6 +28,7 @@ import { WebKbPage } from "./pages/web/WebKbPage";
 import { WebSourcesPage } from "./pages/web/WebSourcesPage";
 import { WebUsersPage } from "./pages/web/WebUsersPage";
 import { WebSettingsPage } from "./pages/web/WebSettingsPage";
+import { WebBillingPage } from "./pages/web/WebBillingPage";
 import { WebIntegrationsPage } from "./pages/web/WebIntegrationsPage";
 import { WebFlowPage } from "./pages/web/WebFlowPage";
 import { ConfirmEmailPage } from "./pages/web/ConfirmEmailPage";
@@ -54,6 +58,7 @@ export default function App() {
         <Route path="users" element={<WebUsersPage />} />
         <Route path="analytics" element={<WebStubPage title="Аналитика" />} />
         <Route path="settings" element={<WebSettingsPage />} />
+        <Route path="billing" element={<WebBillingPage />} />
         <Route path="settings/integrations" element={<WebIntegrationsPage />} />
         <Route path="ai-rop" element={<WebAiRopPage />} />
         <Route path="ai-rop/access" element={<WebAiRopAccessPage />} />
@@ -63,6 +68,9 @@ export default function App() {
       </Route>
       <Route path="/admin/login" element={<LoginPage />} />
       <Route path="/admin" element={<AdminLayout />}>
+        <Route path="operations" element={<OperationsHomePage />} />
+        <Route path="accounts" element={<AccountsHomePage />} />
+        <Route path="revenue" element={<RevenueHomePage />} />
         <Route path="portals" element={<PortalsPage />} />
         <Route path="portals/:id" element={<PortalDetailPage />} />
         <Route path="dialogs" element={<DialogsPage />} />
@@ -77,7 +85,7 @@ export default function App() {
         <Route path="registrations" element={<RegistrationsPage />} />
         <Route path="errors" element={<ErrorsPage />} />
         <Route path="rbac-owners" element={<RbacOwnersAuditPage />} />
-        <Route index element={<Navigate to="portals" replace />} />
+        <Route index element={<Navigate to="operations" replace />} />
       </Route>
       <Route path="/b24/app" element={<B24AppPage />} />
     </Routes>

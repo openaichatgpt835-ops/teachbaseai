@@ -1,0 +1,22 @@
+export default {
+  "base": "cursor-pointer focus-visible:outline-(--ui-color-accent-main-primary) focus-visible:outline-1 focus-visible:rounded-[4px] text-start",
+  "variants": {
+    "active": {
+      "true": "text-(--ui-color-accent-main-primary) outline-(--ui-color-accent-main-primary) hover:not-disabled:not-aria-disabled:underline underline-offset-2",
+      "false": "text-(--ui-color-accent-main-link) underline-offset-2"
+    },
+    "disabled": {
+      "true": "cursor-not-allowed opacity-75"
+    },
+    "isAction": {
+      "true": "text-nowrap text-sm h-auto py-0 font-normal rounded-none border border-x-0 border-t-0 border-dashed text-(--ui-color-design-outline-a1-content) border-b-(--ui-color-design-outline-a1-content) hover:not-disabled:not-aria-disabled:no-underline hover:text(--ui-color-accent-soft-element-red) hover:not-disabled:not-aria-disabled:text-(--ui-color-accent-soft-element-red) hover:border-b-(--ui-color-accent-soft-element-red) focus-visible:outline-(--ui-color-accent-soft-element-red)"
+    }
+  },
+  "compoundVariants": [
+    {
+      "active": false,
+      "disabled": false,
+      "class": "hover:text-(--ui-color-accent-main-primary-alt) hover:underline"
+    }
+  ]
+}

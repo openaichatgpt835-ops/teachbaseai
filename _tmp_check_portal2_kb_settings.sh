@@ -1,0 +1,2 @@
+cd /opt/teachbaseai
+docker compose -f docker-compose.prod.yml exec -T postgres psql -U teachbaseai -d teachbaseai -c "select portal_id, media_transcription_enabled, speaker_diarization_enabled from portal_kb_settings where portal_id=2;"

@@ -21,7 +21,7 @@ from apps.backend.models.portal_telegram_setting import PortalTelegramSetting
 from apps.backend.models.portal_bot_flow import PortalBotFlow
 from apps.backend.models.kb import KBSource, KBFile, KBChunk, KBJob
 from apps.backend.models.web_user import WebUser, WebSession
-from apps.backend.models.account import AppUserWebCredential
+from apps.backend.models.account import AppSession, AppUserWebCredential, AccountMembership, Account, AccountIntegration
 from apps.backend.services.activity import log_activity
 from apps.backend.services.portal_tokens import get_valid_access_token, BitrixAuthError
 from apps.backend.clients.bitrix import user_get
@@ -42,7 +42,9 @@ from apps.backend.services.web_email import (
     get_valid_email_token,
     send_password_reset_email,
 )
-from apps.backend.services.rbac_service import ensure_rbac_for_web_user
+from apps.backend.services.identity_linking import link_or_create_app_user
+from apps.backend.services.rbac_service import ensure_rbac_for_web_user, get_account_id_by_portal_id, ensure_account_member
+from apps.backend.services.billing import get_portal_effective_policy
 
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
@@ -64,6 +66,8 @@ class TokenResponse(BaseModel):
     portal_id: int
     portal_token: str
     email: str
+    active_account_id: int | None = None
+    accounts: list[dict] | None = None
 
 
 class RegisterResponse(BaseModel):
@@ -97,10 +101,167 @@ def _create_session(db: Session, user: WebUser) -> str:
     return token
 
 
-def _get_current_web_user(
+def _create_bridge_session(
+    db: Session,
+    *,
+    web_user: WebUser,
+    app_user_id: int,
+    active_account_id: int | None,
+) -> str:
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(days=30)
+    db.add(
+        WebSession(
+            user_id=int(web_user.id),
+            app_user_id=int(app_user_id),
+            token=token,
+            created_at=datetime.utcnow(),
+            expires_at=expires_at,
+        )
+    )
+    db.add(
+        AppSession(
+            user_id=int(app_user_id),
+            active_account_id=int(active_account_id) if active_account_id else None,
+            token=token,
+            created_at=datetime.utcnow(),
+            expires_at=expires_at,
+        )
+    )
+    db.commit()
+    return token
+
+
+def _get_app_session_by_token(db: Session, token: str) -> AppSession | None:
+    return db.execute(select(AppSession).where(AppSession.token == token)).scalar_one_or_none()
+
+
+def _resolve_primary_portal(db: Session, account_id: int) -> Portal | None:
+    rows = db.execute(
+        select(Portal)
+        .where(Portal.account_id == account_id)
+        .order_by(
+            Portal.install_type.asc(),
+            Portal.id.asc(),
+        )
+    ).scalars().all()
+    if not rows:
+        return None
+    bitrix = [p for p in rows if "bitrix24." in (p.domain or "").lower()]
+    web = [p for p in rows if (p.install_type or "").lower() == "web" or (p.domain or "").lower().startswith("web:")]
+    return (bitrix[0] if bitrix else (web[0] if web else rows[0]))
+
+
+def _ensure_bridge_web_user(
+    db: Session,
+    *,
+    email: str,
+    password_hash: str,
+    portal_id: int | None,
+    email_verified_at: datetime | None,
+) -> WebUser:
+    now = datetime.utcnow()
+    user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
+    if not user:
+        user = WebUser(
+            email=email,
+            password_hash=password_hash,
+            portal_id=portal_id,
+            email_verified_at=email_verified_at,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(user)
+        db.flush()
+        return user
+    user.password_hash = password_hash
+    user.portal_id = portal_id
+    if email_verified_at and not user.email_verified_at:
+        user.email_verified_at = email_verified_at
+    user.updated_at = now
+    db.add(user)
+    db.flush()
+    return user
+
+
+def _list_active_accounts(db: Session, app_user_id: int) -> list[dict]:
+    rows = db.execute(
+        select(AccountMembership, Account)
+        .join(Account, Account.id == AccountMembership.account_id)
+        .where(
+            AccountMembership.user_id == app_user_id,
+            AccountMembership.status.in_(["active", "invited"]),
+        )
+        .order_by(AccountMembership.role.desc(), Account.id.asc())
+    ).all()
+    items: list[dict] = []
+    seen: set[int] = set()
+    for membership, account in rows:
+        if int(account.id) in seen:
+            continue
+        seen.add(int(account.id))
+        items.append(
+            {
+                "id": int(account.id),
+                "account_no": int(account.account_no) if account.account_no is not None else None,
+                "name": account.name,
+                "slug": account.slug,
+                "role": membership.role,
+                "status": membership.status,
+            }
+        )
+    return items
+
+
+def _pick_active_account_id(
+    db: Session,
+    *,
+    app_user_id: int,
+    email: str,
+) -> int | None:
+    memberships = db.execute(
+        select(AccountMembership.account_id, AccountMembership.role)
+        .where(
+            AccountMembership.user_id == app_user_id,
+            AccountMembership.status.in_(["active", "invited"]),
+        )
+        .order_by(AccountMembership.role.desc(), AccountMembership.account_id.asc())
+    ).all()
+    if not memberships:
+        return None
+    web_user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
+    if web_user and web_user.portal_id:
+        portal = db.get(Portal, int(web_user.portal_id))
+        if portal and portal.account_id:
+            return int(portal.account_id)
+    return int(memberships[0][0])
+
+
+def _build_token_response(
+    db: Session,
+    *,
+    session_token: str,
+    email: str,
+    app_user_id: int,
+    active_account_id: int | None,
+    bridge_user: WebUser,
+) -> TokenResponse:
+    portal_id = int(bridge_user.portal_id or 0)
+    portal_token = create_portal_token_with_user(portal_id, bridge_user.id if portal_id else None, expires_minutes=60) if portal_id else ""
+    return TokenResponse(
+        session_token=session_token,
+        portal_id=portal_id,
+        portal_token=portal_token,
+        email=email,
+        active_account_id=int(active_account_id) if active_account_id else None,
+        accounts=_list_active_accounts(db, int(app_user_id)),
+    )
+
+
+def _get_current_web_session(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: Session = Depends(get_db),
-) -> WebUser:
+) -> WebSession:
     if not credentials:
         raise HTTPException(status_code=401, detail="Unauthorized")
     token = credentials.credentials
@@ -111,6 +272,13 @@ def _get_current_web_user(
         raise HTTPException(status_code=401, detail="Invalid token")
     if session.expires_at and session.expires_at < datetime.utcnow():
         raise HTTPException(status_code=401, detail="Token expired")
+    return session
+
+
+def _get_current_web_user(
+    session: WebSession = Depends(_get_current_web_session),
+    db: Session = Depends(get_db),
+) -> WebUser:
     user = db.get(WebUser, session.user_id)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
@@ -150,7 +318,44 @@ def register(body: RegisterBody, db: Session = Depends(get_db)):
 @router.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginBody, db: Session = Depends(get_db)):
     email = body.email.lower().strip()
-    user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
+    cred = db.execute(select(AppUserWebCredential).where(AppUserWebCredential.email == email)).scalar_one_or_none()
+    legacy_user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
+    if cred:
+        if not verify_password(body.password, cred.password_hash):
+            raise HTTPException(status_code=401, detail="invalid_credentials")
+        if not cred.email_verified_at:
+            raise HTTPException(status_code=403, detail="email_not_verified")
+        app_user_id = int(cred.user_id)
+        active_account_id = _pick_active_account_id(db, app_user_id=app_user_id, email=email)
+        if active_account_id is None:
+            raise HTTPException(status_code=400, detail="missing_account")
+        primary_portal = _resolve_primary_portal(db, int(active_account_id))
+        bridge_user = _ensure_bridge_web_user(
+            db,
+            email=email,
+            password_hash=cred.password_hash,
+            portal_id=int(primary_portal.id) if primary_portal else None,
+            email_verified_at=cred.email_verified_at,
+        )
+        db.execute(delete(WebSession).where(WebSession.user_id == bridge_user.id))
+        db.execute(delete(AppSession).where(AppSession.user_id == app_user_id))
+        db.commit()
+        session_token = _create_bridge_session(
+            db,
+            web_user=bridge_user,
+            app_user_id=app_user_id,
+            active_account_id=active_account_id,
+        )
+        log_activity(db, kind="web", portal_id=bridge_user.portal_id, web_user_id=bridge_user.id)
+        return _build_token_response(
+            db,
+            session_token=session_token,
+            email=email,
+            app_user_id=app_user_id,
+            active_account_id=active_account_id,
+            bridge_user=bridge_user,
+        )
+    user = legacy_user
     if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid_credentials")
     if not user.email_verified_at:
@@ -159,14 +364,38 @@ def login(body: LoginBody, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="missing_portal")
     ensure_rbac_for_web_user(db, user)
     db.commit()
-    session_token = _create_session(db, user)
-    portal_token = create_portal_token_with_user(user.portal_id, user.id, expires_minutes=60)
+    cred = db.execute(select(AppUserWebCredential).where(AppUserWebCredential.email == email)).scalar_one_or_none()
+    app_user_id = int(cred.user_id) if cred else None
+    active_account_id = get_account_id_by_portal_id(db, int(user.portal_id))
+    if app_user_id:
+        primary_portal = _resolve_primary_portal(db, int(active_account_id)) if active_account_id else None
+        bridge_user = _ensure_bridge_web_user(
+            db,
+            email=email,
+            password_hash=cred.password_hash,
+            portal_id=int(primary_portal.id) if primary_portal else int(user.portal_id),
+            email_verified_at=cred.email_verified_at or user.email_verified_at,
+        )
+        db.execute(delete(AppSession).where(AppSession.user_id == app_user_id))
+        db.execute(delete(WebSession).where(WebSession.user_id == bridge_user.id))
+        db.commit()
+        session_token = _create_bridge_session(
+            db,
+            web_user=bridge_user,
+            app_user_id=app_user_id,
+            active_account_id=active_account_id,
+        )
+        user = bridge_user
+    else:
+        session_token = _create_session(db, user)
     log_activity(db, kind="web", portal_id=user.portal_id, web_user_id=user.id)
-    return TokenResponse(
+    return _build_token_response(
+        db,
         session_token=session_token,
-        portal_id=int(user.portal_id),
-        portal_token=portal_token,
         email=user.email,
+        app_user_id=int(app_user_id or 0),
+        active_account_id=active_account_id,
+        bridge_user=user,
     )
 
 
@@ -271,6 +500,7 @@ def resend_confirm(body: ConfirmEmailBody, db: Session = Depends(get_db)):
 
 @router.get("/auth/me", response_model=TokenResponse)
 def me(
+    session: WebSession = Depends(_get_current_web_session),
     user: WebUser = Depends(_get_current_web_user),
     db: Session = Depends(get_db),
 ):
@@ -278,13 +508,25 @@ def me(
         raise HTTPException(status_code=400, detail="missing_portal")
     ensure_rbac_for_web_user(db, user)
     db.commit()
-    portal_token = create_portal_token_with_user(user.portal_id, user.id, expires_minutes=60)
+    creds = db.execute(select(AppUserWebCredential).where(AppUserWebCredential.email == user.email)).scalar_one_or_none()
+    app_user_id = int(session.app_user_id or 0)
+    if creds and not app_user_id:
+        app_user_id = int(creds.user_id)
+        session.app_user_id = app_user_id
+        db.add(session)
+        db.commit()
+    app_session = _get_app_session_by_token(db, session.token)
+    active_account_id = int(app_session.active_account_id) if app_session and app_session.active_account_id else None
+    if active_account_id is None and user.portal_id:
+        active_account_id = get_account_id_by_portal_id(db, int(user.portal_id))
     log_activity(db, kind="web", portal_id=user.portal_id, web_user_id=user.id)
-    return TokenResponse(
-        session_token="",
-        portal_id=int(user.portal_id),
-        portal_token=portal_token,
+    return _build_token_response(
+        db,
+        session_token=session.token,
         email=user.email,
+        app_user_id=app_user_id,
+        active_account_id=active_account_id,
+        bridge_user=user,
     )
 
 
@@ -299,8 +541,52 @@ def logout(
     session = db.execute(select(WebSession).where(WebSession.token == token)).scalar_one_or_none()
     if session:
         db.delete(session)
-        db.commit()
+    app_session = _get_app_session_by_token(db, token)
+    if app_session:
+        db.delete(app_session)
+    db.commit()
     return {"status": "ok"}
+
+
+class SwitchAccountBody(BaseModel):
+    account_id: int
+
+
+@router.post("/auth/switch-account", response_model=TokenResponse)
+def switch_account(
+    body: SwitchAccountBody,
+    session: WebSession = Depends(_get_current_web_session),
+    user: WebUser = Depends(_get_current_web_user),
+    db: Session = Depends(get_db),
+):
+    target_account = db.execute(
+        select(AccountMembership.account_id)
+        .where(
+            AccountMembership.user_id == int(session.app_user_id or 0),
+            AccountMembership.account_id == int(body.account_id),
+            AccountMembership.status.in_(["active", "invited"]),
+        )
+    ).scalar_one_or_none()
+    if not target_account:
+        raise HTTPException(status_code=403, detail="forbidden")
+    app_session = _get_app_session_by_token(db, session.token)
+    if not app_session:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    app_session.active_account_id = int(body.account_id)
+    primary_portal = _resolve_primary_portal(db, int(body.account_id))
+    user.portal_id = int(primary_portal.id) if primary_portal else None
+    user.updated_at = datetime.utcnow()
+    db.add(app_session)
+    db.add(user)
+    db.commit()
+    return _build_token_response(
+        db,
+        session_token=session.token,
+        email=user.email,
+        app_user_id=int(session.app_user_id or 0),
+        active_account_id=int(body.account_id),
+        bridge_user=user,
+    )
 
 
 class WebUserItem(BaseModel):
@@ -476,6 +762,36 @@ def sync_bitrix_users(
     portal = db.get(Portal, portal_id)
     if not portal or not portal.domain:
         raise HTTPException(status_code=404, detail="portal_not_found")
+    account_id, _app_user_id = ensure_rbac_for_web_user(db, user)
+    if not account_id:
+        raise HTTPException(status_code=400, detail="missing_account")
+    integ = db.execute(
+        select(AccountIntegration).where(
+            AccountIntegration.account_id == int(account_id),
+            AccountIntegration.provider == "bitrix",
+            AccountIntegration.portal_id == int(portal_id),
+        )
+    ).scalar_one_or_none()
+    if not integ:
+        integ = db.execute(
+            select(AccountIntegration).where(
+                AccountIntegration.provider == "bitrix",
+                AccountIntegration.external_key == str(portal.domain or "").strip().lower(),
+            )
+        ).scalar_one_or_none()
+    if not integ:
+        integ = AccountIntegration(
+            account_id=int(account_id),
+            provider="bitrix",
+            status="active",
+            external_key=str(portal.domain or "").strip().lower(),
+            portal_id=int(portal_id),
+            credentials_json=None,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        db.add(integ)
+        db.flush()
     domain_full = f"https://{portal.domain}"
     users_list, err = user_get(domain_full, access_token, start=0, limit=200)
     if err == "missing_scope_user":
@@ -489,12 +805,17 @@ def sync_bitrix_users(
         )
     ).scalars().all()
     existing_map = {r.user_id: r for r in existing}
+    linked_count = 0
+    membership_created_count = 0
+    skipped_count = 0
+    skipped_examples: list[dict[str, str]] = []
     for u in users_list:
         uid = str(u.get("ID"))
         if not uid or uid == "None":
             continue
         name = (u.get("NAME") or "") + " " + (u.get("LAST_NAME") or "")
         name = name.strip() or (u.get("EMAIL") or "")
+        email = (str(u.get("EMAIL") or "").strip().lower() or None)
         if uid in existing_map:
             row = existing_map[uid]
             if name:
@@ -507,8 +828,56 @@ def sync_bitrix_users(
                 display_name=name,
                 kind="bitrix",
             ))
+        link_result = link_or_create_app_user(
+            db,
+            provider="bitrix",
+            integration_id=int(integ.id),
+            external_id=uid,
+            display_value=name or email or f"Bitrix user {uid}",
+            email=email,
+            auto_create_user=True,
+            meta_json={
+                "email": email,
+                "name": (u.get("NAME") or None),
+                "last_name": (u.get("LAST_NAME") or None),
+                "portal_id": int(portal_id),
+            },
+        )
+        if link_result.user_id:
+            _membership, created = ensure_account_member(
+                db,
+                account_id=int(account_id),
+                user_id=int(link_result.user_id),
+                role="member",
+                status="active",
+                kb_access="none",
+                can_invite_users=False,
+                can_manage_settings=False,
+                can_view_finance=False,
+            )
+            linked_count += 1
+            membership_created_count += 1 if created else 0
+        else:
+            skipped_count += 1
+            if len(skipped_examples) < 10:
+                skipped_examples.append(
+                    {
+                        "external_id": uid,
+                        "email": email or "",
+                        "reason": link_result.reason or link_result.status,
+                    }
+                )
     db.commit()
-    return {"status": "ok", "count": len(users_list)}
+    return {
+        "status": "ok",
+        "count": len(users_list),
+        "identity_linking": {
+            "linked": linked_count,
+            "memberships_created": membership_created_count,
+            "skipped": skipped_count,
+            "examples": skipped_examples,
+        },
+    }
 
 
 @router.get("/portals/{portal_id}/telegram/staff")
@@ -591,6 +960,9 @@ def set_web_telegram_client_settings(
 ):
     if int(user.portal_id or 0) != portal_id:
         raise HTTPException(status_code=403, detail="forbidden")
+    policy = get_portal_effective_policy(db, portal_id)
+    if not bool((policy.get("features") or {}).get("allow_client_bot", True)):
+        raise HTTPException(status_code=403, detail="client_bot_locked")
     if body.clear_token:
         body.enabled = False
     settings = set_portal_telegram_settings(

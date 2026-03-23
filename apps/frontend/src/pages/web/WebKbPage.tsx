@@ -734,7 +734,7 @@ export function WebKbPage() {
     setSmartSearchAnswer("");
     const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/ask`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Api-Schema": "v2" },
       body: JSON.stringify({
         query: q,
         scope: selectedFileIds.length > 0
@@ -752,7 +752,7 @@ export function WebKbPage() {
       setSmartSearchError(data?.error || data?.detail || "Ошибка умного поиска");
       return;
     }
-    setSmartSearchAnswer(data?.answer || "");
+    setSmartSearchAnswer(data?.data?.answer || data?.answer || "");
   };
 
   const toggleSmartSearch = () => {

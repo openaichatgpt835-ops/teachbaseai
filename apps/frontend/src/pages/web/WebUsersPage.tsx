@@ -1,9 +1,13 @@
-﻿import { useEffect, useMemo, useState } from "react";
-import { fetchPortal, fetchWeb, getWebPortalInfo } from "./auth";
+﻿import { useEffect, useState } from "react";
+import { fetchPortal, fetchWeb, getActiveAccountId, getWebPortalInfo } from "./auth";
 
-type UserItem = { id: number; name: string };
-type AccessItem = { user_id: string | number; telegram_username?: string | null; display_name?: string | null; kind?: string | null };
 type WebUserItem = { id: string; name: string; telegram_username?: string | null };
+type LinkedIdentity = {
+  id: number;
+  external_id?: string | null;
+  display_value?: string | null;
+  integration_id?: number | null;
+};
 type V2UserItem = {
   membership_id: number;
   user_id: number;
@@ -17,6 +21,16 @@ type V2UserItem = {
     can_view_finance: boolean;
   };
   web?: { login?: string | null; email?: string | null } | null;
+  bitrix?: LinkedIdentity[];
+  telegram?: LinkedIdentity[];
+  amo?: LinkedIdentity[];
+  access_center?: {
+    portal_id?: number | null;
+    bitrix_linked?: boolean;
+    bitrix_allowlist?: boolean;
+    bitrix_user_ids?: string[];
+    telegram_username?: string | null;
+  } | null;
 };
 type V2InviteItem = { id: number; email?: string | null; role: string; status: string; expires_at?: string | null; accept_url?: string | null };
 type MeContext = {
@@ -31,11 +45,9 @@ type MeContext = {
 };
 
 type UsersCacheState = {
-  users: UserItem[];
   selectedUsers: number[];
   telegramMap: Record<number, string>;
   webUsers: WebUserItem[];
-  accessWarning: string;
 };
 
 const usersCache = new Map<number, UsersCacheState>();
@@ -44,13 +56,11 @@ export function WebUsersPage() {
   const { portalId, portalToken } = getWebPortalInfo();
   const cached = portalId ? usersCache.get(portalId) : null;
 
-  const [users, setUsers] = useState<UserItem[]>(cached?.users || []);
-  const [userSearch, setUserSearch] = useState("");
   const [selectedUsers, setSelectedUsers] = useState<number[]>(cached?.selectedUsers || []);
   const [telegramMap, setTelegramMap] = useState<Record<number, string>>(cached?.telegramMap || {});
-  const [accessWarning, setAccessWarning] = useState(cached?.accessWarning || "");
   const [saveStatus, setSaveStatus] = useState("");
   const [saving, setSaving] = useState(false);
+  const [savingBitrixKey, setSavingBitrixKey] = useState<string>("");
 
   const [webUsers, setWebUsers] = useState<WebUserItem[]>(cached?.webUsers || []);
   const [newWebUserName, setNewWebUserName] = useState("");
@@ -75,96 +85,23 @@ export function WebUsersPage() {
   const patchCache = (patch: Partial<UsersCacheState>) => {
     if (!portalId) return;
     const prev = usersCache.get(portalId) || {
-      users: [],
       selectedUsers: [],
       telegramMap: {},
       webUsers: [],
-      accessWarning: "",
     };
     usersCache.set(portalId, { ...prev, ...patch });
   };
 
-  const filteredUsers = useMemo(() => {
-    const q = userSearch.trim().toLowerCase();
-    if (!q) return users;
-    return users.filter((u) => u.name.toLowerCase().includes(q));
-  }, [users, userSearch]);
-
-  const loadUsers = async () => {
-    if (!portalId || !portalToken) return;
-    try {
-      const res = await fetchPortal(`/api/v1/bitrix/users?portal_id=${portalId}`);
-      const data = await res.json().catch(() => null);
-      if (!res.ok) {
-        const errCode = data?.error || "";
-        const errMap: Record<string, string> = {
-          missing_client_credentials: "Bitrix API недоступен: не задан client_id/client_secret (Админка → Portal → OAuth).",
-          missing_refresh_token: "Bitrix API недоступен: нет refresh_token. Откройте приложение в Bitrix24 или переустановите.",
-          bitrix_auth_invalid: "Bitrix API недоступен: токен протух. Откройте приложение в Bitrix24, чтобы обновить токен.",
-        };
-        const errText = errMap[errCode] || data?.detail || data?.error || "Bitrix API недоступен.";
-        const fallbackRes = await fetchWeb(`/api/v1/web/portals/${portalId}/access/users`);
-        const fallback = await fallbackRes.json().catch(() => null);
-        if (fallbackRes.ok && Array.isArray(fallback?.items)) {
-          const items = fallback.items.filter((it: AccessItem) => (it.kind || "bitrix") === "bitrix");
-          const mapped = items
-            .map((it: AccessItem) => ({ id: Number(it.user_id), name: it.display_name || String(it.user_id) }))
-            .filter((u: UserItem) => Number.isFinite(u.id));
-          setUsers(mapped);
-          setAccessWarning(`${errText} Показан последний сохранённый список.`);
-          patchCache({ users: mapped, accessWarning: `${errText} Показан последний сохранённый список.` });
-          return;
-        }
-        setAccessWarning(errText || "Не удалось загрузить пользователей.");
-        patchCache({ accessWarning: errText || "Не удалось загрузить пользователей." });
-        return;
-      }
-      const list = (data?.users || []).map((u: any) => ({
-        id: Number(u.id),
-        name: `${u.name || ""} ${u.last_name || ""}`.trim() || u.email || `ID ${u.id}`,
-      }));
-      setUsers(list);
-      setAccessWarning("");
-      patchCache({ users: list, accessWarning: "" });
-    } catch {
-      setAccessWarning("Не удалось загрузить пользователей.");
-      patchCache({ accessWarning: "Не удалось загрузить пользователей." });
-    }
-  };
-
-  const loadAllowlist = async () => {
-    if (!portalId || !portalToken) return;
-    const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/access/users`);
-    const data = await res.json().catch(() => null);
-    if (!res.ok) return;
-    const items: AccessItem[] = Array.isArray(data?.items) ? data.items : [];
-    const bitrixIds = items
-      .filter((it) => (it.kind || "bitrix") === "bitrix")
-      .map((it) => Number(it.user_id))
-      .filter((n) => Number.isFinite(n));
-    setSelectedUsers(bitrixIds);
-    const tgMap: Record<number, string> = {};
-    items.forEach((it) => {
-      if ((it.kind || "bitrix") !== "bitrix") return;
-      const id = Number(it.user_id);
-      if (!Number.isFinite(id)) return;
-      const raw = it.telegram_username || "";
-      tgMap[id] = raw ? `@${raw}` : "";
-    });
-    setTelegramMap(tgMap);
-    const nextWebUsers = items
-      .filter((it) => it.kind === "web")
-      .map((it) => ({ id: String(it.user_id), name: it.display_name || String(it.user_id), telegram_username: it.telegram_username || "" }));
-    setWebUsers(nextWebUsers);
-    patchCache({ selectedUsers: bitrixIds, telegramMap: tgMap, webUsers: nextWebUsers });
-  };
-
   const loadAccountContext = async () => {
+    const storedAccountId = getActiveAccountId();
+    if (storedAccountId) {
+      setAccountId(storedAccountId);
+    }
     const meRes = await fetchWeb("/api/v2/web/auth/me");
     const me = await meRes.json().catch(() => null);
-    if (!meRes.ok || !me?.account?.id) return;
-    setMeCtx(me as MeContext);
-    const aid = Number(me.account.id);
+    if (!meRes.ok) return;
+    setMeCtx((me || null) as MeContext | null);
+    const aid = Number(me?.account?.id || storedAccountId || 0);
     if (!Number.isFinite(aid) || aid <= 0) return;
     setAccountId(aid);
   };
@@ -175,13 +112,43 @@ export function WebUsersPage() {
     setV2UsersLoading(true);
     setV2Msg("");
     try {
-      const res = await fetchWeb(`/api/v2/web/accounts/${current}/users`);
+      const res = await fetchWeb(`/api/v2/web/accounts/${current}/access-center`);
       const data = await res.json().catch(() => null);
       if (!res.ok) {
         setV2Msg(data?.detail || data?.message || "Не удалось загрузить пользователей аккаунта.");
         return;
       }
-      setV2Users(Array.isArray(data?.items) ? data.items : []);
+      const nextItems = Array.isArray(data?.items) ? data.items : [];
+      setV2Users(nextItems);
+      const nextSelected = nextItems.flatMap((it: V2UserItem) =>
+        it.access_center?.bitrix_allowlist
+          ? (it.access_center?.bitrix_user_ids || []).map((value) => Number(value)).filter((value) => Number.isFinite(value))
+          : [],
+      );
+      const nextTelegramMap: Record<number, string> = {};
+      nextItems.forEach((it: V2UserItem) => {
+        const username = it.access_center?.telegram_username || "";
+        if (!username) return;
+        (it.access_center?.bitrix_user_ids || []).forEach((value) => {
+          const numeric = Number(value);
+          if (Number.isFinite(numeric)) {
+            nextTelegramMap[numeric] = `@${username}`;
+          }
+        });
+      });
+      setSelectedUsers(nextSelected);
+      setTelegramMap(nextTelegramMap);
+      if (Array.isArray(data?.legacy_web_users)) {
+        const nextWebUsers = data.legacy_web_users.map((it: any) => ({
+          id: String(it.user_id ?? it.id),
+          name: it.display_name || String(it.user_id ?? it.id),
+          telegram_username: it.telegram_username || "",
+        }));
+        setWebUsers(nextWebUsers);
+        patchCache({ selectedUsers: nextSelected, telegramMap: nextTelegramMap, webUsers: nextWebUsers });
+      } else {
+        patchCache({ selectedUsers: nextSelected, telegramMap: nextTelegramMap });
+      }
     } finally {
       setV2UsersLoading(false);
     }
@@ -200,15 +167,11 @@ export function WebUsersPage() {
     if (portalId) {
       const s = usersCache.get(portalId);
       if (s) {
-        setUsers(s.users || []);
         setSelectedUsers(s.selectedUsers || []);
         setTelegramMap(s.telegramMap || {});
         setWebUsers(s.webUsers || []);
-        setAccessWarning(s.accessWarning || "");
       }
     }
-    loadUsers();
-    loadAllowlist();
     loadAccountContext();
   }, [portalId, portalToken]);
 
@@ -220,16 +183,13 @@ export function WebUsersPage() {
 
   useEffect(() => {
     if (!portalId) return;
-    patchCache({ selectedUsers, telegramMap, webUsers, users, accessWarning });
-  }, [portalId, selectedUsers, telegramMap, webUsers, users, accessWarning]);
+    patchCache({ selectedUsers, telegramMap, webUsers });
+  }, [portalId, selectedUsers, telegramMap, webUsers]);
 
-  const toggleUser = (id: number) => {
-    setSelectedUsers((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  };
-
-  const saveAccess = async () => {
+  const saveAccess = async (focusKey?: string) => {
     if (!portalId || !portalToken) return;
     setSaving(true);
+    setSavingBitrixKey(focusKey || "");
     setSaveStatus("Сохраняю...");
     const items = selectedUsers.map((id) => ({ user_id: id, telegram_username: telegramMap[id] || null }));
     try {
@@ -243,11 +203,13 @@ export function WebUsersPage() {
         setSaveStatus(data?.detail || data?.error || "Ошибка");
       } else {
         setSaveStatus("Сохранено");
+        await loadV2Users(accountId);
       }
     } catch {
       setSaveStatus("Ошибка");
     } finally {
       setSaving(false);
+      setSavingBitrixKey("");
     }
   };
 
@@ -274,7 +236,7 @@ export function WebUsersPage() {
       setNewWebUserName("");
       setNewWebUserTelegram("");
       setWebUserMessage("Добавлено");
-      await loadAllowlist();
+      await loadV2Users(accountId);
     } catch {
       setWebUserMessage("Ошибка добавления.");
     }
@@ -290,7 +252,7 @@ export function WebUsersPage() {
         setWebUserMessage(data?.detail || data?.error || "Ошибка удаления.");
         return;
       }
-      await loadAllowlist();
+      await loadV2Users(accountId);
       setWebUserMessage("Удалено");
     } catch {
       setWebUserMessage("Ошибка удаления.");
@@ -425,34 +387,67 @@ export function WebUsersPage() {
     if (status === "deleted") return "Удален";
     return status;
   };
+  const renderIdentityTag = (kind: "web" | "bitrix" | "telegram" | "amo", label: string) => {
+    const tone =
+      kind === "web"
+        ? "border-sky-200 bg-sky-50 text-sky-700"
+        : kind === "bitrix"
+          ? "border-indigo-200 bg-indigo-50 text-indigo-700"
+          : kind === "telegram"
+            ? "border-cyan-200 bg-cyan-50 text-cyan-700"
+            : "border-violet-200 bg-violet-50 text-violet-700";
+    return <span className={`rounded-full border px-2 py-0.5 text-[11px] ${tone}`}>{label}</span>;
+  };
+  const renderIdentityValue = (items: LinkedIdentity[] | undefined, fallbackPrefix: string) => {
+    if (!Array.isArray(items) || items.length === 0) return "—";
+    return items
+      .map((it) => it.display_value || it.external_id || `${fallbackPrefix}:${it.id}`)
+      .filter(Boolean)
+      .join(", ");
+  };
+  const renderBitrixAccess = (u: V2UserItem) => {
+    const access = u.access_center;
+    if (!access?.bitrix_linked) return "Bitrix не привязан";
+    if (access.bitrix_allowlist) {
+      return `Bitrix в доступе${access.telegram_username ? ` · @${access.telegram_username}` : ""}`;
+    }
+    return "Bitrix привязан, но не в allowlist";
+  };
+  const toggleBitrixAllow = (u: V2UserItem, checked: boolean) => {
+    const ids = (u.access_center?.bitrix_user_ids || []).map((value) => Number(value)).filter((value) => Number.isFinite(value));
+    if (ids.length === 0) return;
+    setSelectedUsers((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => {
+        if (checked) next.add(id);
+        else next.delete(id);
+      });
+      return Array.from(next);
+    });
+  };
+  const setBitrixTelegram = (u: V2UserItem, value: string) => {
+    const ids = (u.access_center?.bitrix_user_ids || []).map((entry) => Number(entry)).filter((entry) => Number.isFinite(entry));
+    if (ids.length === 0) return;
+    setTelegramMap((prev) => {
+      const next = { ...prev };
+      ids.forEach((id) => {
+        next[id] = value;
+      });
+      return next;
+    });
+  };
+  const resolveBitrixTelegram = (u: V2UserItem) => {
+    const ids = (u.access_center?.bitrix_user_ids || []).map((value) => Number(value)).filter((value) => Number.isFinite(value));
+    for (const id of ids) {
+      const current = telegramMap[id];
+      if (current) return current;
+    }
+    return "";
+  };
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-6 lg:grid-cols-2">
-        <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-          <h2 className="text-sm font-semibold text-slate-900">Доступ (Bitrix)</h2>
-          {accessWarning && <div className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700">{accessWarning}</div>}
-          <input className="mt-4 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm" placeholder="Поиск по имени..." value={userSearch} onChange={(e) => setUserSearch(e.target.value)} />
-          <div className="mt-4 max-h-[420px] space-y-3 overflow-auto">
-            {filteredUsers.length === 0 && <div className="text-sm text-slate-500">Сотрудников пока нет.</div>}
-            {filteredUsers.map((u) => (
-              <div key={u.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 px-3 py-2">
-                <label className="flex items-center gap-2 text-sm text-slate-700">
-                  <input type="checkbox" checked={selectedUsers.includes(u.id)} onChange={() => toggleUser(u.id)} />
-                  <span>{u.name}</span>
-                </label>
-                <input className="w-40 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs" placeholder="@telegram" value={telegramMap[u.id] || ""} onChange={(e) => setTelegramMap((prev) => ({ ...prev, [u.id]: e.target.value }))} />
-              </div>
-            ))}
-          </div>
-          <div className="mt-4 flex items-center gap-3">
-            <button className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50" onClick={saveAccess} disabled={saving}>{saving ? "Сохраняю..." : "Сохранить доступ"}</button>
-            <div className="text-xs text-slate-500">Выбрано: {selectedUsers.length}</div>
-            {saveStatus && <div className="text-xs text-slate-500">{saveStatus}</div>}
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
+      <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
           <h2 className="text-sm font-semibold text-slate-900">Доп. пользователи (Telegram)</h2>
           <div className="mt-4 space-y-3">
             <div>
@@ -480,7 +475,6 @@ export function WebUsersPage() {
               </div>
             ))}
           </div>
-        </div>
       </div>
 
       <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
@@ -501,6 +495,10 @@ export function WebUsersPage() {
         <div className="mt-3">
           <button className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50" onClick={createManualUser} disabled={!canInviteUsers}>Создать пользователя</button>
         </div>
+        <div className="mt-4 flex items-center gap-3 text-xs text-slate-500">
+          <div>Выбрано Bitrix ID: {selectedUsers.length}</div>
+          {saveStatus && <div>{saveStatus}</div>}
+        </div>
 
         <div className="mt-4 overflow-auto rounded-xl border border-slate-100">
           <table className="min-w-full text-sm">
@@ -510,19 +508,51 @@ export function WebUsersPage() {
                 <th className="px-3 py-2 text-left">Роль</th>
                 <th className="px-3 py-2 text-left">База знаний</th>
                 <th className="px-3 py-2 text-left">Права</th>
+                <th className="px-3 py-2 text-left">Bitrix</th>
                 <th className="px-3 py-2 text-left">Статус</th>
                 <th className="px-3 py-2 text-left">Действия</th>
               </tr>
             </thead>
             <tbody>
               {!v2UsersLoading && v2Users.length === 0 && (
-                <tr><td className="px-3 py-3 text-slate-500" colSpan={6}>Нет данных.</td></tr>
+                <tr><td className="px-3 py-3 text-slate-500" colSpan={7}>Нет данных.</td></tr>
               )}
               {v2Users.map((u) => (
                 <tr key={u.membership_id} className="border-t border-slate-100">
                   <td className="px-3 py-2">
                     <div className="text-slate-800">{u.display_name || "Без имени"}</div>
                     <div className="text-xs text-slate-500">{u.web?.email || u.web?.login || "—"}</div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {u.web && renderIdentityTag("web", "Web")}
+                      {Array.isArray(u.bitrix) && u.bitrix.length > 0 && renderIdentityTag("bitrix", `Bitrix: ${u.bitrix.length}`)}
+                      {Array.isArray(u.telegram) && u.telegram.length > 0 && renderIdentityTag("telegram", `Telegram: ${u.telegram.length}`)}
+                      {Array.isArray(u.amo) && u.amo.length > 0 && renderIdentityTag("amo", `Amo: ${u.amo.length}`)}
+                    </div>
+                    <div className="mt-2 space-y-1 text-[11px] text-slate-500">
+                      {u.web && (
+                        <div>
+                          <span className="font-medium text-slate-600">Web:</span> {u.web.email || u.web.login || "—"}
+                        </div>
+                      )}
+                      {Array.isArray(u.bitrix) && u.bitrix.length > 0 && (
+                        <div>
+                          <span className="font-medium text-slate-600">Bitrix:</span> {renderIdentityValue(u.bitrix, "bitrix")}
+                        </div>
+                      )}
+                      {Array.isArray(u.telegram) && u.telegram.length > 0 && (
+                        <div>
+                          <span className="font-medium text-slate-600">Telegram:</span> {renderIdentityValue(u.telegram, "telegram")}
+                        </div>
+                      )}
+                      {Array.isArray(u.amo) && u.amo.length > 0 && (
+                        <div>
+                          <span className="font-medium text-slate-600">Amo:</span> {renderIdentityValue(u.amo, "amo")}
+                        </div>
+                      )}
+                      <div>
+                        <span className="font-medium text-slate-600">Доступ:</span> {renderBitrixAccess(u)}
+                      </div>
+                    </div>
                   </td>
                   <td className="px-3 py-2">
                     <select className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs" value={u.role} disabled={u.role === "owner" || !canManageSettings} onChange={(e) => patchMembership(u.membership_id, { role: e.target.value })}>
@@ -546,6 +576,37 @@ export function WebUsersPage() {
                       <label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!u.permissions.can_manage_settings} disabled={u.role === "owner" || !canManageSettings} onChange={(e) => patchMembership(u.membership_id, { can_manage_settings: e.target.checked })} /> Настройки</label>
                       <label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!u.permissions.can_view_finance} disabled={u.role === "owner" || !canManageSettings} onChange={(e) => patchMembership(u.membership_id, { can_view_finance: e.target.checked })} /> Финансы</label>
                     </div>
+                  </td>
+                  <td className="px-3 py-2">
+                    {u.access_center?.bitrix_linked ? (
+                      <div className="space-y-2 text-xs text-slate-600">
+                        <label className="inline-flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={!!u.access_center?.bitrix_allowlist}
+                            disabled={!canManageSettings}
+                            onChange={(e) => toggleBitrixAllow(u, e.target.checked)}
+                          />
+                          <span>{renderBitrixAccess(u)}</span>
+                        </label>
+                        <input
+                          className="w-40 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs disabled:opacity-60"
+                          placeholder="@telegram"
+                          value={resolveBitrixTelegram(u)}
+                          disabled={!canManageSettings}
+                          onChange={(e) => setBitrixTelegram(u, e.target.value)}
+                        />
+                        <button
+                          className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                          disabled={!canManageSettings || saving}
+                          onClick={() => saveAccess(`bitrix:${u.membership_id}`)}
+                        >
+                          {saving && savingBitrixKey === `bitrix:${u.membership_id}` ? "Сохраняю..." : "Сохранить"}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-slate-500">Bitrix не привязан</div>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-xs text-slate-600">{statusLabel(u.status)}</td>
                   <td className="px-3 py-2">

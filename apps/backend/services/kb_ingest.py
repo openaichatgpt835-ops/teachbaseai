@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import logging
 import subprocess
 import tempfile
 import base64
@@ -26,6 +27,8 @@ from apps.backend.services.kb_settings import (
 from apps.backend.services.gigachat_client import create_embeddings
 from apps.backend.services.kb_pgvector import write_vector_column
 from apps.backend.services.billing import get_pricing, calc_cost_rub, record_usage
+
+log = logging.getLogger(__name__)
 
 
 def _read_text_file(path: str) -> str:
@@ -525,13 +528,15 @@ def _get_diarization_pipeline():
         from pyannote.audio import Pipeline  # type: ignore
         _DIARIZATION_PIPELINE = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=token)
         return _DIARIZATION_PIPELINE
-    except Exception:
+    except Exception as e:
+        log.warning("diarization.pipeline_init_failed err=%s", str(e)[:300])
         return None
 
 
 def _diarize_track(path: str) -> list[tuple[int, int, str]]:
     pipe = _get_diarization_pipeline()
     if pipe is None:
+        log.info("diarization.skip pipeline_unavailable path=%s", path)
         return []
     kwargs: dict[str, int] = {}
     try:
@@ -546,19 +551,64 @@ def _diarize_track(path: str) -> list[tuple[int, int, str]]:
         kwargs["min_speakers"] = min_sp
     if max_sp > 0:
         kwargs["max_speakers"] = max_sp
-    try:
-        diar = pipe(path, **kwargs)
-    except Exception:
-        return []
-    spans: list[tuple[int, int, str]] = []
-    try:
-        for turn, _track, speaker in diar.itertracks(yield_label=True):
+    def _extract_spans(diar_obj) -> list[tuple[int, int, str]]:
+        out: list[tuple[int, int, str]] = []
+        for turn, _track, speaker in diar_obj.itertracks(yield_label=True):
             s_ms = int(max(0.0, float(getattr(turn, "start", 0.0))) * 1000)
             e_ms = int(max(0.0, float(getattr(turn, "end", 0.0))) * 1000)
             if e_ms > s_ms:
-                spans.append((s_ms, e_ms, str(speaker or "").strip() or "SPEAKER_0"))
-    except Exception:
+                out.append((s_ms, e_ms, str(speaker or "").strip() or "SPEAKER_0"))
+        return out
+
+    try:
+        diar = pipe(path, **kwargs)
+        spans = _extract_spans(diar)
+    except Exception as e:
+        log.warning("diarization.error path=%s err=%s", path, str(e)[:200])
         return []
+
+    unique_first = len({sp for _s, _e, sp in spans})
+    log.info(
+        "diarization.pass1 path=%s spans=%s speakers=%s kwargs=%s",
+        path,
+        len(spans),
+        unique_first,
+        kwargs,
+    )
+
+    retry_enabled = (os.getenv("DIARIZATION_RETRY_SINGLE_SPEAKER") or "1").strip().lower() in ("1", "true", "yes", "on")
+    try:
+        min_duration = int(os.getenv("DIARIZATION_RETRY_MIN_DURATION_SEC") or 600)
+    except Exception:
+        min_duration = 600
+    try:
+        retry_min_speakers = max(2, int(os.getenv("DIARIZATION_RETRY_MIN_SPEAKERS") or 2))
+    except Exception:
+        retry_min_speakers = 2
+    duration_sec = _media_duration_seconds(path)
+    should_retry = retry_enabled and duration_sec >= min_duration and unique_first <= 1
+
+    if should_retry:
+        retry_kwargs = dict(kwargs)
+        retry_kwargs["min_speakers"] = max(retry_min_speakers, int(retry_kwargs.get("min_speakers") or 0))
+        if "max_speakers" in retry_kwargs and int(retry_kwargs["max_speakers"]) < retry_kwargs["min_speakers"]:
+            del retry_kwargs["max_speakers"]
+        try:
+            diar2 = pipe(path, **retry_kwargs)
+            spans2 = _extract_spans(diar2)
+            unique_second = len({sp for _s, _e, sp in spans2})
+            log.info(
+                "diarization.pass2 path=%s spans=%s speakers=%s kwargs=%s",
+                path,
+                len(spans2),
+                unique_second,
+                retry_kwargs,
+            )
+            if unique_second > unique_first or (unique_first == 0 and len(spans2) > 0):
+                spans = spans2
+        except Exception as e:
+            log.warning("diarization.retry_error path=%s err=%s", path, str(e)[:200])
+
     return spans
 
 
@@ -666,6 +716,18 @@ def _append_transcript_segment_jsonl(path: str, seg: _Segment) -> None:
     }
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _write_transcript_segments_jsonl(path: str, segments: list[_Segment]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for seg in segments:
+            row = {
+                "start_ms": int(seg.start_ms),
+                "end_ms": int(seg.end_ms),
+                "text": seg.text,
+                "speaker": seg.speaker,
+            }
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def _transcribe_media_resumable(
@@ -846,6 +908,8 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
                         )
                         spans = _diarize_track(wav_path) if is_speaker_diarization_enabled(db, rec.portal_id) else []
                         segments = _assign_speakers_from_spans(segments, spans)
+                        # Persist assigned speakers for transcript panel consumers.
+                        _write_transcript_segments_jsonl(transcript_jsonl_path, segments)
                     else:
                         all_segments: list[_Segment] = []
                         for si in range(stream_count):
@@ -863,15 +927,7 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
                             _set_progress(int(((si + 1) / stream_count) * 100))
                         all_segments.sort(key=lambda s: (int(s.start_ms), int(s.end_ms)))
                         segments = all_segments
-                        with open(transcript_jsonl_path, "w", encoding="utf-8") as f:
-                            for seg in segments:
-                                row = {
-                                    "start_ms": int(seg.start_ms),
-                                    "end_ms": int(seg.end_ms),
-                                    "text": seg.text,
-                                    "speaker": seg.speaker,
-                                }
-                                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                        _write_transcript_segments_jsonl(transcript_jsonl_path, segments)
                 chunks = _chunk_segments(segments, max_chars=max_chars)
                 transcript_path = rec.storage_path + ".transcript.txt"
                 with open(transcript_path, "w", encoding="utf-8") as tf:

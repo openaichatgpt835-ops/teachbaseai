@@ -1,6 +1,16 @@
-﻿import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { clearWebUser, getWebPortalInfo, getWebUser } from "./auth";
+import {
+  clearWebUser,
+  getActiveAccountId,
+  getWebAccounts,
+  getWebPortalInfo,
+  getWebSessionToken,
+  getWebUser,
+  setActiveAccountId,
+  switchWebAccount,
+  type WebAccount,
+} from "./auth";
 
 const UI_MODE_KEY = "tb_web_ui_mode";
 
@@ -18,11 +28,23 @@ export function WebLayout() {
   const location = useLocation();
   const user = getWebUser();
   const { portalId, portalToken } = getWebPortalInfo();
+  const [accounts, setAccounts] = useState<WebAccount[]>(() => getWebAccounts());
+  const [activeAccountId, setActiveAccountIdState] = useState<number>(() => getActiveAccountId());
+  const [switchingAccount, setSwitchingAccount] = useState(false);
   const [demoUntil, setDemoUntil] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [aiRopOpen, setAiRopOpen] = useState(false);
   const uiMode = getUiMode();
   const userLabel = useMemo(() => user?.email || "Пользователь", [user]);
+  const activeAccount = useMemo(
+    () => accounts.find((item) => Number(item.id) === Number(activeAccountId)) || null,
+    [accounts, activeAccountId],
+  );
+  const activeAccountLabel = useMemo(() => {
+    if (!activeAccount) return "";
+    const base = activeAccount.name || `Аккаунт ${activeAccount.id}`;
+    return activeAccount.account_no ? `${base} · №${activeAccount.account_no}` : base;
+  }, [activeAccount]);
 
   useEffect(() => {
     if (!user || !portalId || !portalToken) {
@@ -58,6 +80,36 @@ export function WebLayout() {
   }, [portalId, portalToken]);
 
   useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    const syncSession = async () => {
+      const sessionToken = getWebSessionToken();
+      if (!sessionToken) return;
+      try {
+        const res = await fetch("/api/v1/web/auth/me", {
+          headers: {
+            Authorization: `Bearer ${sessionToken}`,
+            Accept: "application/json",
+          },
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || cancelled) return;
+        const nextAccounts = Array.isArray(data?.accounts) ? (data.accounts as WebAccount[]) : [];
+        setAccounts(nextAccounts);
+        const nextActiveId = Number(data?.active_account_id || 0) || 0;
+        setActiveAccountId(nextActiveId || null);
+        setActiveAccountIdState(nextActiveId);
+      } catch {
+        // ignore
+      }
+    };
+    void syncSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  useEffect(() => {
     setSettingsOpen(location.pathname.includes("/settings"));
     setAiRopOpen(location.pathname.includes("/ai-rop"));
   }, [location.pathname]);
@@ -84,6 +136,20 @@ export function WebLayout() {
     window.location.href = "/iframe/?mode=web";
   };
 
+  const onSwitchAccount = async (nextAccountId: number) => {
+    if (!nextAccountId || nextAccountId === activeAccountId || switchingAccount) return;
+    setSwitchingAccount(true);
+    const ok = await switchWebAccount(nextAccountId);
+    if (ok) {
+      setAccounts(getWebAccounts());
+      const currentId = getActiveAccountId();
+      setActiveAccountIdState(currentId);
+      window.location.reload();
+      return;
+    }
+    setSwitchingAccount(false);
+  };
+
   return (
     <div className="min-h-screen bg-slate-50">
       <aside className="fixed left-0 top-0 bottom-0 w-64 bg-white border-r border-slate-100 px-4 py-6">
@@ -95,6 +161,7 @@ export function WebLayout() {
           <Link className={`block rounded-xl px-3 py-2 ${location.pathname.includes("/sources") ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-50"}`} to="/app/sources" onClick={() => { setSettingsOpen(false); setAiRopOpen(false); }}>Источники данных</Link>
           <Link className={`block rounded-xl px-3 py-2 ${location.pathname.includes("/users") ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-50"}`} to="/app/users" onClick={() => { setSettingsOpen(false); setAiRopOpen(false); }}>Пользователи и доступы</Link>
           <Link className={`block rounded-xl px-3 py-2 ${location.pathname.includes("/analytics") ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-50"}`} to="/app/analytics" onClick={() => { setSettingsOpen(false); setAiRopOpen(false); }}>Аналитика</Link>
+          <Link className={`block rounded-xl px-3 py-2 ${location.pathname.includes("/billing") ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-50"}`} to="/app/billing" onClick={() => { setSettingsOpen(false); setAiRopOpen(false); }}>Тарифы и оплата</Link>
           <button
             type="button"
             className={`w-full text-left rounded-xl px-3 py-2 ${location.pathname.includes("/settings") ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-50"}`}
@@ -169,11 +236,34 @@ export function WebLayout() {
       <div className="ml-64">
         <header className="sticky top-0 z-10 bg-white/90 backdrop-blur border-b border-slate-100">
           <div className="w-full px-8 py-4 flex items-center justify-between">
-            <div className="text-sm text-slate-500">Web‑кабинет</div>
+            <div className="text-sm text-slate-500">Web-кабинет</div>
             <div className="flex items-center gap-3">
+              {accounts.length > 0 && (
+                <div className="flex items-center gap-2 rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-700">
+                  <span className="text-slate-500">Проект</span>
+                  <select
+                    className="bg-transparent font-semibold outline-none"
+                    value={activeAccountId || ""}
+                    onChange={(e) => void onSwitchAccount(Number(e.target.value))}
+                    disabled={switchingAccount}
+                  >
+                    {accounts.map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.name || `Аккаунт ${account.id}`}
+                        {account.account_no ? ` · №${account.account_no}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               {demoLeftLabel && (
                 <div className="rounded-full border border-sky-100 bg-sky-50 px-3 py-1 text-xs text-sky-700 font-semibold">
                   {demoLeftLabel}
+                </div>
+              )}
+              {activeAccountLabel && (
+                <div className="rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-700">
+                  {activeAccountLabel}
                 </div>
               )}
               <div className="rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-700">

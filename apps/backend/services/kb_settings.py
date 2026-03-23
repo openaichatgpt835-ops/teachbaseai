@@ -1,11 +1,13 @@
 """KB settings: GigaChat credentials stored in app_settings (encrypted)."""
 from typing import Any
+import time
 
 from sqlalchemy.orm import Session
 
 from apps.backend.models.app_setting import AppSetting
 from apps.backend.models.portal_kb_setting import PortalKBSetting
 from apps.backend.services.token_crypto import encrypt_token, decrypt_token, mask_token
+from apps.backend.services.billing import get_portal_effective_policy
 from apps.backend.config import get_settings
 
 
@@ -13,6 +15,28 @@ SETTINGS_KEY = "gigachat"
 BOT_SETTINGS_KEY = "bot_settings"
 DEFAULT_EMBEDDING_MODEL = "EmbeddingsGigaR"
 DEFAULT_CHAT_MODEL = "GigaChat-2-Pro"
+
+
+def _portal_feature_gates(db: Session, portal_id: int) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    policy = get_portal_effective_policy(db, portal_id)
+    features = dict(policy.get("features") or {})
+
+    def gate(key: str) -> dict[str, Any]:
+        allowed = bool(features.get(key, True))
+        return {
+            "allowed": allowed,
+            "reason": "" if allowed else "locked_by_tariff",
+        }
+
+    return (
+        {
+            "model_selection": gate("allow_model_selection"),
+            "advanced_model_tuning": gate("allow_advanced_model_tuning"),
+            "media_transcription": gate("allow_media_transcription"),
+            "speaker_diarization": gate("allow_speaker_diarization"),
+        },
+        policy,
+    )
 
 
 def _enc_key() -> str:
@@ -45,6 +69,7 @@ def get_gigachat_settings(db: Session) -> dict[str, Any]:
     # auto-upgrade old defaults to new defaults
     old_embed = {"Embeddings-2", "embeddings-2", ""}
     old_chat = {"GigaChat-2", "gigachat-2", ""}
+    changed = False
     if embedding_model in old_embed:
         embedding_model = DEFAULT_EMBEDDING_MODEL
         data["embedding_model"] = DEFAULT_EMBEDDING_MODEL
@@ -55,7 +80,6 @@ def get_gigachat_settings(db: Session) -> dict[str, Any]:
         chat_model = DEFAULT_CHAT_MODEL
         data["chat_model"] = DEFAULT_CHAT_MODEL
         changed = True
-    changed = False
     # normalize ms -> seconds for stored expires_at
     exp = data.get("access_token_expires_at")
     if isinstance(exp, int) and exp > 10**11:
@@ -77,6 +101,73 @@ def get_gigachat_settings(db: Session) -> dict[str, Any]:
         "access_token_expires_at": data.get("access_token_expires_at"),
         "client_id_masked": mask_token(client_id) if client_id else "",
         "auth_key_masked": mask_token(auth_key_plain) if auth_key_plain else "",
+    }
+
+
+def get_gigachat_health_snapshot(db: Session) -> dict[str, Any]:
+    from apps.backend.services.gigachat_client import request_access_token_detailed
+
+    settings = get_gigachat_settings(db)
+    auth_key = (get_gigachat_auth_key_plain(db) or "").strip()
+    access_token = (get_gigachat_access_token_plain(db) or "").strip()
+    scope = (settings.get("scope") or "").strip()
+    now_ts = int(time.time())
+    exp = settings.get("access_token_expires_at")
+    expires_at = int(exp) if isinstance(exp, int) else 0
+    token_ttl = (expires_at - now_ts) if expires_at else None
+    token_is_expired = bool(expires_at and expires_at <= now_ts)
+
+    probe_status = None
+    probe_error = None
+    probe_ok = False
+    probe_expires_at = None
+    if auth_key and scope:
+        _tok, probe_expires_at, probe_error, probe_status = request_access_token_detailed(auth_key, scope)
+        probe_ok = bool(_tok)
+
+    health_status = "ok"
+    issues: list[str] = []
+    if not auth_key:
+        health_status = "broken"
+        issues.append("missing_auth_key")
+    if not scope:
+        health_status = "broken"
+        issues.append("missing_scope")
+    if auth_key and scope and not probe_ok:
+        health_status = "broken"
+        issues.append(f"oauth_probe_failed:{probe_error or probe_status or 'unknown'}")
+    if access_token and token_is_expired:
+        if health_status != "broken":
+            health_status = "warning"
+        issues.append("access_token_expired")
+    if access_token and not auth_key:
+        health_status = "broken"
+        issues.append("orphan_access_token")
+    if not access_token and auth_key and scope and probe_ok:
+        if health_status != "broken":
+            health_status = "warning"
+        issues.append("missing_cached_access_token")
+
+    can_refresh = bool(auth_key and scope)
+    return {
+        "status": health_status,
+        "issues": issues,
+        "has_auth_key": bool(auth_key),
+        "auth_key_len": len(auth_key),
+        "has_scope": bool(scope),
+        "scope": scope,
+        "has_access_token": bool(access_token),
+        "access_token_expires_at": expires_at or None,
+        "access_token_ttl_sec": token_ttl,
+        "token_is_expired": token_is_expired,
+        "can_refresh": can_refresh,
+        "oauth_probe": {
+            "attempted": bool(auth_key and scope),
+            "ok": probe_ok,
+            "status": probe_status,
+            "error": probe_error,
+            "expires_at": probe_expires_at,
+        },
     }
 
 
@@ -170,7 +261,7 @@ def get_portal_bot_settings(db: Session, portal_id: int) -> dict[str, Any]:
 def get_portal_kb_settings(db: Session, portal_id: int) -> dict[str, Any]:
     row = db.get(PortalKBSetting, portal_id)
     if not row:
-        return {
+        out = {
             "embedding_model": DEFAULT_EMBEDDING_MODEL,
             "chat_model": DEFAULT_CHAT_MODEL,
             "api_base": "",
@@ -183,7 +274,8 @@ def get_portal_kb_settings(db: Session, portal_id: int) -> dict[str, Any]:
             "smart_folder_threshold": 5,
             **get_portal_bot_settings(db, portal_id),
         }
-    return {
+    else:
+        out = {
         "embedding_model": row.embedding_model or DEFAULT_EMBEDDING_MODEL,
         "chat_model": row.chat_model or DEFAULT_CHAT_MODEL,
         "api_base": row.api_base or "",
@@ -196,6 +288,20 @@ def get_portal_kb_settings(db: Session, portal_id: int) -> dict[str, Any]:
         "smart_folder_threshold": row.smart_folder_threshold if row.smart_folder_threshold is not None else 5,
         **get_portal_bot_settings(db, portal_id),
     }
+    gates, policy = _portal_feature_gates(db, portal_id)
+    out["feature_gates"] = gates
+    out["billing_policy"] = {
+        "account_id": policy.get("account_id"),
+        "plan_code": policy.get("plan_code"),
+        "plan_name": (policy.get("plan") or {}).get("name") if policy.get("plan") else None,
+        "source": policy.get("source"),
+    }
+    if not gates["media_transcription"]["allowed"]:
+        out["media_transcription_enabled"] = False
+        out["speaker_diarization_enabled"] = False
+    elif not gates["speaker_diarization"]["allowed"]:
+        out["speaker_diarization_enabled"] = False
+    return out
 
 
 def set_portal_kb_settings(
@@ -292,6 +398,9 @@ def get_effective_gigachat_settings(db: Session, portal_id: int) -> dict[str, An
     base = get_gigachat_settings(db)
     bot = get_bot_settings(db)
     p = get_portal_kb_settings(db, portal_id)
+    gates = (p.get("feature_gates") or {})
+    allow_model_selection = bool((gates.get("model_selection") or {}).get("allowed", True))
+    allow_advanced_tuning = bool((gates.get("advanced_model_tuning") or {}).get("allowed", True))
     # default models if global settings are empty
     if not base.get("embedding_model"):
         base["embedding_model"] = DEFAULT_EMBEDDING_MODEL
@@ -299,41 +408,49 @@ def get_effective_gigachat_settings(db: Session, portal_id: int) -> dict[str, An
     if not base.get("chat_model"):
         base["chat_model"] = DEFAULT_CHAT_MODEL
     # override models/api_base per portal if provided
-    if p.get("embedding_model"):
+    if allow_model_selection and p.get("embedding_model"):
         base["embedding_model"] = p["embedding_model"]
         base["model"] = p["embedding_model"]
-    if p.get("chat_model"):
+    if allow_model_selection and p.get("chat_model"):
         base["chat_model"] = p["chat_model"]
-    if p.get("api_base"):
+    if allow_model_selection and p.get("api_base"):
         base["api_base"] = p["api_base"]
     base["prompt_preset"] = p.get("prompt_preset") or "auto"
     # bot defaults + portal overrides
     base.update(bot)
-    for k in (
-        "temperature",
-        "max_tokens",
-        "top_p",
-        "presence_penalty",
-        "frequency_penalty",
+    allowed_override_keys = [
         "allow_general",
         "strict_mode",
-        "context_messages",
-        "context_chars",
-        "retrieval_top_k",
-        "retrieval_max_chars",
-        "lex_boost",
         "use_history",
         "use_cache",
-        "system_prompt_extra",
         "show_sources",
         "sources_format",
         "media_transcription_enabled",
         "speaker_diarization_enabled",
         "collections_multi_assign",
         "smart_folder_threshold",
-    ):
+    ]
+    if allow_advanced_tuning:
+        allowed_override_keys.extend(
+            [
+                "temperature",
+                "max_tokens",
+                "top_p",
+                "presence_penalty",
+                "frequency_penalty",
+                "context_messages",
+                "context_chars",
+                "retrieval_top_k",
+                "retrieval_max_chars",
+                "lex_boost",
+                "system_prompt_extra",
+            ]
+        )
+    for k in allowed_override_keys:
         if p.get(k) is not None:
             base[k] = p.get(k)
+    base["feature_gates"] = gates
+    base["billing_policy"] = p.get("billing_policy")
     base["portal_override"] = p
     return base
 
@@ -443,7 +560,6 @@ def get_valid_gigachat_access_token(
                 access_token=None,
                 access_token_expires_at=expires_at,
             )
-        import time
         if expires_at <= int(time.time()) + skew_seconds:
             token, exp, err = _refresh_gigachat_token(db, scope)
             return token, err

@@ -247,6 +247,34 @@ export function TraceDetailPage() {
                   </dd>
                 </>
               )}
+              {(() => {
+                const resp: any = r.response_json as any;
+                const sum: any = r.summary as any;
+                const rag = resp?.data?.rag_debug ?? sum?.rag_debug;
+                if (!rag || typeof rag !== "object") return null;
+                return (
+                  <>
+                    <dt className="text-gray-500">RAG diagnostics</dt>
+                    <dd>
+                      <div className="mb-1">
+                        <button
+                          type="button"
+                          onClick={() => copyJson(`rag-${r.id}`, rag)}
+                          className="text-xs px-2 py-1 border rounded hover:bg-gray-50"
+                        >
+                          {copiedKey === `rag-${r.id}` ? "Скопировано" : "Скопировать JSON"}
+                        </button>
+                      </div>
+                      <div className="text-xs text-gray-700 mb-2">
+                        strict_mode: {String(!!rag.strict_mode)} · confidence: {String(rag.confidence ?? "—")} · evidence_count: {String(rag.evidence_count ?? "—")}
+                      </div>
+                      <pre className="text-xs bg-gray-50 border rounded p-2 overflow-x-auto">
+                        {JSON.stringify(rag, null, 2)}
+                      </pre>
+                    </dd>
+                  </>
+                );
+              })()}
             </dl>
           </div>
         ))}

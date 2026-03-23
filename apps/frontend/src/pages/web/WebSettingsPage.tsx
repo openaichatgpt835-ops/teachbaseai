@@ -1,6 +1,7 @@
-﻿import { useEffect, useState, type ReactNode } from "react";
-import { fetchPortal, getWebPortalInfo } from "./auth";
+import { useEffect, useState, type ReactNode } from "react";
 import { Select } from "../../components/Select";
+import { LockedSection } from "../../components/LockedSection";
+import { fetchPortal, getWebPortalInfo } from "./auth";
 
 type KbSettings = {
   embedding_model: string;
@@ -11,8 +12,20 @@ type KbSettings = {
   sources_format: "detailed" | "short" | "none";
   media_transcription_enabled: boolean;
   speaker_diarization_enabled: boolean;
+  media_transcription_available?: boolean;
+  media_transcription_reason?: string;
   speaker_diarization_available?: boolean;
   speaker_diarization_reason?: string;
+  model_selection_available?: boolean;
+  model_selection_reason?: string;
+  advanced_tuning_available?: boolean;
+  advanced_tuning_reason?: string;
+  billing_policy?: {
+    account_id?: number | null;
+    plan_code?: string | null;
+    plan_name?: string | null;
+    source?: string | null;
+  };
   collections_multi_assign: boolean;
   smart_folder_threshold: number | "";
   allow_general: boolean;
@@ -31,6 +44,18 @@ type KbSettings = {
   frequency_penalty: number | "";
 };
 
+const ANSWER_STYLE_OPTIONS = [
+  { value: "concise", label: "Кратко" },
+  { value: "balanced", label: "Сбалансированно" },
+  { value: "detailed", label: "Развернуто" },
+];
+
+function normalizeAnswerStyle(value: string | undefined | null): string {
+  const v = String(value || "").trim().toLowerCase();
+  if (v === "concise" || v === "balanced" || v === "detailed") return v;
+  return "balanced";
+}
+
 type SettingsCacheState = {
   kbSettings: KbSettings;
   embedModels: string[];
@@ -40,13 +65,20 @@ type SettingsCacheState = {
 const defaultSettings: KbSettings = {
   embedding_model: "",
   chat_model: "",
-  prompt_preset: "auto",
+  prompt_preset: "balanced",
   system_prompt_extra: "",
   show_sources: true,
   sources_format: "detailed",
   media_transcription_enabled: true,
   speaker_diarization_enabled: false,
+  media_transcription_available: true,
+  media_transcription_reason: "",
   collections_multi_assign: true,
+  model_selection_available: true,
+  model_selection_reason: "",
+  advanced_tuning_available: true,
+  advanced_tuning_reason: "",
+  billing_policy: undefined,
   smart_folder_threshold: 5,
   allow_general: false,
   strict_mode: true,
@@ -97,6 +129,7 @@ export function WebSettingsPage() {
   const [chatModels, setChatModels] = useState<string[]>(cached?.chatModels || []);
   const [settingsMessage, setSettingsMessage] = useState("");
   const [loadingSettings, setLoadingSettings] = useState(!cached);
+  const currentPlanName = kbSettings.billing_policy?.plan_name || "текущий тариф";
 
   useEffect(() => {
     if (!portalId || !portalToken) return;
@@ -107,14 +140,13 @@ export function WebSettingsPage() {
       setChatModels(cachedState.chatModels);
       setLoadingSettings(false);
     }
+
     const loadModels = async () => {
       try {
         const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/models`);
         const data = await res.json().catch(() => null);
         if (res.ok && data?.items) {
-          const names = data.items
-            .map((m: any) => String(m.id || m.name || m.model || ""))
-            .filter(Boolean);
+          const names = data.items.map((m: any) => String(m.id || m.name || m.model || "")).filter(Boolean);
           const nextEmbed = names.filter((n: string) => n.toLowerCase().includes("embed"));
           const nextChat = names.filter((n: string) => !n.toLowerCase().includes("embed"));
           setEmbedModels(nextEmbed);
@@ -136,14 +168,21 @@ export function WebSettingsPage() {
           const next: KbSettings = {
             embedding_model: data.embedding_model || "EmbeddingsGigaR",
             chat_model: data.chat_model || "GigaChat-2-Pro",
-            prompt_preset: data.prompt_preset || "auto",
+            prompt_preset: normalizeAnswerStyle(data.prompt_preset),
             system_prompt_extra: data.system_prompt_extra || "",
             show_sources: data.show_sources !== false,
             sources_format: data.sources_format || "detailed",
             media_transcription_enabled: data.media_transcription_enabled !== false,
+            media_transcription_available: data.media_transcription_available !== false,
+            media_transcription_reason: data.media_transcription_reason || "",
             speaker_diarization_enabled: !!data.speaker_diarization_enabled,
             speaker_diarization_available: data.speaker_diarization_available !== false,
             speaker_diarization_reason: data.speaker_diarization_reason || "",
+            model_selection_available: data.model_selection_available !== false,
+            model_selection_reason: data.model_selection_reason || "",
+            advanced_tuning_available: data.advanced_tuning_available !== false,
+            advanced_tuning_reason: data.advanced_tuning_reason || "",
+            billing_policy: data.billing_policy || undefined,
             collections_multi_assign: data.collections_multi_assign !== false,
             smart_folder_threshold: data.smart_folder_threshold ?? 5,
             allow_general: !!data.allow_general,
@@ -161,9 +200,7 @@ export function WebSettingsPage() {
             presence_penalty: data.presence_penalty ?? "",
             frequency_penalty: data.frequency_penalty ?? "",
           };
-          if (!next.show_sources) {
-            next.sources_format = "none";
-          }
+          if (!next.show_sources) next.sources_format = "none";
           setKbSettings(next);
           const prev = settingsCache.get(portalId) || { kbSettings: defaultSettings, embedModels: cachedState?.embedModels || [], chatModels: cachedState?.chatModels || [] };
           settingsCache.set(portalId, { ...prev, kbSettings: next });
@@ -219,7 +256,7 @@ export function WebSettingsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold text-slate-900">Настройки</h1>
-        <p className="text-sm text-slate-500 mt-1">Настройте модель, выдачу и интеграции ботов.</p>
+        <p className="mt-1 text-sm text-slate-500">Настройте модель, выдачу и интеграции ботов.</p>
       </div>
 
       <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
@@ -227,34 +264,67 @@ export function WebSettingsPage() {
           <h2 className="text-sm font-semibold text-slate-900">База знаний</h2>
           {loadingSettings && <span className="text-xs text-slate-500">Загрузка...</span>}
         </div>
+        {kbSettings.billing_policy?.plan_name && (
+          <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+            Текущий тариф: <span className="font-semibold text-slate-900">{kbSettings.billing_policy.plan_name}</span>
+            {kbSettings.billing_policy.plan_code ? ` (${kbSettings.billing_policy.plan_code})` : ""}
+          </div>
+        )}
         <div className="mt-4 space-y-4">
-          <Field label="Embedding-модель" help="Модель для поиска по базе знаний. Обычно не требуется менять.">
-            <Select
-              value={kbSettings.embedding_model}
-              placeholder="—"
-              options={[{ value: "", label: "—" }, ...embedModels.map((m) => ({ value: m, label: m }))]}
-              onChange={(val: string) => setKbSettings((prev) => ({ ...prev, embedding_model: val }))}
-            />
-          </Field>
+          {kbSettings.model_selection_available ? (
+            <>
+              <Field label="Embedding-модель" help="Модель для поиска по базе знаний. Обычно не требуется менять.">
+                <Select
+                  value={kbSettings.embedding_model}
+                  placeholder="—"
+                  options={[{ value: "", label: "—" }, ...embedModels.map((m) => ({ value: m, label: m }))]}
+                  onChange={(val: string) => setKbSettings((prev) => ({ ...prev, embedding_model: val }))}
+                />
+              </Field>
 
-          <Field label="Chat-модель" help="Основная модель, которая формирует ответ по найденным фрагментам.">
-            <Select
-              value={kbSettings.chat_model}
-              placeholder="—"
-              options={[{ value: "", label: "—" }, ...chatModels.map((m) => ({ value: m, label: m }))]}
-              onChange={(val: string) => setKbSettings((prev) => ({ ...prev, chat_model: val }))}
-            />
-          </Field>
+              <Field label="Chat-модель" help="Основная модель, которая формирует ответ по найденным фрагментам.">
+                <Select
+                  value={kbSettings.chat_model}
+                  placeholder="—"
+                  options={[{ value: "", label: "—" }, ...chatModels.map((m) => ({ value: m, label: m }))]}
+                  onChange={(val: string) => setKbSettings((prev) => ({ ...prev, chat_model: val }))}
+                />
+              </Field>
+            </>
+          ) : (
+            <LockedSection
+              title="Ручной выбор моделей"
+              summary="Здесь выбираются embedding- и chat-модели для поиска и генерации ответа. На текущем тарифе этот блок закрыт."
+              planName={currentPlanName}
+            >
+              <div className="space-y-4 p-1">
+                <Field label="Embedding-модель" help="Модель для поиска по базе знаний. Обычно не требуется менять.">
+                  <Select
+                    value={kbSettings.embedding_model}
+                    placeholder="—"
+                    options={[{ value: "", label: "—" }, ...embedModels.map((m) => ({ value: m, label: m }))]}
+                    disabled
+                    onChange={() => null}
+                  />
+                </Field>
 
-          <Field label="Пресет ответа" help="Выберите стиль ответа: краткий обзор, FAQ или таймлайн.">
+                <Field label="Chat-модель" help="Основная модель, которая формирует ответ по найденным фрагментам.">
+                  <Select
+                    value={kbSettings.chat_model}
+                    placeholder="—"
+                    options={[{ value: "", label: "—" }, ...chatModels.map((m) => ({ value: m, label: m }))]}
+                    disabled
+                    onChange={() => null}
+                  />
+                </Field>
+              </div>
+            </LockedSection>
+          )}
+
+          <Field label="Стиль ответа" help="Управляет подачей ответа: компактно, сбалансированно или более развернуто.">
             <Select
               value={kbSettings.prompt_preset}
-              options={[
-                { value: "auto", label: "Авто" },
-                { value: "summary", label: "Краткий обзор" },
-                { value: "faq", label: "FAQ" },
-                { value: "timeline", label: "Таймлайн" },
-              ]}
+              options={ANSWER_STYLE_OPTIONS}
               onChange={(val: string) => setKbSettings((prev) => ({ ...prev, prompt_preset: val }))}
             />
           </Field>
@@ -265,6 +335,7 @@ export function WebSettingsPage() {
                 type="checkbox"
                 checked={kbSettings.media_transcription_enabled}
                 onChange={(e) => setKbSettings((prev) => ({ ...prev, media_transcription_enabled: e.target.checked }))}
+                disabled={!kbSettings.media_transcription_available}
               />
               Включить опцию транскрибации медиа
             </label>
@@ -273,11 +344,14 @@ export function WebSettingsPage() {
                 type="checkbox"
                 checked={kbSettings.speaker_diarization_enabled}
                 onChange={(e) => setKbSettings((prev) => ({ ...prev, speaker_diarization_enabled: e.target.checked }))}
-                disabled={!kbSettings.media_transcription_enabled}
+                disabled={!kbSettings.media_transcription_enabled || !kbSettings.speaker_diarization_available}
               />
               Разделять по спикерам (диаризация)
             </label>
             <div className="text-xs text-slate-500 md:col-span-2">
+              Статус транскрибации: {kbSettings.media_transcription_available ? "доступна" : "недоступна"}
+              {kbSettings.media_transcription_reason ? ` (${kbSettings.media_transcription_reason})` : ""}
+              <br />
               Статус диаризации: {kbSettings.speaker_diarization_available ? "доступна" : "недоступна"}
               {kbSettings.speaker_diarization_reason ? ` (${kbSettings.speaker_diarization_reason})` : ""}
             </div>
@@ -311,6 +385,7 @@ export function WebSettingsPage() {
               rows={3}
               placeholder="Например: отвечай кратко и по делу."
               value={kbSettings.system_prompt_extra}
+              disabled={!kbSettings.advanced_tuning_available}
               onChange={(e) => setKbSettings((prev) => ({ ...prev, system_prompt_extra: e.target.value }))}
             />
           </Field>
@@ -399,99 +474,140 @@ export function WebSettingsPage() {
         </div>
       </div>
 
-      <details className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-        <summary className="cursor-pointer text-sm font-semibold text-slate-900">Продвинутые параметры</summary>
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <Field label="Температура" help="Чем выше, тем более креативные ответы. Обычно 0.2–0.5.">
-            <input
-              type="number"
-              step="0.05"
-              min={0}
-              max={1.5}
-              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
-              value={kbSettings.temperature}
-              onChange={(e) => setKbSettings((prev) => ({ ...prev, temperature: e.target.value === "" ? "" : Number(e.target.value) }))}
-            />
-          </Field>
-          <Field label="Макс. токенов" help="Ограничение длины ответа.">
-            <input
-              type="number"
-              min={0}
-              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
-              value={kbSettings.max_tokens}
-              onChange={(e) => setKbSettings((prev) => ({ ...prev, max_tokens: e.target.value === "" ? "" : Number(e.target.value) }))}
-            />
-          </Field>
-          <Field label="Top-P" help="Альтернатива температуре для управления случайностью.">
-            <input
-              type="number"
-              step="0.05"
-              min={0}
-              max={1}
-              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
-              value={kbSettings.top_p}
-              onChange={(e) => setKbSettings((prev) => ({ ...prev, top_p: e.target.value === "" ? "" : Number(e.target.value) }))}
-            />
-          </Field>
-          <Field label="Штраф за повторение тем" help="Снижает повторяемость тем в ответах.">
-            <input
-              type="number"
-              step="0.1"
-              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
-              value={kbSettings.presence_penalty}
-              onChange={(e) => setKbSettings((prev) => ({ ...prev, presence_penalty: e.target.value === "" ? "" : Number(e.target.value) }))}
-            />
-          </Field>
-          <Field label="Штраф за повторение слов" help="Снижает повторяемость слов и фраз.">
-            <input
-              type="number"
-              step="0.1"
-              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
-              value={kbSettings.frequency_penalty}
-              onChange={(e) => setKbSettings((prev) => ({ ...prev, frequency_penalty: e.target.value === "" ? "" : Number(e.target.value) }))}
-            />
-          </Field>
+      {kbSettings.advanced_tuning_available ? (
+        <details className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
+          <summary className="cursor-pointer text-sm font-semibold text-slate-900">Продвинутые параметры</summary>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <Field label="Температура" help="Чем выше, тем более креативные ответы. Обычно 0.2–0.5.">
+              <input
+                type="number"
+                step="0.05"
+                min={0}
+                max={1.5}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                value={kbSettings.temperature}
+                onChange={(e) => setKbSettings((prev) => ({ ...prev, temperature: e.target.value === "" ? "" : Number(e.target.value) }))}
+              />
+            </Field>
+            <Field label="Макс. токенов" help="Ограничение длины ответа.">
+              <input
+                type="number"
+                min={0}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                value={kbSettings.max_tokens}
+                onChange={(e) => setKbSettings((prev) => ({ ...prev, max_tokens: e.target.value === "" ? "" : Number(e.target.value) }))}
+              />
+            </Field>
+            <Field label="Top-P" help="Альтернатива температуре для управления случайностью.">
+              <input
+                type="number"
+                step="0.05"
+                min={0}
+                max={1}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                value={kbSettings.top_p}
+                onChange={(e) => setKbSettings((prev) => ({ ...prev, top_p: e.target.value === "" ? "" : Number(e.target.value) }))}
+              />
+            </Field>
+            <Field label="Штраф за повторение тем" help="Снижает повторяемость тем в ответах.">
+              <input
+                type="number"
+                step="0.1"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                value={kbSettings.presence_penalty}
+                onChange={(e) => setKbSettings((prev) => ({ ...prev, presence_penalty: e.target.value === "" ? "" : Number(e.target.value) }))}
+              />
+            </Field>
+            <Field label="Штраф за повторение слов" help="Снижает повторяемость слов и фраз.">
+              <input
+                type="number"
+                step="0.1"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                value={kbSettings.frequency_penalty}
+                onChange={(e) => setKbSettings((prev) => ({ ...prev, frequency_penalty: e.target.value === "" ? "" : Number(e.target.value) }))}
+              />
+            </Field>
+          </div>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <Field label="Top-K фрагментов" help="Сколько фрагментов базы знаний передавать в модель.">
+              <input
+                type="number"
+                min={1}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                value={kbSettings.retrieval_top_k}
+                onChange={(e) => setKbSettings((prev) => ({ ...prev, retrieval_top_k: e.target.value === "" ? "" : Number(e.target.value) }))}
+              />
+            </Field>
+            <Field label="Макс. размер контекста из базы" help="Ограничение объёма найденных фрагментов.">
+              <input
+                type="number"
+                min={0}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                value={kbSettings.retrieval_max_chars}
+                onChange={(e) => setKbSettings((prev) => ({ ...prev, retrieval_max_chars: e.target.value === "" ? "" : Number(e.target.value) }))}
+              />
+            </Field>
+            <Field label="Усиление лексики" help="Усиливает точное совпадение ключевых слов.">
+              <input
+                type="number"
+                step="0.01"
+                min={0}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                value={kbSettings.lex_boost}
+                onChange={(e) => setKbSettings((prev) => ({ ...prev, lex_boost: e.target.value === "" ? "" : Number(e.target.value) }))}
+              />
+            </Field>
+          </div>
+          <div className="mt-4 flex items-center gap-3">
+            <button
+              className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700"
+              onClick={saveSettings}
+            >
+              Сохранить
+            </button>
+            {settingsMessage && <div className="text-xs text-slate-500">{settingsMessage}</div>}
+          </div>
+        </details>
+      ) : (
+        <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
+          <div className="text-sm font-semibold text-slate-900">Продвинутые параметры</div>
+          <div className="mt-4">
+            <LockedSection
+              title="Продвинутые параметры модели"
+              summary="Здесь настраиваются промпт, retrieval и параметры генерации. На текущем тарифе блок закрыт."
+              planName={currentPlanName}
+            >
+              <div className="space-y-4 p-1">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Field label="Температура" help="Чем выше, тем более креативные ответы. Обычно 0.2–0.5.">
+                    <input type="number" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm" value={kbSettings.temperature} disabled onChange={() => null} />
+                  </Field>
+                  <Field label="Макс. токенов" help="Ограничение длины ответа.">
+                    <input type="number" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm" value={kbSettings.max_tokens} disabled onChange={() => null} />
+                  </Field>
+                  <Field label="Top-P" help="Альтернатива температуре для управления случайностью.">
+                    <input type="number" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm" value={kbSettings.top_p} disabled onChange={() => null} />
+                  </Field>
+                  <Field label="Штраф за повторение тем" help="Снижает повторяемость тем в ответах.">
+                    <input type="number" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm" value={kbSettings.presence_penalty} disabled onChange={() => null} />
+                  </Field>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Field label="Top-K фрагментов" help="Сколько фрагментов базы знаний передавать в модель.">
+                    <input type="number" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm" value={kbSettings.retrieval_top_k} disabled onChange={() => null} />
+                  </Field>
+                  <Field label="Макс. размер контекста из базы" help="Ограничение объёма найденных фрагментов.">
+                    <input type="number" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm" value={kbSettings.retrieval_max_chars} disabled onChange={() => null} />
+                  </Field>
+                  <Field label="Усиление лексики" help="Усиливает точное совпадение ключевых слов.">
+                    <input type="number" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm" value={kbSettings.lex_boost} disabled onChange={() => null} />
+                  </Field>
+                </div>
+              </div>
+            </LockedSection>
+          </div>
         </div>
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <Field label="Top-K фрагментов" help="Сколько фрагментов базы знаний передавать в модель.">
-            <input
-              type="number"
-              min={1}
-              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
-              value={kbSettings.retrieval_top_k}
-              onChange={(e) => setKbSettings((prev) => ({ ...prev, retrieval_top_k: e.target.value === "" ? "" : Number(e.target.value) }))}
-            />
-          </Field>
-          <Field label="Макс. размер контекста из базы" help="Ограничение объёма найденных фрагментов.">
-            <input
-              type="number"
-              min={0}
-              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
-              value={kbSettings.retrieval_max_chars}
-              onChange={(e) => setKbSettings((prev) => ({ ...prev, retrieval_max_chars: e.target.value === "" ? "" : Number(e.target.value) }))}
-            />
-          </Field>
-          <Field label="Усиление лексики" help="Усиливает точное совпадение ключевых слов.">
-            <input
-              type="number"
-              step="0.01"
-              min={0}
-              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
-              value={kbSettings.lex_boost}
-              onChange={(e) => setKbSettings((prev) => ({ ...prev, lex_boost: e.target.value === "" ? "" : Number(e.target.value) }))}
-            />
-          </Field>
-        </div>
-        <div className="mt-4 flex items-center gap-3">
-          <button
-            className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700"
-            onClick={saveSettings}
-          >
-            Сохранить
-          </button>
-          {settingsMessage && <div className="text-xs text-slate-500">{settingsMessage}</div>}
-        </div>
-      </details>
+      )}
     </div>
   );
 }
