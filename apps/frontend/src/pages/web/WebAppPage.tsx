@@ -13,7 +13,7 @@ export function WebAppPage() {
       navigate("/login");
       return;
     }
-    window.location.href = "/iframe/?mode=web";
+    navigate("/app/overview", { replace: true });
   }, [user, portalId, portalToken, navigate]);
 
   const onLogout = () => {
@@ -24,7 +24,7 @@ export function WebAppPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-sky-50 via-white to-indigo-50 flex items-center justify-center">
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm px-6 py-4 text-sm text-slate-600">
-        Перенаправляем в web-кабинет…
+        Перенаправляем в кабинет…
         <div className="text-xs text-slate-500 mt-2">{userLabel}</div>
         <button
           className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs"

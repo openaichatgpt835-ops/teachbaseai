@@ -9,7 +9,7 @@ from sqlalchemy import and_, desc, func, select
 from sqlalchemy.orm import Session
 
 from apps.backend.models.app_setting import AppSetting
-from apps.backend.models.account import Account, AccountMembership, AppUserWebCredential
+from apps.backend.models.account import Account, AccountIntegration, AccountMembership, AppUserWebCredential
 from apps.backend.models.billing import (
     AccountPlanOverride,
     AccountSubscription,
@@ -28,6 +28,7 @@ DEFAULT_LIMITS: dict[str, int] = {
     "media_minutes_per_month": 300,
     "max_users": 25,
     "max_storage_gb": 50,
+    "max_bitrix_portals": 1,
 }
 
 DEFAULT_FEATURES: dict[str, bool] = {
@@ -52,6 +53,7 @@ BASE_PLANS: list[dict[str, Any]] = [
             "media_minutes_per_month": 60,
             "max_users": 5,
             "max_storage_gb": 10,
+            "max_bitrix_portals": 1,
         },
         "features_json": {
             "allow_model_selection": False,
@@ -82,6 +84,7 @@ BASE_PLANS: list[dict[str, Any]] = [
             "media_minutes_per_month": 1200,
             "max_users": 200,
             "max_storage_gb": 500,
+            "max_bitrix_portals": 5,
         },
         "features_json": {
             "allow_model_selection": True,
@@ -418,6 +421,8 @@ def get_account_usage_summary(db: Session, account_id: int) -> dict[str, Any]:
         "media_minutes_limit": int(limits.get("media_minutes_per_month") or 0),
         "users_used": users_used,
         "users_limit": int(limits.get("max_users") or 0),
+        "bitrix_portals_used": get_account_bitrix_portal_count(db, account_id),
+        "bitrix_portals_limit": int(limits.get("max_bitrix_portals") or 0),
         "storage_used_gb": storage_used_gb,
         "storage_limit_gb": int(limits.get("max_storage_gb") or 0),
         "tokens_total": int(tokens_total or 0),
@@ -445,6 +450,28 @@ def is_account_user_limit_reached(db: Session, account_id: int, *, extra_users: 
         return False
     used = get_account_active_user_count(db, account_id)
     return (used + max(0, int(extra_users))) > limit
+
+
+def get_account_bitrix_portal_count(db: Session, account_id: int) -> int:
+    return int(
+        db.execute(
+            select(func.count(AccountIntegration.id)).where(
+                AccountIntegration.account_id == account_id,
+                AccountIntegration.provider == "bitrix",
+                AccountIntegration.status != "deleted",
+            )
+        ).scalar()
+        or 0
+    )
+
+
+def is_account_bitrix_portal_limit_reached(db: Session, account_id: int, *, extra_portals: int = 1) -> bool:
+    policy = get_account_effective_policy(db, account_id)
+    limit = int((policy.get("limits") or {}).get("max_bitrix_portals") or 0)
+    if limit <= 0:
+        return False
+    used = get_account_bitrix_portal_count(db, account_id)
+    return (used + max(0, int(extra_portals))) > limit
 
 
 def would_exceed_account_media_minutes(db: Session, account_id: int, *, additional_minutes: int) -> bool:

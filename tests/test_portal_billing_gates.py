@@ -14,6 +14,7 @@ from apps.backend.database import Base, get_test_engine
 from apps.backend.deps import get_db
 from apps.backend.main import app
 from apps.backend.models.account import Account
+from apps.backend.models.account_kb_setting import AccountKBSetting
 from apps.backend.models.billing import AccountSubscription, BillingPlan
 from apps.backend.models.portal import Portal
 from apps.backend.models.portal_kb_setting import PortalKBSetting
@@ -181,7 +182,7 @@ def test_portal_kb_settings_save_clamps_locked_features(test_db_session):
     assert data["media_transcription_enabled"] is False
     assert data["speaker_diarization_enabled"] is False
 
-    row = test_db_session.get(PortalKBSetting, portal.id)
+    row = test_db_session.get(AccountKBSetting, account.id)
     assert row is not None
     assert row.embedding_model is None
     assert row.chat_model is None

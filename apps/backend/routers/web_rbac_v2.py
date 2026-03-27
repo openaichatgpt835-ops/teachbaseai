@@ -257,6 +257,51 @@ def _resolve_account_portal_id(db: Session, account_id: int) -> int | None:
     return int(row[0])
 
 
+def _sync_account_bridge_portal(db: Session, account_id: int, portal_id: int | None) -> None:
+    rows = db.execute(
+        select(AppUserWebCredential.email)
+        .join(AccountMembership, AccountMembership.user_id == AppUserWebCredential.user_id)
+        .where(AccountMembership.account_id == int(account_id))
+        .where(AccountMembership.status.in_(["active", "invited"]))
+        .where(AppUserWebCredential.email.is_not(None))
+    ).all()
+    emails = [str(row[0]).strip().lower() for row in rows if row and row[0]]
+    if not emails:
+        return
+    rows = db.execute(select(WebUser).where(WebUser.email.in_(emails))).scalars().all()
+    now = datetime.utcnow()
+    for row in rows:
+        row.portal_id = int(portal_id) if portal_id else None
+        row.updated_at = now
+        db.add(row)
+
+
+def _list_bitrix_integrations(db: Session, account_id: int) -> list[dict]:
+    rows = db.execute(
+        select(AccountIntegration, Portal)
+        .join(Portal, Portal.id == AccountIntegration.portal_id, isouter=True)
+        .where(AccountIntegration.account_id == int(account_id))
+        .where(AccountIntegration.provider == "bitrix")
+        .order_by(AccountIntegration.id.asc())
+    ).all()
+    items: list[dict] = []
+    for integration, portal in rows:
+        meta = dict(integration.credentials_json or {})
+        items.append(
+            {
+                "id": int(integration.id),
+                "status": integration.status,
+                "external_key": integration.external_key,
+                "portal_id": int(integration.portal_id) if integration.portal_id else None,
+                "portal_domain": portal.domain if portal else None,
+                "install_type": portal.install_type if portal else None,
+                "is_primary": bool(meta.get("is_primary")),
+                "created_at": integration.created_at.isoformat() if integration.created_at else None,
+            }
+        )
+    return items
+
+
 def _build_account_users_items(db: Session, account_id: int) -> list[dict]:
     memberships = db.execute(
         select(AccountMembership).where(
@@ -536,6 +581,118 @@ def web_v2_access_center(
         for r in legacy_web
     ]
     return {"portal_id": portal_id, "items": items, "legacy_web_users": extras}
+
+
+@router.get("/accounts/{account_id}/integrations/bitrix")
+def web_v2_list_bitrix_integrations(
+    account_id: int,
+    user: WebUser = Depends(_get_current_web_user),
+    db: Session = Depends(get_db),
+):
+    require_membership_ctx(db, account_id, user)
+    return {"account_id": account_id, "items": _list_bitrix_integrations(db, account_id)}
+
+
+@router.post("/accounts/{account_id}/integrations/bitrix/{integration_id}/make-primary")
+def web_v2_make_bitrix_integration_primary(
+    account_id: int,
+    integration_id: int,
+    user: WebUser = Depends(_get_current_web_user),
+    db: Session = Depends(get_db),
+):
+    ctx = require_membership_ctx(db, account_id, user)
+    require_settings_permission(ctx)
+    target = db.execute(
+        select(AccountIntegration).where(
+            AccountIntegration.id == int(integration_id),
+            AccountIntegration.account_id == int(account_id),
+            AccountIntegration.provider == "bitrix",
+            AccountIntegration.status == "active",
+        )
+    ).scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="integration_not_found")
+    rows = db.execute(
+        select(AccountIntegration).where(
+            AccountIntegration.account_id == int(account_id),
+            AccountIntegration.provider == "bitrix",
+        )
+    ).scalars().all()
+    for row in rows:
+        meta = dict(row.credentials_json or {})
+        meta["is_primary"] = int(row.id) == int(target.id)
+        row.credentials_json = meta
+        row.updated_at = datetime.utcnow()
+        db.add(row)
+    _sync_account_bridge_portal(db, int(account_id), int(target.portal_id) if target.portal_id else None)
+    db.commit()
+    return {
+        "status": "ok",
+        "account_id": account_id,
+        "primary_integration_id": int(target.id),
+        "items": _list_bitrix_integrations(db, account_id),
+    }
+
+
+@router.delete("/accounts/{account_id}/integrations/bitrix/{integration_id}")
+def web_v2_disconnect_bitrix_integration(
+    account_id: int,
+    integration_id: int,
+    user: WebUser = Depends(_get_current_web_user),
+    db: Session = Depends(get_db),
+):
+    ctx = require_membership_ctx(db, account_id, user)
+    require_settings_permission(ctx)
+    target = db.execute(
+        select(AccountIntegration).where(
+            AccountIntegration.id == int(integration_id),
+            AccountIntegration.account_id == int(account_id),
+            AccountIntegration.provider == "bitrix",
+            AccountIntegration.status == "active",
+        )
+    ).scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="integration_not_found")
+
+    was_primary = bool(dict(target.credentials_json or {}).get("is_primary"))
+    if target.portal_id:
+        portal = db.get(Portal, int(target.portal_id))
+        if portal and int(portal.account_id or 0) == int(account_id):
+            portal.account_id = None
+            db.add(portal)
+    meta = dict(target.credentials_json or {})
+    meta["is_primary"] = False
+    target.credentials_json = meta
+    target.status = "deleted"
+    target.updated_at = datetime.utcnow()
+    db.add(target)
+
+    new_primary_portal_id: int | None = None
+    if was_primary:
+        replacement = db.execute(
+            select(AccountIntegration).where(
+                AccountIntegration.account_id == int(account_id),
+                AccountIntegration.provider == "bitrix",
+                AccountIntegration.status == "active",
+                AccountIntegration.id != int(target.id),
+            ).order_by(AccountIntegration.id.asc())
+        ).scalars().first()
+        if replacement:
+            replacement_meta = dict(replacement.credentials_json or {})
+            replacement_meta["is_primary"] = True
+            replacement.credentials_json = replacement_meta
+            replacement.updated_at = datetime.utcnow()
+            db.add(replacement)
+            new_primary_portal_id = int(replacement.portal_id) if replacement.portal_id else None
+    if was_primary:
+        _sync_account_bridge_portal(db, int(account_id), new_primary_portal_id)
+    db.commit()
+    return {
+        "status": "ok",
+        "account_id": account_id,
+        "disconnected_integration_id": int(integration_id),
+        "items": _list_bitrix_integrations(db, account_id),
+    }
 
 
 @router.post("/accounts/{account_id}/users/manual")

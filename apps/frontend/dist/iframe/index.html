@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Teachbase AI</title>
+    <script>
+      (function () {
+        try {
+          var params = new URLSearchParams(window.location.search || "");
+          var target = params.get("mode") === "web" ? "/app/overview" : "/embedded/bitrix";
+          window.location.replace(target + (window.location.search || ""));
+        } catch (e) {
+          window.location.replace("/embedded/bitrix");
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div style="padding:16px;font-family:system-ui,sans-serif">Переадресация...</div>
+  </body>
+</html>

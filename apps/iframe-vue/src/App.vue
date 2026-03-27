@@ -1,57 +1,26 @@
 ﻿<template>
-  <div class="tb-shell" :class="{ 'tb-shell-modal': showAuthModal }">
+  <div class="tb-shell" :class="{ 'tb-shell-modal': showAuthModal }" :style="shellVars">
     <aside class="tb-sidebar">
       <div class="tb-logo">Teachbase AI</div>
       <nav class="tb-nav">
-        <button class="tb-nav-item" :class="{ 'is-active': currentTab === 'overview' }" @click="selectTab('overview')">
-          <span class="tb-nav-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M4 10.5l8-6 8 6V20a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1v-9.5Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </span>
-          Обзор
-        </button>
-        <button class="tb-nav-item" :class="{ 'is-active': currentTab === 'kb' }" @click="selectTab('kb')">
-          <span class="tb-nav-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M5 4h10a4 4 0 0 1 4 4v12H9a4 4 0 0 0-4 4V4Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 8h6M9 12h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-          </span>
-          База знаний
-        </button>
-        <button class="tb-nav-item" :class="{ 'is-active': currentTab === 'sources' }" @click="selectTab('sources')">
-          <span class="tb-nav-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-          </span>
-          Источники данных
-        </button>
-        <button class="tb-nav-item" :class="{ 'is-active': currentTab === 'users' }" @click="selectTab('users')">
-          <span class="tb-nav-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M16 11a4 4 0 1 0-8 0 4 4 0 0 0 8 0Z" stroke="currentColor" stroke-width="1.6"/><path d="M4 20a8 8 0 0 1 16 0" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-          </span>
-          Пользователи и доступы
-        </button>
-        <button class="tb-nav-item" :class="{ 'is-active': currentTab === 'analytics' }" @click="selectTab('analytics')">
-          <span class="tb-nav-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M5 12v6M12 8v10M19 4v14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-          </span>
-          Аналитика
-        </button>
-        <button class="tb-nav-item" :class="{ 'is-active': currentTab === 'settings' }" @click="selectTab('settings')">
-          <span class="tb-nav-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" stroke="currentColor" stroke-width="1.6"/><path d="M4 12h2m12 0h2M12 4v2m0 12v2M6 6l1.5 1.5M16.5 16.5 18 18M18 6l-1.5 1.5M7.5 16.5 6 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-          </span>
-          Настройки
-        </button>
-        <button class="tb-nav-sub" :class="{ 'is-active': currentTab === 'integrations' }" @click="selectTab('integrations')">
-          Интеграции
+        <button
+          v-for="item in iframePrimaryModules"
+          :key="item.id"
+          class="tb-nav-item"
+          :class="{ 'is-active': currentTab === item.id }"
+          @click="selectTab(item.id)"
+        >
+          <span class="tb-nav-icon" aria-hidden="true" v-html="moduleIcon(item.id)"></span>
+          {{ item.label }}
         </button>
         <button
-          v-if="isWebMode"
-          class="tb-nav-item"
-          :class="{ 'is-active': currentTab === 'flow' }"
-          @click="selectTab('flow')"
+          v-for="item in iframeSettingsModules"
+          :key="item.id"
+          class="tb-nav-sub"
+          :class="{ 'is-active': currentTab === item.id }"
+          @click="selectTab(item.id)"
         >
-          <span class="tb-nav-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M5 7h6M5 17h6M13 7h6M13 17h6M9 7v10M15 7v10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-          </span>
-          Конструктор бота
+          {{ item.label }}
         </button>
       </nav>
     </aside>
@@ -60,7 +29,7 @@
       <header class="tb-top">
         <div>
           <h1 class="tb-h1">{{ tabTitle }}</h1>
-          <p class="tb-sub">Управление доступом и базой знаний портала.</p>
+          <p class="tb-sub">{{ tabDescription }}</p>
         </div>
         <div class="tb-top-actions">
           <div class="tb-plan" v-if="webLinked && demoUntil && !isWebMode">{{ demoUntilLabel }}</div>
@@ -75,64 +44,53 @@
           <div class="tb-status" v-if="!sessionReady">{{ statusMessage }}</div>
         </div>
       </header>
-      <div v-if="isWebMode && pendingLinkRequests.length" class="tb-banner">
-        <div>
-          <div class="tb-banner-title">Запрос на привязку Bitrix24</div>
-          <div class="tb-muted">Портал: {{ pendingLinkRequests[0].portal_domain }}</div>
-        </div>
-        <div class="tb-banner-actions">
-          <button class="tb-btn" @click="openLinkModal(pendingLinkRequests[0])">Подтвердить</button>
-          <button class="tb-btn tb-btn-ghost" @click="rejectLink(pendingLinkRequests[0])">Отклонить</button>
-        </div>
-      </div>
-
       <section v-if="currentTab === 'overview'" class="tb-grid" key="overview">
         <div class="tb-card">
-          <h2 class="tb-card-title">База знаний</h2>
+          <h2 class="tb-card-title">{{ overviewSectionCopy.overviewKnowledgeTitle }}</h2>
           <div class="tb-card-metrics">
             <div>
-              <span>Файлов</span>
+              <span>{{ overviewSectionCopy.overviewMetricLabel('files') }}</span>
               <strong>{{ kbFiles.length }}</strong>
             </div>
             <div>
-              <span>URL‑источников</span>
+              <span>{{ overviewSectionCopy.overviewMetricLabel('url_sources') }}</span>
               <strong>{{ kbSources.length }}</strong>
             </div>
             <div>
-              <span>Последнее обновление</span>
+              <span>{{ overviewSectionCopy.overviewMetricLabel('last_updated') }}</span>
               <strong>{{ lastUpdated }}</strong>
             </div>
             <div>
-              <span>Статус</span>
+              <span>{{ overviewSectionCopy.overviewMetricLabel('status') }}</span>
               <strong>{{ kbCounts.error > 0 ? 'Есть ошибки' : 'Актуальна' }}</strong>
             </div>
           </div>
         </div>
 
         <div class="tb-card">
-          <h2 class="tb-card-title">Использование</h2>
+          <h2 class="tb-card-title">{{ overviewSectionCopy.overviewUsageTitle }}</h2>
           <div class="tb-card-metrics">
             <div>
-              <span>Активные сегодня</span>
+              <span>{{ overviewSectionCopy.overviewMetricLabel('active_today') }}</span>
               <strong>{{ activeUsers }}</strong>
             </div>
             <div>
-              <span>Всего сотрудников</span>
+              <span>{{ overviewSectionCopy.overviewMetricLabel('users_total') }}</span>
               <strong>{{ users.length }}</strong>
             </div>
             <div>
-              <span>Доступ разрешён</span>
+              <span>{{ overviewSectionCopy.overviewMetricLabel('access_granted') }}</span>
               <strong>{{ selectedUsers.length }}</strong>
             </div>
             <div>
-              <span>Ошибки индексации</span>
+              <span>{{ overviewSectionCopy.overviewMetricLabel('index_errors') }}</span>
               <strong>{{ kbCounts.error }}</strong>
             </div>
           </div>
         </div>
 
         <div class="tb-card">
-          <h2 class="tb-card-title">Фокус запросов</h2>
+          <h2 class="tb-card-title">{{ overviewSectionCopy.overviewFocusTitle }}</h2>
           <div class="tb-list" v-if="sortedTopicSummaries.length">
             <div v-for="(s, idx) in sortedTopicSummaries" :key="idx" class="tb-row">
               <div class="tb-row-body">
@@ -141,7 +99,90 @@
               </div>
             </div>
           </div>
-          <div class="tb-empty" v-else>Недостаточно данных.</div>
+          <div class="tb-empty" v-else>
+            <div class="tb-empty-title">{{ moduleEmptyState('overview').title }}</div>
+            <div class="tb-empty-desc">{{ moduleEmptyState('overview').description }}</div>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="currentTab === 'chat'" class="tb-chat-page" key="chat">
+        <div class="tb-chat-layout">
+        <div class="tb-chat-card">
+          <div class="tb-chat-head">
+            <div>
+              <h2 class="tb-card-title">{{ chatSectionCopy.chatTitle }}</h2>
+              <div class="tb-muted">{{ chatSectionCopy.chatSubtitle }}</div>
+            </div>
+            <button class="tb-btn tb-btn-ghost" @click="clearIframeChat" :disabled="iframeChatSending || iframeChatMessages.length === 0">{{ chatSectionCopy.clearAction }}</button>
+          </div>
+
+          <div class="tb-chat-suggestions" v-if="iframeChatMessages.length === 0">
+            <button v-for="prompt in chatStarterPrompts" :key="prompt" class="tb-chip tb-chip-outline" @click="useChatStarter(prompt)">
+              {{ prompt }}
+            </button>
+          </div>
+
+          <div class="tb-chat-log-shell">
+            <div class="tb-chat-log">
+              <div v-if="iframeChatMessages.length === 0" class="tb-empty">
+                <div class="tb-empty-title">{{ moduleEmptyState('chat').title }}</div>
+                <div class="tb-empty-desc">{{ moduleEmptyState('chat').description }}</div>
+              </div>
+              <div v-for="msg in iframeChatMessages" :key="msg.id" class="tb-chat-msg" :class="{ 'is-user': msg.role === 'user' }">
+                <div class="tb-chat-bubble">
+                  <div class="tb-chat-text">{{ msg.text }}</div>
+                  <div v-if="msg.role === 'assistant' && msg.sources?.length" class="tb-chat-sources">
+                    <div class="tb-chat-sources-title">{{ sourceUi.sourceListTitle }}</div>
+                    <button
+                      v-for="(source, idx) in msg.sources"
+                      :key="`${msg.id}-${idx}`"
+                      class="tb-chat-source"
+                      @click="openChatSource(source)"
+                    >
+                      <span class="tb-chat-source-name">{{ chatSourceLabel(source) }}</span>
+                      <span class="tb-chat-source-meta" v-if="source.page_num || source.start_ms">
+                        <template v-if="source.page_num">стр. {{ source.page_num }}</template>
+                        <template v-else-if="source.start_ms">с {{ formatSourceTime(source.start_ms) }}</template>
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tb-alert" v-if="iframeChatError">{{ iframeChatError }}</div>
+
+          <form class="tb-chat-compose" @submit.prevent="sendIframeChat">
+            <textarea
+              v-model="iframeChatInput"
+              class="tb-input tb-chat-textarea"
+              rows="3"
+              placeholder="Например: где находится регламент по отпускам?"
+            ></textarea>
+            <div class="tb-chat-actions">
+              <div class="tb-muted">Ответ строится по account-wide базе знаний.</div>
+              <button class="tb-btn tb-btn-primary" type="submit" :disabled="iframeChatSending || !iframeChatInput.trim()">
+                {{ iframeChatSending ? chatSectionCopy.sendingAction : chatSectionCopy.sendAction }}
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <aside class="tb-chat-preview-card" v-if="iframeChatPreview">
+          <div class="tb-chat-preview-head">
+            <div>
+              <div class="tb-card-title">{{ iframeChatPreview.title }}</div>
+              <div class="tb-muted">{{ iframeChatPreview.kind === 'kb_file' ? sourceUi.previewDocumentLabel : sourceUi.externalSourceLabel }}</div>
+            </div>
+            <div class="tb-chat-preview-actions">
+              <button class="tb-btn tb-btn-ghost" @click="openPreviewInNewTab">{{ sourceUi.openDocumentAction }}</button>
+              <button class="tb-btn tb-btn-ghost" @click="iframeChatPreview = null">{{ sourceUi.closeAction }}</button>
+            </div>
+          </div>
+          <iframe class="tb-chat-preview-frame" :src="iframeChatPreview.url" title="Preview"></iframe>
+        </aside>
         </div>
       </section>
 
@@ -163,7 +204,7 @@
               />
             </div>
           </div>
-          <div class="tb-empty" v-else>Сотрудников пока нет.</div>
+          <div class="tb-empty" v-else>{{ stateCopy.noUsers }}</div>
           <div class="tb-actions">
             <button class="tb-btn tb-btn-primary" @click="saveAccess" :disabled="accessSaving">
               {{ accessSaving ? 'Сохраняю...' : 'Сохранить доступ' }}
@@ -196,7 +237,7 @@
               <button class="tb-mini tb-mini-danger" @click="removeWebUser(u.id)">Удалить</button>
             </div>
           </div>
-          <div class="tb-empty" v-else>Пока нет дополнительных пользователей.</div>
+          <div class="tb-empty" v-else>{{ stateCopy.noExtraUsers }}</div>
         </div>
       </section>
 
@@ -391,7 +432,7 @@
                   <div class="tb-muted">{{ c.file_count || (kbCollectionFiles[c.id]?.length || 0) }} файлов</div>
                 </div>
               </div>
-              <div v-if="kbCollections.length === 0" class="tb-empty">Папок пока нет.</div>
+              <div v-if="kbCollections.length === 0" class="tb-empty">{{ stateCopy.noFolders }}</div>
             </div>
           </div>
 
@@ -413,7 +454,7 @@
                 <span>{{ fileOwnerLabel(f) }}</span>
                 <span>{{ fileCollections(f.id)[0]?.name || 'Корень' }}</span>
               </div>
-              <div v-if="recommendedKbFiles.length === 0" class="tb-empty">Рекомендаций пока нет.</div>
+              <div v-if="recommendedKbFiles.length === 0" class="tb-empty">{{ stateCopy.noRecommendations }}</div>
             </div>
           </div>
 
@@ -479,27 +520,33 @@
                 </div>
               </div>
             </div>
-            <div class="tb-empty" v-else>Файлов пока нет.</div>
+            <div class="tb-empty" v-else>{{ stateCopy.noFiles }}</div>
           </div>
         </div>
       </section>
 
       <section v-if="currentTab === 'sources' && isPortalAdmin" class="tb-grid" key="sources">
         <div class="tb-card">
-          <h2 class="tb-card-title">URL‑источники</h2>
+          <h2 class="tb-card-title">{{ sourcesSectionCopy.sourceListTitle }}</h2>
           <div class="tb-field">
-            <label>Ссылка (YouTube/VK/Rutube)</label>
+            <label>{{ sourcesSectionCopy.sourceInputLabel }} (YouTube/VK/Rutube)</label>
             <input v-model="kbUrl" type="url" class="tb-input" placeholder="https://..." />
           </div>
           <div class="tb-actions">
-            <button class="tb-btn" @click="addUrl">Добавить URL</button>
+            <button class="tb-btn" @click="addUrl">{{ sourcesSectionCopy.addUrlAction }}</button>
             <span class="tb-muted" v-if="kbUrlMessage">{{ kbUrlMessage }}</span>
           </div>
         </div>
 
         <div class="tb-card">
-          <h2 class="tb-card-title">Источники</h2>
-          <div class="tb-empty" v-if="kbSources.length === 0">Источников пока нет.</div>
+          <div class="tb-section-head">
+            <h2 class="tb-card-title">{{ sourceUi.sourceListTitle }}</h2>
+            <span class="tb-muted">{{ sourceUi.sourceCountLabel(kbSources.length) }}</span>
+          </div>
+          <div class="tb-empty" v-if="kbSources.length === 0">
+            <div class="tb-empty-title">{{ moduleEmptyState('sources').title }}</div>
+            <div class="tb-empty-desc">{{ moduleEmptyState('sources').description }}</div>
+          </div>
           <div class="tb-list" v-else>
             <div v-for="s in kbSources" :key="s.id" class="tb-row">
               <div class="tb-row-body">
@@ -514,14 +561,14 @@
       <section v-if="currentTab === 'analytics'" class="tb-grid" key="analytics">
         <div class="tb-card">
           <h2 class="tb-card-title">Аналитика</h2>
-          <div class="tb-empty">Скоро появится.</div>
+          <div class="tb-empty">{{ stateCopy.comingSoon }}</div>
         </div>
       </section>
 
       <section v-if="currentTab === 'settings'" class="tb-grid" key="settings">
         <div class="tb-card">
           <h2 class="tb-card-title">Настройки</h2>
-          <div v-if="!isPortalAdmin" class="tb-empty">Доступно только администратору портала.</div>
+          <div v-if="!isPortalAdmin" class="tb-empty">{{ stateCopy.adminOnly }}</div>
           <div v-else>
             <div class="tb-settings-block">
               <div class="tb-settings-title">База знаний</div>
@@ -551,8 +598,14 @@
                   <option v-for="m in chatModels" :key="m" :value="m">{{ m }}</option>
                 </select>
               </div>
-              <div v-if="!kbSettings.model_selection_available" class="tb-info">
-                Выбор моделей недоступен на текущем тарифе.
+              <div v-if="!kbSettings.model_selection_available" class="tb-upgrade-bar tb-upgrade-bar-compact">
+                <div class="tb-upgrade-head">{{ stateCopy.currentTariffLocked }}</div>
+                <div class="tb-upgrade-title">Ручной выбор моделей</div>
+                <div class="tb-upgrade-text">Выбор embedding- и chat-моделей доступен на старших тарифах.</div>
+                <div class="tb-upgrade-meta">Текущий тариф: {{ currentPlanName }}</div>
+                <div class="tb-upgrade-actions">
+                  <button class="tb-btn tb-btn-primary" @click="openBillingPage">Тарифы и оплата</button>
+                </div>
               </div>
               <div class="tb-field">
                 <label class="tb-label">
@@ -707,8 +760,14 @@
 
             <details class="tb-accordion">
               <summary class="tb-accordion-summary">Продвинутые параметры</summary>
-              <div v-if="!kbSettings.advanced_tuning_available" class="tb-info" style="margin-bottom: 12px;">
-                Продвинутая настройка модели недоступна на текущем тарифе.
+              <div v-if="!kbSettings.advanced_tuning_available" class="tb-upgrade-bar" style="margin-bottom: 12px;">
+                <div class="tb-upgrade-head">{{ stateCopy.currentTariffLocked }}</div>
+                <div class="tb-upgrade-title">Продвинутые параметры модели</div>
+                <div class="tb-upgrade-text">Тонкая настройка prompt, retrieval и параметров генерации доступна на старших тарифах.</div>
+                <div class="tb-upgrade-meta">Текущий тариф: {{ currentPlanName }}</div>
+                <div class="tb-upgrade-actions">
+                  <button class="tb-btn tb-btn-primary" @click="openBillingPage">Тарифы и оплата</button>
+                </div>
               </div>
               <div class="tb-settings-grid">
                 <div class="tb-field">
@@ -815,7 +874,7 @@
             </div>
           </div>
           <div v-if="integrationTab === 'telegram'">
-            <div v-if="!isPortalAdmin" class="tb-empty">Доступно только администратору портала.</div>
+            <div v-if="!isPortalAdmin" class="tb-empty">{{ stateCopy.adminOnly }}</div>
             <div v-else>
               <div class="tb-field">
                 <label>
@@ -835,8 +894,14 @@
                 </div>
               </div>
               <div class="tb-field">
-                <div v-if="!clientBotAllowed" class="tb-info" style="margin-bottom: 10px;">
-                  Клиентский бот недоступен на тарифе "{{ currentPlanName }}".
+                <div v-if="!clientBotAllowed" class="tb-upgrade-bar tb-upgrade-bar-compact" style="margin-bottom: 10px;">
+                  <div class="tb-upgrade-head">{{ stateCopy.currentTariffLocked }}</div>
+                  <div class="tb-upgrade-title">Клиентский Telegram-бот</div>
+                  <div class="tb-upgrade-text">Клиентский бот, загрузка файлов и внешний webhook-канал доступны на старших тарифах.</div>
+                  <div class="tb-upgrade-meta">Текущий тариф: {{ currentPlanName }}</div>
+                  <div class="tb-upgrade-actions">
+                    <button class="tb-btn tb-btn-primary" @click="openBillingPage">Тарифы и оплата</button>
+                  </div>
                 </div>
                 <label>
                   <input type="checkbox" v-model="tgClientEnabled" :disabled="!clientBotAllowed" />
@@ -857,7 +922,7 @@
             </div>
           </div>
           <div v-else-if="integrationTab === 'bitrix'">
-            <div v-if="!isPortalAdmin" class="tb-empty">Доступно только администратору портала.</div>
+            <div v-if="!isPortalAdmin" class="tb-empty">{{ stateCopy.adminOnly }}</div>
             <div v-else class="tb-field">
               <label>Client ID</label>
               <input v-model="bitrixClientId" class="tb-input" placeholder="client_id" />
@@ -867,21 +932,106 @@
                 <button class="tb-btn tb-btn-primary" @click="saveBitrixCreds">Сохранить</button>
                 <span class="tb-muted" v-if="bitrixCredsStatus">{{ bitrixCredsStatus }}</span>
               </div>
+              <div class="tb-field" v-if="isWebMode && currentAccountId">
+                <div class="tb-section-head">
+                  <div>
+                    <h2 class="tb-card-title">Порталы Bitrix24 аккаунта</h2>
+                    <div class="tb-muted">Управление primary portal и отключением интеграции на уровне аккаунта.</div>
+                  </div>
+                  <button class="tb-btn tb-btn-ghost" @click="loadBitrixIntegrations">Обновить</button>
+                </div>
+                <div class="tb-alert" v-if="bitrixIntegrationsStatus">{{ bitrixIntegrationsStatus }}</div>
+                <div class="tb-userlist" v-if="bitrixIntegrations.length">
+                  <div v-for="item in bitrixIntegrations" :key="item.id" class="tb-user-row">
+                    <div>
+                      <div class="tb-user-name">
+                        {{ item.portal_domain || `Portal ${item.portal_id || item.id}` }}
+                        <span class="tb-chip tb-chip-ghost is-active" v-if="item.is_primary" style="margin-left:8px;">Основной</span>
+                      </div>
+                      <div class="tb-muted">portal_id: {{ item.portal_id || '—' }} · status: {{ item.status || 'active' }}</div>
+                    </div>
+                    <div class="tb-actions">
+                      <button class="tb-mini" v-if="!item.is_primary" :disabled="bitrixIntegrationActionId === item.id" @click="makeBitrixIntegrationPrimary(item.id)">Сделать основным</button>
+                      <button class="tb-mini tb-mini-danger" :disabled="bitrixIntegrationActionId === item.id" @click="disconnectBitrixIntegration(item.id)">Отключить</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="tb-empty" v-else>У аккаунта пока нет подключённых порталов Bitrix24.</div>
+              </div>
             </div>
           </div>
-          <div v-else class="tb-info">
-            <template v-if="amoAllowed">Настройки интеграции AmoCRM появятся здесь.</template>
-            <template v-else>Интеграция AmoCRM недоступна на тарифе "{{ currentPlanName }}".</template>
+          <div v-else>
+            <template v-if="amoAllowed">
+              <div class="tb-info">Настройки интеграции AmoCRM появятся здесь.</div>
+            </template>
+            <template v-else>
+              <div class="tb-upgrade-card">
+                <div class="tb-upgrade-head">Доступно на расширенном тарифе</div>
+                <div class="tb-upgrade-title">Интеграция AmoCRM</div>
+                <div class="tb-upgrade-text">Подключение AmoCRM, обмен статусами и передача лидов доступны на старших тарифах.</div>
+                <ul class="tb-upgrade-list">
+                  <li>Подключение аккаунта и канала AmoCRM</li>
+                  <li>Передача лидов и обновление статусов</li>
+                  <li>Связка с botflow и внешними событиями</li>
+                </ul>
+                <div class="tb-upgrade-preview">
+                  <div class="tb-upgrade-preview-title">{{ UPGRADE_COPY.amocrm.previewTitle }}</div>
+                  <div class="tb-muted">Подключение аккаунта, настройка канала, вебхуков и передачи лидов.</div>
+                </div>
+                <div class="tb-upgrade-meta">Текущий тариф: {{ currentPlanName }}</div>
+                <div class="tb-upgrade-actions">
+                  <button class="tb-btn tb-btn-primary" @click="openBillingPage">Тарифы и оплата</button>
+                </div>
+              </div>
+            </template>
           </div>
         </div>
       </section>
 
       <section v-if="currentTab === 'flow' && isWebMode" class="tb-flow" key="flow">
-        <div v-if="!clientBotAllowed" class="tb-info" style="margin-bottom: 12px;">
-          Конструктор клиентского бота недоступен на тарифе "{{ currentPlanName }}".
+        <div v-if="!clientBotAllowed" class="tb-upgrade-card" style="margin-bottom: 12px;">
+          <div class="tb-upgrade-head">Доступно на расширенном тарифе</div>
+          <div class="tb-upgrade-title">Конструктор клиентского бота</div>
+          <div class="tb-upgrade-text">Редактор сценария, тестовый прогон, публикация и webhook-ноды доступны на старших тарифах.</div>
+          <ul class="tb-upgrade-list">
+            <li>Визуальный редактор сценария и узлов</li>
+            <li>Тестовый прогон и публикация botflow</li>
+            <li>Webhook-ноды и действия в CRM</li>
+          </ul>
+          <div class="tb-upgrade-preview">
+            <div class="tb-flow-toolbar">
+              <button class="tb-btn">Start</button>
+              <button class="tb-btn">Question</button>
+              <button class="tb-btn">RAG Search</button>
+              <button class="tb-btn">Webhook</button>
+              <button class="tb-btn tb-btn-primary">Сохранить</button>
+            </div>
+            <div class="tb-flow-settings">
+              <div class="tb-field">
+                <label>Настроение</label>
+                <input class="tb-input" value="Дружелюбный" disabled />
+              </div>
+              <div class="tb-field">
+                <label>Кастомный промпт</label>
+                <input class="tb-input" value="Отвечай кратко и по делу" disabled />
+              </div>
+            </div>
+          </div>
+          <div class="tb-upgrade-meta">Текущий тариф: {{ currentPlanName }}</div>
+          <div class="tb-upgrade-actions">
+            <button class="tb-btn tb-btn-primary" @click="openBillingPage">Тарифы и оплата</button>
+          </div>
         </div>
-        <div v-else-if="hasWebhookNodes && !webhookAllowed" class="tb-info" style="margin-bottom: 12px;">
-          В текущем сценарии есть webhook-ноды, но вебхуки недоступны на тарифе "{{ currentPlanName }}".
+        <template v-else>
+        <div v-if="hasWebhookNodes && !webhookAllowed" class="tb-upgrade-bar" style="margin-bottom: 12px;">
+          <div class="tb-upgrade-head">{{ stateCopy.currentTariffLocked }}</div>
+          <div class="tb-upgrade-title">Webhook-ноды</div>
+          <div class="tb-upgrade-text">
+            В текущем сценарии есть webhook-ноды, но вебхуки недоступны на тарифе "{{ currentPlanName }}".
+          </div>
+          <div class="tb-upgrade-actions">
+            <button class="tb-btn tb-btn-primary" @click="openBillingPage">Тарифы и оплата</button>
+          </div>
         </div>
         <div class="tb-flow-toolbar">
           <button class="tb-btn" @click="addFlowNode('start')" :disabled="!clientBotAllowed">Start</button>
@@ -1092,7 +1242,7 @@
                 <button class="tb-mini tb-mini-danger" @click="removeSelectedNode">Удалить узел</button>
               </div>
             </div>
-            <div v-else class="tb-empty">Выберите узел для редактирования.</div>
+            <div v-else class="tb-empty">{{ stateCopy.noNodeSelected }}</div>
 
             <div class="tb-card" style="margin-top: 12px;">
               <h3 class="tb-card-title">Связи</h3>
@@ -1101,10 +1251,11 @@
                 <div class="tb-muted">→ {{ edge.to }}</div>
                 <button class="tb-mini tb-mini-danger" @click="removeEdge(edge.id)">Удалить</button>
               </div>
-              <div class="tb-empty" v-if="flowDraft.edges.length === 0">Связей пока нет.</div>
+              <div class="tb-empty" v-if="flowDraft.edges.length === 0">{{ stateCopy.noEdges }}</div>
             </div>
           </div>
         </div>
+        </template>
       </section>
 
     </main>
@@ -1118,13 +1269,21 @@
         </div>
         <div class="tb-auth-body">
           <div class="tb-auth-badge">Teachbase AI — Web-кабинет</div>
-          <h2>{{ authMode === 'register' ? 'Регистрация' : 'Вход' }}</h2>
-          <p class="tb-auth-sub">
-            {{ authMode === 'register'
-              ? 'Подтвердите email для доступа в кабинет.'
-              : 'Email + пароль. Подтвердите email для входа.' }}
-          </p>
-          <div class="tb-auth-form">
+          <template v-if="!authDecision">
+            <h2>{{ authMode === 'register' ? 'Регистрация' : 'Вход' }}</h2>
+            <p class="tb-auth-sub">
+              {{ authMode === 'register'
+                ? 'Подтвердите email для доступа в кабинет.'
+                : 'Email + пароль. Подтвердите email для входа.' }}
+            </p>
+          </template>
+          <template v-else>
+            <h2>Подключение Bitrix24</h2>
+            <p class="tb-auth-sub">
+              Выберите, как привязать текущий портал Bitrix24 к вашему доступу.
+            </p>
+          </template>
+          <div v-if="!authDecision" class="tb-auth-form">
             <label>
               Email
               <input v-model="authEmail" type="email" placeholder="you@company.com" />
@@ -1149,45 +1308,57 @@
             </button>
             <div v-if="authHint" class="tb-auth-hint">{{ authHint }}</div>
           </div>
-        </div>
-      </div>
-    </div>
-
-    <div v-if="linkModalOpen" class="tb-link-modal">
-      <div class="tb-auth-backdrop" />
-      <div class="tb-link-card">
-        <h3>Подтверждение привязки Bitrix24</h3>
-        <p class="tb-muted">Портал: {{ linkModalRequest?.portal_domain }}</p>
-        <div class="tb-link-grid">
-          <label>
-            База знаний
-            <select v-model="linkKbStrategy" class="tb-input">
-              <option value="merge">Объединить</option>
-              <option value="keep_web">Оставить web</option>
-              <option value="keep_bitrix">Оставить Bitrix</option>
-            </select>
-          </label>
-          <label>
-            Боты
-            <select v-model="linkBotsStrategy" class="tb-input">
-              <option value="keep_web">Оставить web</option>
-              <option value="keep_bitrix">Оставить Bitrix</option>
-            </select>
-          </label>
-          <label>
-            Конструктор
-            <select v-model="linkFlowStrategy" class="tb-input">
-              <option value="keep_web">Оставить web</option>
-              <option value="keep_bitrix">Оставить Bitrix</option>
-            </select>
-          </label>
-        </div>
-        <div v-if="linkActionError" class="tb-auth-error">{{ linkActionError }}</div>
-        <div class="tb-banner-actions">
-          <button class="tb-btn" @click="approveLink" :disabled="linkActionLoading">
-            {{ linkActionLoading ? 'Сохранение...' : 'Подтвердить' }}
-          </button>
-          <button class="tb-btn tb-btn-ghost" @click="closeLinkModal">Отмена</button>
+          <div v-else class="tb-auth-decision">
+            <div class="tb-auth-decision-summary">
+              <div class="tb-auth-decision-head">Текущий пользователь: {{ authDecision.email }}</div>
+              <div class="tb-muted">Портал будет подключён либо к новому аккаунту, либо к одному из существующих.</div>
+            </div>
+            <div v-if="authDecision.attachable_accounts?.length" class="tb-auth-account-list">
+              <div
+                v-for="item in authDecision.attachable_accounts"
+                :key="item.account_id"
+                class="tb-auth-account-card"
+                :class="{ 'is-disabled': !item.attach_allowed }"
+              >
+                <div class="tb-auth-account-meta">
+                  <div class="tb-auth-account-title">
+                    {{ item.account_name || `Аккаунт ${item.account_id}` }}
+                    <span v-if="item.account_no" class="tb-muted">· №{{ item.account_no }}</span>
+                  </div>
+                  <div class="tb-muted">Роль: {{ item.role }}</div>
+                  <div class="tb-muted">
+                    Bitrix24: {{ item.bitrix_portals_used ?? 0 }}
+                    <template v-if="item.bitrix_portals_limit">/ {{ item.bitrix_portals_limit }}</template>
+                  </div>
+                  <div v-if="!item.attach_allowed" class="tb-auth-account-reason">
+                    {{ item.reason === 'bitrix_portal_limit_reached'
+                      ? 'На этом тарифе для аккаунта уже достигнут лимит порталов Bitrix24.'
+                      : 'Недостаточно прав для подключения этого портала к аккаунту.' }}
+                  </div>
+                </div>
+                <button
+                  class="tb-btn"
+                  :disabled="authDecisionLoading || !item.attach_allowed"
+                  @click="attachExistingAccount(item.account_id)"
+                >
+                  {{ authDecisionLoading ? 'Подключаю...' : 'Подключить к аккаунту' }}
+                </button>
+              </div>
+            </div>
+            <div class="tb-auth-actions">
+              <button class="tb-btn tb-btn-primary" @click="createNewAccount" :disabled="authDecisionLoading">
+                {{ authDecisionLoading ? 'Создаю...' : 'Создать новый аккаунт' }}
+              </button>
+              <button class="tb-btn tb-btn-ghost" @click="resetAuthDecision" :disabled="authDecisionLoading">
+                Назад
+              </button>
+              <button class="tb-btn tb-btn-ghost" @click="openBillingPage" v-if="authDecision.recommended_action === 'upgrade_or_create'">
+                Тарифы и оплата
+              </button>
+            </div>
+            <div v-if="authHint" class="tb-auth-hint">{{ authHint }}</div>
+            <div v-if="authError" class="tb-auth-error">{{ authError }}</div>
+          </div>
         </div>
       </div>
     </div>
@@ -1196,6 +1367,13 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
+import { coreModuleDescription, coreModuleEmptyState, coreModuleLabel, coreModulesByGroup, type CoreAppModule, type CoreAppModuleId } from '../../shared/ui/modules';
+import { coreSectionCopy } from '../../shared/ui/sections';
+import { sourceSurfaceCopy } from '../../shared/ui/sourceSurface';
+import { appStateCopy } from '../../shared/ui/stateCopy';
+import { formatRuntimeError } from '../../shared/ui/runtimeErrors';
+import { SECTION_SHELL } from '../../shared/ui/sectionShell';
+import { UPGRADE_BADGE_LOCKED, UPGRADE_CTA_PRIMARY, UPGRADE_COPY } from './upgradeCopy';
 
 type KbFile = {
     id: number;
@@ -1256,7 +1434,8 @@ type FlowDraft = {
   edges: FlowEdge[];
 };
 type PortalBillingState = {
-  billing_policy?: { plan_code?: string | null; plan_name?: string | null; features?: Record<string, boolean> } | null;
+  account?: { id?: number | null; name?: string | null; account_no?: number | null; slug?: string | null } | null;
+  billing_policy?: { plan_code?: string | null; plan_name?: string | null; source?: string | null; features?: Record<string, boolean>; limits?: Record<string, number> } | null;
   feature_gates?: {
     client_bot?: { allowed?: boolean; reason?: string };
     amocrm_integration?: { allowed?: boolean; reason?: string };
@@ -1264,7 +1443,39 @@ type PortalBillingState = {
   } | null;
 };
 
-const statusMessage = ref('Загрузка...');
+type BitrixIntegrationItem = {
+  id: number;
+  portal_id?: number | null;
+  portal_domain?: string | null;
+  status?: string | null;
+  is_primary?: boolean;
+};
+
+type BitrixAttachableAccount = {
+  account_id: number;
+  account_no?: number | null;
+  account_name?: string | null;
+  role: string;
+  can_manage_integrations: boolean;
+  attach_allowed: boolean;
+  reason?: string | null;
+  bitrix_portals_used?: number;
+  bitrix_portals_limit?: number | null;
+};
+
+type BitrixLinkPrecheck = {
+  status: string;
+  email: string;
+  portal_id: number;
+  portal_domain?: string | null;
+  same_portal_linked: boolean;
+  current_web_portal_id?: number | null;
+  can_create_new_account: boolean;
+  attachable_accounts: BitrixAttachableAccount[];
+  recommended_action: 'already_linked' | 'attach_existing' | 'upgrade_or_create' | 'create_account';
+};
+
+const statusMessage = ref('');
 const sessionReady = ref(false);
 const isPortalAdmin = ref(false);
 const portalId = ref<number | null>(null);
@@ -1281,6 +1492,8 @@ const authConfirm = ref('');
 const authError = ref('');
 const authHint = ref('');
 const authLoading = ref(false);
+const authDecision = ref<BitrixLinkPrecheck | null>(null);
+const authDecisionLoading = ref(false);
 const webLinked = ref(false);
 const webEmail = ref('');
 const demoUntil = ref<string | null>(null);
@@ -1296,15 +1509,6 @@ const webUserLabel = computed(() => {
     return 'Пользователь';
   }
 });
-const linkRequests = ref<{ id: number; portal_id: number; portal_domain: string; status: string; created_at: string }[]>([]);
-const linkModalOpen = ref(false);
-const linkModalRequest = ref<{ id: number; portal_id: number; portal_domain: string } | null>(null);
-const linkKbStrategy = ref('merge');
-const linkBotsStrategy = ref('keep_web');
-const linkFlowStrategy = ref('keep_web');
-const linkActionLoading = ref(false);
-const linkActionError = ref('');
-
 const users = ref<{ id: number; name: string }[]>([]);
 const userSearch = ref('');
 const selectedUsers = ref<number[]>([]);
@@ -1359,8 +1563,28 @@ const lastUpdated = ref('—');
 
 const recentDialogs = ref<DialogItem[]>([]);
 type TopicSummary = { topic: string; score?: number | null };
+type ChatSource = {
+  file_id?: number | null;
+  filename?: string;
+  source_url?: string;
+  page_num?: number | null;
+  start_ms?: number | null;
+  title?: string | null;
+};
+type IframeChatMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  ts: number;
+  sources?: ChatSource[];
+};
+type ChatPreviewState = {
+  title: string;
+  url: string;
+  kind: 'kb_file' | 'external';
+};
 const topicSummaries = ref<TopicSummary[]>([]);
-const currentTab = ref<'overview' | 'kb' | 'sources' | 'users' | 'analytics' | 'settings' | 'integrations' | 'flow'>('overview');
+const currentTab = ref<CoreAppModuleId>('overview');
   const kbSettings = ref<KbSettings>({
     embedding_model: '',
     chat_model: '',
@@ -1398,6 +1622,11 @@ const currentTab = ref<'overview' | 'kb' | 'sources' | 'users' | 'analytics' | '
   });
 const embedModels = ref<string[]>([]);
 const chatModels = ref<string[]>([]);
+const iframeChatInput = ref('');
+const iframeChatSending = ref(false);
+const iframeChatError = ref('');
+const iframeChatMessages = ref<IframeChatMessage[]>([]);
+const iframeChatPreview = ref<ChatPreviewState | null>(null);
 const kbSettingsMessage = ref('');
 const tgStaffEnabled = ref(false);
 const tgStaffToken = ref('');
@@ -1416,6 +1645,9 @@ const bitrixClientId = ref('');
 const bitrixClientSecret = ref('');
 const bitrixCredsStatus = ref('');
 const portalBilling = ref<PortalBillingState>({});
+const bitrixIntegrations = ref<BitrixIntegrationItem[]>([]);
+const bitrixIntegrationsStatus = ref('');
+const bitrixIntegrationActionId = ref<number | null>(null);
 const flowDraft = ref<FlowDraft>({
   version: 1,
   settings: { mood: 'нейтральный', custom_prompt: '', use_history: true },
@@ -1445,20 +1677,54 @@ const clientBotAllowed = computed(() => !!(portalBilling.value.feature_gates?.cl
 const webhookAllowed = computed(() => !!(portalBilling.value.feature_gates?.webhooks?.allowed ?? true));
 const amoAllowed = computed(() => !!(portalBilling.value.feature_gates?.amocrm_integration?.allowed ?? true));
 const currentPlanName = computed(() => portalBilling.value.billing_policy?.plan_name || 'текущий тариф');
+const currentAccountId = computed(() => Number(portalBilling.value.account?.id || 0) || 0);
 const hasWebhookNodes = computed(() => flowDraft.value.nodes.some((n) => n.type === 'webhook'));
+const chatStarterPrompts = [
+  'Какие документы есть по адаптации сотрудников?',
+  'Где описан процесс отпусков?',
+  'Покажи материалы по тарифам и ограничениям.',
+];
 
-const tabTitle = computed(() => {
-  switch (currentTab.value) {
-    case 'kb': return 'База знаний';
-    case 'sources': return 'Источники данных';
-    case 'users': return 'Пользователи и доступы';
-    case 'analytics': return 'Аналитика';
-    case 'settings': return 'Настройки';
-    case 'integrations': return 'Интеграции';
-    case 'flow': return 'Конструктор бота';
-    default: return 'Обзор';
-  }
-});
+const moduleLabel = (id: string, fallback = '') => coreModuleLabel(id, fallback);
+
+const iframePrimaryModules = computed<CoreAppModule[]>(() => coreModulesByGroup('iframe', 'primary', { isWebMode: isWebMode.value }));
+const iframeSettingsModules = computed<CoreAppModule[]>(() => coreModulesByGroup('iframe', 'settings', { isWebMode: isWebMode.value }));
+
+const MODULE_ICONS: Record<CoreAppModuleId, string> = {
+  overview: '<svg viewBox="0 0 24 24" fill="none"><path d="M4 10.5l8-6 8 6V20a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1v-9.5Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  chat: '<svg viewBox="0 0 24 24" fill="none"><path d="M6 18l-2 2V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H8l-2 2Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  kb: '<svg viewBox="0 0 24 24" fill="none"><path d="M5 4h10a4 4 0 0 1 4 4v12H9a4 4 0 0 0-4 4V4Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 8h6M9 12h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  sources: '<svg viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  users: '<svg viewBox="0 0 24 24" fill="none"><path d="M16 11a4 4 0 1 0-8 0 4 4 0 0 0 8 0Z" stroke="currentColor" stroke-width="1.6"/><path d="M4 20a8 8 0 0 1 16 0" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  analytics: '<svg viewBox="0 0 24 24" fill="none"><path d="M5 12v6M12 8v10M19 4v14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  settings: '<svg viewBox="0 0 24 24" fill="none"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" stroke="currentColor" stroke-width="1.6"/><path d="M4 12h2m12 0h2M12 4v2m0 12v2M6 6l1.5 1.5M16.5 16.5 18 18M18 6l-1.5 1.5M7.5 16.5 6 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  integrations: '',
+  flow: '<svg viewBox="0 0 24 24" fill="none"><path d="M5 7h6M5 17h6M13 7h6M13 17h6M9 7v10M15 7v10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+};
+
+const moduleIcon = (id: CoreAppModuleId) => MODULE_ICONS[id] || '';
+const moduleEmptyState = (id: CoreAppModuleId) =>
+  coreModuleEmptyState(id, 'Раздел пока пуст', 'Заполните этот раздел, чтобы здесь появились данные.');
+const overviewSectionCopy = coreSectionCopy('overview');
+const chatSectionCopy = coreSectionCopy('chat');
+const sourcesSectionCopy = coreSectionCopy('sources');
+const sourceUi = sourceSurfaceCopy();
+const stateCopy = appStateCopy();
+if (!statusMessage.value) statusMessage.value = stateCopy.loadingLabel;
+const shellVars = computed(() => ({
+  '--tb-card-radius': `${SECTION_SHELL.cardRadiusPx}px`,
+  '--tb-card-padding': `${SECTION_SHELL.cardPaddingPx}px`,
+  '--tb-card-border': SECTION_SHELL.cardBorderColor,
+  '--tb-card-shadow': SECTION_SHELL.cardShadow,
+  '--tb-empty-radius': `${SECTION_SHELL.emptyRadiusPx}px`,
+  '--tb-empty-border': SECTION_SHELL.emptyBorderColor,
+  '--tb-empty-bg': SECTION_SHELL.emptyBackground,
+  '--tb-empty-title': SECTION_SHELL.emptyTitleColor,
+  '--tb-empty-text': SECTION_SHELL.emptyTextColor,
+}));
+
+const tabTitle = computed(() => moduleLabel(currentTab.value, 'Обзор'));
+const tabDescription = computed(() => coreModuleDescription(currentTab.value, 'Рабочий раздел аккаунта и текущего Bitrix-портала.'));
 
 const filteredKbFiles = computed(() => {
   const f = kbFilter.value;
@@ -1663,7 +1929,7 @@ async function runFullTextSearch() {
   });
   kbSearchLoading.value = false;
   if (!ok) {
-    kbSearchError.value = data?.error || data?.detail || 'Ошибка поиска';
+    kbSearchError.value = formatRuntimeError(data?.error || data?.detail || stateCopy.searchError, stateCopy.searchError);
     kbSearchResults.value = [];
     kbSearchMatches.value = [];
     return;
@@ -1687,7 +1953,7 @@ async function runSmartSearch() {
   });
   smartSearchLoading.value = false;
   if (!ok) {
-    smartSearchError.value = data?.error || data?.detail || 'Ошибка умного поиска';
+    smartSearchError.value = formatRuntimeError(data?.error || data?.detail || stateCopy.smartSearchError, stateCopy.smartSearchError);
     return;
   }
   smartSearchAnswer.value = data?.data?.answer || data?.answer || '';
@@ -1698,6 +1964,129 @@ function toggleSmartSearch() {
   if (smartSearchOpen.value && !smartSearchQuery.value) {
     smartSearchQuery.value = kbSearch.value.trim();
   }
+}
+
+function iframeChatStorageKey() {
+  const accountId = Number(portalBilling.value?.account?.id || 0);
+  const scopeId = accountId > 0 ? `account:${accountId}` : `portal:${portalId.value || 0}`;
+  return `tb_iframe_chat_history:${scopeId}`;
+}
+
+function saveIframeChatHistory() {
+  try {
+    localStorage.setItem(iframeChatStorageKey(), JSON.stringify(iframeChatMessages.value.slice(-30)));
+  } catch {}
+}
+
+function restoreIframeChatHistory() {
+  try {
+    const raw = localStorage.getItem(iframeChatStorageKey());
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    iframeChatMessages.value = parsed
+      .filter((x: any) => x && (x.role === 'user' || x.role === 'assistant') && typeof x.text === 'string')
+      .map((x: any) => ({
+        id: String(x.id || `${Date.now()}-${Math.random()}`),
+        role: x.role,
+        text: String(x.text || ''),
+        ts: Number(x.ts || Date.now()),
+        sources: Array.isArray(x.sources) ? x.sources : [],
+      }));
+  } catch {}
+}
+
+function clearIframeChat() {
+  iframeChatMessages.value = [];
+  iframeChatError.value = '';
+  iframeChatPreview.value = null;
+  saveIframeChatHistory();
+}
+
+function useChatStarter(prompt: string) {
+  iframeChatInput.value = prompt;
+}
+
+function chatSourceLabel(source: ChatSource) {
+  return (source.filename || source.title || source.source_url || 'Источник').trim();
+}
+
+function formatSourceTime(ms?: number | null) {
+  const total = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+  const min = Math.floor(total / 60);
+  const sec = total % 60;
+  return `${min}:${String(sec).padStart(2, '0')}`;
+}
+
+async function openChatSource(source: ChatSource) {
+  if (source.file_id && portalId.value && portalToken.value) {
+    const previewAttempt = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/files/${source.file_id}/signed-url?inline=1&rendition=preview_pdf`, {
+      headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+    });
+    const fileAttempt = !previewAttempt.ok
+      ? await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/files/${source.file_id}/signed-url?inline=1`, {
+          headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        })
+      : previewAttempt;
+    const url = fileAttempt.data?.url || '';
+    if (fileAttempt.ok && url) {
+      iframeChatPreview.value = {
+        title: chatSourceLabel(source),
+        url,
+        kind: 'kb_file',
+      };
+      return;
+    }
+    iframeChatError.value = formatRuntimeError(fileAttempt.data?.error || fileAttempt.data?.detail || 'preview_missing', sourceUi.previewUnavailableText);
+  }
+  const fallback = (source.source_url || '').trim();
+  if (fallback) {
+    iframeChatPreview.value = {
+      title: chatSourceLabel(source),
+      url: fallback,
+      kind: 'external',
+    };
+    iframeChatError.value = '';
+    return;
+  }
+  iframeChatError.value = sourceUi.previewUnavailableText;
+}
+
+function openPreviewInNewTab() {
+  const url = (iframeChatPreview.value?.url || '').trim();
+  if (url) window.open(url, '_blank', 'noopener');
+}
+
+async function sendIframeChat() {
+  if (!portalId.value || !portalToken.value) return;
+  const q = iframeChatInput.value.trim();
+  if (!q || iframeChatSending.value) return;
+  iframeChatSending.value = true;
+  iframeChatError.value = '';
+  const userMsg: IframeChatMessage = { id: `u-${Date.now()}`, role: 'user', text: q, ts: Date.now() };
+  iframeChatMessages.value = [...iframeChatMessages.value, userMsg];
+  iframeChatInput.value = '';
+  saveIframeChatHistory();
+  const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/kb/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-Api-Schema': 'v2' },
+    body: JSON.stringify({ query: q, sources_format: 'none' }),
+  });
+  iframeChatSending.value = false;
+  if (!ok) {
+    iframeChatError.value = formatRuntimeError(data?.error || data?.detail || stateCopy.askError, stateCopy.askError);
+    return;
+  }
+  const payload = data?.data || data || {};
+  const assistantMsg: IframeChatMessage = {
+    id: `a-${Date.now()}`,
+    role: 'assistant',
+    text: String(payload?.answer || ''),
+    ts: Date.now(),
+    sources: Array.isArray(payload?.sources) ? payload.sources.slice(0, 6) : [],
+  };
+  iframeChatMessages.value = [...iframeChatMessages.value, assistantMsg];
+  saveIframeChatHistory();
 }
 
 
@@ -1720,10 +2109,6 @@ const demoLeftLabel = computed(() => {
   const days = Math.max(0, Math.ceil(diffMs / 86400000));
   return `Тариф: осталось ${days} дн.`;
 });
-
-const pendingLinkRequests = computed(() =>
-  linkRequests.value.filter((r) => r.status === 'pending')
-);
 
 const filteredUsers = computed(() => {
   const q = userSearch.value.trim().toLowerCase();
@@ -2076,8 +2461,8 @@ async function refreshWebSession() {
   return true;
 }
 
-async function selectTab(tab: string) {
-  currentTab.value = tab as any;
+async function selectTab(tab: CoreAppModuleId) {
+  currentTab.value = tab;
   if (!sessionReady.value || !portalId.value || !portalToken.value) return;
   if (tab === 'overview') {
     await loadRecentDialogs();
@@ -2086,6 +2471,10 @@ async function selectTab(tab: string) {
       await loadKbFiles();
       await loadKbSources();
     }
+    return;
+  }
+  if (tab === 'chat') {
+    if (!iframeChatMessages.value.length) restoreIframeChatHistory();
     return;
   }
   if (tab === 'users') {
@@ -2159,57 +2548,81 @@ async function webApiJson(path: string, opts: RequestInit = {}) {
   return { ok: r.ok, status: r.status, data };
 }
 
-async function loadLinkRequests() {
-  if (!webSessionToken.value) return;
-  const { ok, data } = await webApiJson('/v1/web/link/requests');
-  if (!ok) return;
-  linkRequests.value = Array.isArray(data?.items) ? data.items : [];
+function resetAuthDecision() {
+  authDecision.value = null;
+  authDecisionLoading.value = false;
+  authError.value = '';
+  authHint.value = '';
 }
 
-function openLinkModal(req: { id: number; portal_id: number; portal_domain: string }) {
-  linkModalRequest.value = req;
-  linkKbStrategy.value = 'merge';
-  linkBotsStrategy.value = 'keep_web';
-  linkFlowStrategy.value = 'keep_web';
-  linkActionError.value = '';
-  linkModalOpen.value = true;
-}
-
-function closeLinkModal() {
-  linkModalOpen.value = false;
-  linkModalRequest.value = null;
-}
-
-async function approveLink() {
-  if (!linkModalRequest.value) return;
-  linkActionLoading.value = true;
-  linkActionError.value = '';
-  const { ok, data } = await webApiJson(`/v1/web/link/requests/${linkModalRequest.value.id}/approve`, {
+async function createNewAccount() {
+  if (!portalId.value || !portalToken.value || !authEmail.value || !authPassword.value) return;
+  authDecisionLoading.value = true;
+  authError.value = '';
+  authHint.value = '';
+  const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/web/link/create-account`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${portalToken.value}`,
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+    },
     body: JSON.stringify({
-      kb_strategy: linkKbStrategy.value,
-      bots_strategy: linkBotsStrategy.value,
-      flow_strategy: linkFlowStrategy.value,
+      email: authEmail.value,
+      password: authPassword.value,
+      account_name: authCompany.value,
     }),
   });
-  linkActionLoading.value = false;
+  authDecisionLoading.value = false;
   if (!ok) {
-    linkActionError.value = data?.detail || 'Не удалось подтвердить.';
+    authError.value = data?.detail || data?.error || 'Не удалось создать аккаунт.';
     return;
   }
-  closeLinkModal();
-  await loadLinkRequests();
+  authDecision.value = null;
+  webLinked.value = true;
+  webEmail.value = authEmail.value;
+  showAuthModal.value = false;
+  await loadWebLinkStatus();
 }
 
-async function rejectLink(req: { id: number }) {
-  linkActionError.value = '';
-  await webApiJson(`/v1/web/link/requests/${req.id}/reject`, { method: 'POST' });
-  await loadLinkRequests();
+async function attachExistingAccount(accountId: number) {
+  if (!portalId.value || !portalToken.value || !authEmail.value || !authPassword.value) return;
+  authDecisionLoading.value = true;
+  authError.value = '';
+  authHint.value = '';
+  const { ok, data } = await apiJson(`${base}/api/v1/bitrix/portals/${portalId.value}/web/link/attach-existing`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${portalToken.value}`,
+      'Accept': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+    },
+    body: JSON.stringify({
+      email: authEmail.value,
+      password: authPassword.value,
+      account_id: accountId,
+    }),
+  });
+  authDecisionLoading.value = false;
+  if (!ok) {
+    authError.value = data?.detail || data?.error || 'Не удалось подключить портал к аккаунту.';
+    return;
+  }
+  authDecision.value = null;
+  webLinked.value = true;
+  webEmail.value = authEmail.value;
+  showAuthModal.value = false;
+  await loadWebLinkStatus();
 }
 
 function openWebCabinet() {
   window.open('https://necrogame.ru/app', '_blank');
+}
+
+function openBillingPage() {
+  window.open('https://necrogame.ru/app/billing', '_blank');
 }
 
 function openNewWebUi() {
@@ -2228,6 +2641,7 @@ function logoutWeb() {
 async function submitAuth() {
   authError.value = '';
   authHint.value = '';
+  authDecision.value = null;
   if (!portalId.value || !portalToken.value) return;
   if (!authEmail.value || !authPassword.value) {
     authError.value = 'Укажите email и пароль.';
@@ -2249,7 +2663,7 @@ async function submitAuth() {
     : { email: authEmail.value, password: authPassword.value };
   const url = authMode.value === 'register'
     ? `${base}/api/v1/bitrix/portals/${portalId.value}/web/register`
-    : `${base}/api/v1/bitrix/portals/${portalId.value}/web/login`;
+    : `${base}/api/v1/bitrix/portals/${portalId.value}/web/link/precheck`;
   const { ok, data } = await apiJson(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
@@ -2264,12 +2678,23 @@ async function submitAuth() {
     authError.value = data?.detail || data?.error || 'Ошибка авторизации.';
     return;
   }
-  if (data?.status === 'pending') {
-    authHint.value = 'Запрос на привязку отправлен. Подтвердите в веб‑кабинете.';
-    return;
-  }
   if (data?.status === 'confirm_required') {
     authHint.value = 'Письмо с подтверждением отправлено. Подтвердите email, чтобы продолжить.';
+    return;
+  }
+  if (authMode.value === 'login') {
+    const precheck = data as BitrixLinkPrecheck;
+    if (precheck?.same_portal_linked || precheck?.recommended_action === 'already_linked') {
+      webLinked.value = true;
+      webEmail.value = precheck?.email || authEmail.value;
+      showAuthModal.value = false;
+      await loadWebLinkStatus();
+      return;
+    }
+    authDecision.value = precheck;
+    if (precheck?.recommended_action === 'upgrade_or_create') {
+      authHint.value = 'Подключение к существующему аккаунту недоступно: не хватает прав или достигнут лимит порталов Bitrix24. Можно создать новый аккаунт.';
+    }
     return;
   }
   webLinked.value = true;
@@ -2279,8 +2704,40 @@ async function submitAuth() {
 
 async function loadUsers() {
   if (!portalId.value || !portalToken.value) return;
-  if (isWebMode.value) {
+  if (isWebMode.value && currentAccountId.value) {
     await webApiJson(`/v1/web/portals/${portalId.value}/bitrix/users/sync`, { method: 'POST' });
+    const accessCenter = await webApiJson(`/api/v2/web/accounts/${currentAccountId.value}/access-center`);
+    if (accessCenter.ok && Array.isArray(accessCenter.data?.items)) {
+      const items = accessCenter.data.items;
+      users.value = items.map((it: any) => ({
+        id: Number((it.access_center?.bitrix_user_ids || [])[0] || 0),
+        name: it.display_name || it.web?.email || `User ${it.user_id}`,
+      })).filter((u: any) => Number.isFinite(u.id) && u.id > 0);
+      selectedUsers.value = items.flatMap((it: any) =>
+        it.access_center?.bitrix_allowlist
+          ? (it.access_center?.bitrix_user_ids || []).map((v: any) => Number(v)).filter((v: number) => Number.isFinite(v))
+          : [],
+      );
+      const tgMap: Record<number, string> = {};
+      for (const it of items) {
+        const username = it.access_center?.telegram_username || '';
+        if (!username) continue;
+        for (const raw of (it.access_center?.bitrix_user_ids || [])) {
+          const numeric = Number(raw);
+          if (Number.isFinite(numeric)) tgMap[numeric] = `@${username}`;
+        }
+      }
+      bitrixTelegramMap.value = tgMap;
+      webUsers.value = Array.isArray(accessCenter.data?.legacy_web_users)
+        ? accessCenter.data.legacy_web_users.map((it: any) => ({
+            id: String(it.user_id ?? it.id),
+            name: it.display_name || String(it.user_id ?? it.id),
+            telegram_username: it.telegram_username || '',
+          }))
+        : [];
+      accessWarning.value = '';
+      return;
+    }
   }
   const { ok, data } = await apiJson(`${base}/api/v1/bitrix/users?portal_id=${portalId.value}`, {
     headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
@@ -2306,6 +2763,7 @@ async function loadUsers() {
 
 async function loadAllowlist() {
   if (!portalId.value || !portalToken.value) return;
+  if (isWebMode.value && currentAccountId.value) return;
   const url = isWebMode.value
     ? `${base}/api/v1/web/portals/${portalId.value}/access/users`
     : `${base}/api/v1/bitrix/portals/${portalId.value}/access/users`;
@@ -2340,6 +2798,50 @@ async function loadAllowlist() {
     }));
 }
 
+async function loadBitrixIntegrations() {
+  bitrixIntegrations.value = [];
+  bitrixIntegrationsStatus.value = '';
+  if (!isWebMode.value || !currentAccountId.value) return;
+  const { ok, data } = await webApiJson(`/api/v2/web/accounts/${currentAccountId.value}/integrations/bitrix`);
+  if (!ok) {
+    bitrixIntegrationsStatus.value = data?.detail || data?.error || 'Не удалось загрузить порталы Bitrix24.';
+    return;
+  }
+  bitrixIntegrations.value = Array.isArray(data?.items) ? data.items : [];
+}
+
+async function makeBitrixIntegrationPrimary(integrationId: number) {
+  if (!currentAccountId.value || bitrixIntegrationActionId.value) return;
+  bitrixIntegrationActionId.value = integrationId;
+  bitrixIntegrationsStatus.value = '';
+  const { ok, data } = await webApiJson(`/api/v2/web/accounts/${currentAccountId.value}/integrations/bitrix/${integrationId}/make-primary`, {
+    method: 'POST',
+  });
+  bitrixIntegrationActionId.value = null;
+  if (!ok) {
+    bitrixIntegrationsStatus.value = data?.detail || data?.error || 'Не удалось выбрать основной портал.';
+    return;
+  }
+  bitrixIntegrations.value = Array.isArray(data?.items) ? data.items : [];
+  bitrixIntegrationsStatus.value = 'Основной портал обновлён.';
+}
+
+async function disconnectBitrixIntegration(integrationId: number) {
+  if (!currentAccountId.value || bitrixIntegrationActionId.value) return;
+  bitrixIntegrationActionId.value = integrationId;
+  bitrixIntegrationsStatus.value = '';
+  const { ok, data } = await webApiJson(`/api/v2/web/accounts/${currentAccountId.value}/integrations/bitrix/${integrationId}`, {
+    method: 'DELETE',
+  });
+  bitrixIntegrationActionId.value = null;
+  if (!ok) {
+    bitrixIntegrationsStatus.value = data?.detail || data?.error || 'Не удалось отключить портал.';
+    return;
+  }
+  bitrixIntegrations.value = Array.isArray(data?.items) ? data.items : [];
+  bitrixIntegrationsStatus.value = 'Портал отключён.';
+}
+
 async function addWebUser() {
   webUserMessage.value = '';
   const name = newWebUserName.value.trim();
@@ -2365,7 +2867,7 @@ async function addWebUser() {
   }
   newWebUserName.value = '';
   newWebUserTelegram.value = '';
-  await loadAllowlist();
+  await loadUsers();
   webUserMessage.value = 'Добавлено';
 }
 
@@ -2381,7 +2883,7 @@ async function removeWebUser(id: string) {
     webUserMessage.value = res.data?.detail || res.data?.error || 'Ошибка удаления.';
     return;
   }
-  await loadAllowlist();
+  await loadUsers();
   webUserMessage.value = 'Удалено';
 }
 
@@ -2421,6 +2923,7 @@ async function saveAccess() {
         accessSaveStatus.value = 'Сохранено, welcome: ошибка';
       }
     }
+    await loadUsers();
   }
   accessSaving.value = false;
 }
@@ -2713,14 +3216,16 @@ async function loadPortalBillingPolicy() {
     headers: { 'Authorization': `Bearer ${portalToken.value}`, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
   });
   if (ok && data) {
+    const hadHistory = iframeChatMessages.value.length > 0;
     portalBilling.value = data;
+    if (!hadHistory) restoreIframeChatHistory();
   }
 }
 
 async function saveTelegram(kind: 'staff' | 'client') {
   if (!portalId.value || !portalToken.value) return;
   if (kind === 'client' && !clientBotAllowed.value) {
-    tgClientStatus.value = 'Недоступно на текущем тарифе';
+    tgClientStatus.value = stateCopy.currentTariffLocked;
     return;
   }
   const payload = kind === 'staff'
@@ -2894,7 +3399,7 @@ async function uploadFiles(files?: FileList | File[]) {
   const input = fileInput.value;
   const list = files ? Array.from(files as any) : (input?.files ? Array.from(input.files) : []);
   if (!list.length) return;
-  kbUploadMessage.value = 'Загрузка...';
+  kbUploadMessage.value = stateCopy.loadingLabel;
   for (const f of list) {
     const fd = new FormData();
     fd.append('file', f);
@@ -2966,6 +3471,7 @@ async function saveBitrixCreds() {
     body: JSON.stringify(payload),
   });
   bitrixCredsStatus.value = res.ok ? 'Сохранено' : (res.data?.error || 'Ошибка');
+  if (res.ok) await loadBitrixIntegrations();
 }
 
 async function onDropToCollection(collectionId: number, event: DragEvent) {
@@ -3109,15 +3615,15 @@ async function init() {
     isPortalAdmin.value = true;
     sessionReady.value = true;
     statusMessage.value = 'Сессия активна.';
-    await loadLinkRequests();
+    await loadPortalBillingPolicy();
     await loadUsers();
     await loadAllowlist();
+    await loadBitrixIntegrations();
     await loadRecentDialogs();
     await loadTopicSummaries();
     await loadKbFiles();
     await loadKbSources();
     await loadKbSettings();
-    await loadPortalBillingPolicy();
     await loadKbModels();
     await loadTelegramSettings();
     await loadFlow();
@@ -3143,8 +3649,10 @@ async function init() {
   }
   statusMessage.value = 'Сессия активна.';
   await loadWebLinkStatus();
+  await loadPortalBillingPolicy();
   await loadUsers();
   await loadAllowlist();
+  await loadBitrixIntegrations();
   await loadUserStats();
   await loadRecentDialogs();
   await loadTopicSummaries();
@@ -3152,7 +3660,6 @@ async function init() {
     await loadKbFiles();
     await loadKbSources();
     await loadKbSettings();
-    await loadPortalBillingPolicy();
     await loadKbModels();
     await loadTelegramSettings();
   }

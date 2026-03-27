@@ -1,4 +1,9 @@
 ﻿import { useEffect, useState } from "react";
+import { coreModuleEmptyState, coreModuleLoadingLabel } from "../../../../shared/ui/modules";
+import { coreSectionCopy } from "../../../../shared/ui/sections";
+import { EmptyStateBlock } from "../../components/EmptyStateBlock";
+import { PageIntro } from "../../components/PageIntro";
+import { SectionCard } from "../../components/SectionCard";
 import { fetchPortal, getWebPortalInfo } from "./auth";
 
 type KbSource = {
@@ -16,6 +21,13 @@ export function WebSourcesPage() {
   const [url, setUrl] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
+  const sourcesEmpty = coreModuleEmptyState(
+    "sources",
+    "Источников пока нет",
+    "Добавьте URL-источники, чтобы база знаний обновлялась из внешних материалов.",
+  );
+  const sourcesLoadingLabel = coreModuleLoadingLabel("sources", "Загрузка...");
+  const sectionCopy = coreSectionCopy("sources");
 
   const loadSources = async () => {
     if (!portalId || !portalToken) return;
@@ -64,15 +76,15 @@ export function WebSourcesPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-slate-900">Источники данных</h1>
-        <p className="text-sm text-slate-500 mt-1">Добавляйте URL‑источники (YouTube / VK / Rutube).</p>
-      </div>
+      <PageIntro
+        moduleId="sources"
+        fallbackTitle="Источники данных"
+        fallbackDescription="Добавляйте URL-источники и внешние материалы для аккаунта."
+      />
 
-      <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-        <h2 className="text-sm font-semibold text-slate-900">URL‑источники</h2>
+      <SectionCard title={sectionCopy.sourceListTitle}>
         <div className="mt-4">
-          <label className="text-xs text-slate-600">Ссылка</label>
+          <label className="text-xs text-slate-600">{sectionCopy.sourceInputLabel}</label>
           <div className="mt-2 flex gap-3">
             <input
               type="url"
@@ -85,20 +97,19 @@ export function WebSourcesPage() {
               className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700"
               onClick={addUrl}
             >
-              Добавить URL
+              {sectionCopy.addUrlAction}
             </button>
           </div>
           {message && <div className="mt-2 text-xs text-slate-500">{message}</div>}
         </div>
-      </div>
+      </SectionCard>
 
-      <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-900">Источники</h2>
-          <div className="text-xs text-slate-500">{loading ? "Загрузка..." : `Всего: ${sources.length}`}</div>
-        </div>
+      <SectionCard
+        title={sectionCopy.sourceListTitle}
+        actions={<div className="text-xs text-slate-500">{loading ? sourcesLoadingLabel : sectionCopy.countLabel(sources.length)}</div>}
+      >
         {sources.length === 0 ? (
-          <div className="mt-4 text-sm text-slate-500">Источников пока нет.</div>
+          <EmptyStateBlock className="mt-4" title={sourcesEmpty.title} description={sourcesEmpty.description} />
         ) : (
           <div className="mt-4 space-y-3">
             {sources.map((s) => (
@@ -111,7 +122,7 @@ export function WebSourcesPage() {
             ))}
           </div>
         )}
-      </div>
+      </SectionCard>
     </div>
   );
 }

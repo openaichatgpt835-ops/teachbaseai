@@ -1,4 +1,9 @@
 ﻿import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { PageIntro } from "../../components/PageIntro";
+import { coreSectionCopy } from "../../../../shared/ui/sections";
+import { sourceSurfaceCopy } from "../../../../shared/ui/sourceSurface";
+import { appStateCopy } from "../../../../shared/ui/stateCopy";
+import { formatRuntimeError } from "../../../../shared/ui/runtimeErrors";
 import { fetchPortal, getActiveAccountId, getWebPortalInfo, getWebUser } from "./auth";
 
 type ChatSource = {
@@ -765,6 +770,9 @@ function PdfHighlightViewer({
 }
 
 export function WebChatPage() {
+  const sectionCopy = coreSectionCopy("chat");
+  const sourceUi = sourceSurfaceCopy();
+  const stateCopy = appStateCopy();
   const { portalId, portalToken } = getWebPortalInfo();
   const activeAccountId = getActiveAccountId();
   const chatScopeId = activeAccountId || portalId;
@@ -911,7 +919,7 @@ export function WebChatPage() {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
-        const err = data?.error || data?.detail || "Ошибка запроса";
+        const err = formatRuntimeError(data?.error || data?.detail || stateCopy.askError, stateCopy.askError);
         setError(err);
         pushMessage({ role: "assistant", text: `Не удалось выполнить запрос: ${err}`, ts: Date.now() });
         return;
@@ -1046,7 +1054,7 @@ export function WebChatPage() {
         if (st.ok && stData) {
           setTranscriptAllowed(!!stData.allowed);
           setTranscriptStatus(String(stData.status || ""));
-          setTranscriptError(String(stData.error || ""));
+          setTranscriptError(formatRuntimeError(stData.error || "", sourceUi.transcriptUnavailableText));
         } else {
           setTranscriptAllowed(false);
           setTranscriptStatus("error");
@@ -1233,20 +1241,20 @@ export function WebChatPage() {
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-6">
         <div className="flex h-[86vh] w-[94vw] max-w-7xl flex-col rounded-2xl bg-white shadow-2xl">
           <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-            <div className="truncate text-sm font-semibold text-slate-900">{src.filename || "Источник"}</div>
+            <div className="truncate text-sm font-semibold text-slate-900">{src.filename || sourceUi.sourceListTitle}</div>
             <div className="flex items-center gap-2">
               {downloadUrl && (
                 <a className="rounded-lg border border-slate-200 px-3 py-1 text-sm text-slate-700" href={downloadUrl} target="_blank" rel="noreferrer">
-                  Скачать
+                  {sourceUi.downloadAction}
                 </a>
               )}
-              <button className="rounded-lg border border-slate-200 px-3 py-1 text-sm" onClick={closePreview}>Закрыть</button>
+              <button className="rounded-lg border border-slate-200 px-3 py-1 text-sm" onClick={closePreview}>{sourceUi.closeAction}</button>
             </div>
           </div>
           <div className="grid flex-1 grid-cols-[1.2fr_0.8fr] gap-0 overflow-hidden">
             <div className="overflow-auto bg-slate-50 p-3">
               {previewLoading ? (
-                <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">Загрузка файла...</div>
+                <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">{sourceUi.loadingPreviewLabel}</div>
               ) : (isExternalSource && !!externalEmbedUrl) ? (
                 <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
                   <iframe
@@ -1256,18 +1264,18 @@ export function WebChatPage() {
                     allow="autoplay; encrypted-media; picture-in-picture"
                     allowFullScreen
                   />
-                  <a className="inline-block rounded-lg bg-sky-600 px-3 py-2 text-sm text-white" href={externalUrl} target="_blank" rel="noreferrer">Открыть источник</a>
+                  <a className="inline-block rounded-lg bg-sky-600 px-3 py-2 text-sm text-white" href={externalUrl} target="_blank" rel="noreferrer">{sourceUi.openSourceAction}</a>
                 </div>
               ) : (externalCandidate && !base) ? (
                 <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-                  <div className="text-sm text-slate-700">Встроенный плеер недоступен для этого источника. Можно открыть внешнюю ссылку с таймкодом.</div>
-                  <a className="inline-block rounded-lg bg-sky-600 px-3 py-2 text-sm text-white" href={externalUrl} target="_blank" rel="noreferrer">Открыть источник</a>
+                  <div className="text-sm text-slate-700">{sourceUi.externalPlayerUnavailableText}</div>
+                  <a className="inline-block rounded-lg bg-sky-600 px-3 py-2 text-sm text-white" href={externalUrl} target="_blank" rel="noreferrer">{sourceUi.openSourceAction}</a>
                 </div>
               ) : !base ? (
                 <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-                  <div className="text-sm text-slate-700">Не удалось получить URL предпросмотра. Повтори попытку.</div>
-                  <button className="rounded-lg border border-slate-200 px-3 py-2 text-sm" onClick={() => openSourcePreview(src)}>Повторить</button>
-                  {downloadUrl && <a className="inline-block rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700" href={downloadUrl}>Скачать</a>}
+                  <div className="text-sm text-slate-700">{sourceUi.previewUnavailableText}</div>
+                  <button className="rounded-lg border border-slate-200 px-3 py-2 text-sm" onClick={() => openSourcePreview(src)}>{sourceUi.retryAction}</button>
+                  {downloadUrl && <a className="inline-block rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700" href={downloadUrl}>{sourceUi.downloadAction}</a>}
                 </div>
               ) : isVideo ? (
                 <video
@@ -1322,7 +1330,7 @@ export function WebChatPage() {
               ) : isChunkTextPreview ? (
                 previewChunks.length > 0 ? (
                   <div className="h-full overflow-auto rounded-xl border border-slate-200 bg-white p-4">
-                    <div className="mb-3 text-xs text-slate-500">Предпросмотр по фрагментам (переход к цитате)</div>
+                    <div className="mb-3 text-xs text-slate-500">{sourceUi.chunkPreviewLabel}</div>
                     <div className="space-y-2">
                       {previewChunks.map((ch) => (
                         <div
@@ -1347,7 +1355,7 @@ export function WebChatPage() {
                   <iframe title={src.filename || "office"} src={officeSrc} className="h-full w-full rounded-xl border border-slate-200 bg-white" />
                 ) : (
                   <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-                    <div className="text-sm text-slate-700">Фрагменты не найдены. Используйте скачивание файла.</div>
+                    <div className="text-sm text-slate-700">{sourceUi.chunkPreviewUnavailableText}</div>
                   </div>
                 )
               ) : isImage ? (
@@ -1357,40 +1365,40 @@ export function WebChatPage() {
                   <iframe title={src.filename || "office"} src={officeSrc} className="h-full w-full rounded-xl border border-slate-200 bg-white" />
                 ) : (
                   <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-                    <div className="text-sm text-slate-700">Не удалось открыть предпросмотр Office-документа. Используйте скачивание.</div>
+                    <div className="text-sm text-slate-700">{sourceUi.officePreviewUnavailableText}</div>
                   </div>
                 )
               ) : isTextLike ? (
                 <iframe title={src.filename || "text"} src={base} className="h-full w-full rounded-xl border border-slate-200 bg-white" />
               ) : (
                 <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-                  <div className="text-sm text-slate-700">Для этого типа файла используйте скачивание. Контекст доступен справа.</div>
-                  {downloadUrl && <a className="inline-block rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700" href={downloadUrl}>Скачать</a>}
+                  <div className="text-sm text-slate-700">{sourceUi.downloadOnlyText}</div>
+                  {downloadUrl && <a className="inline-block rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700" href={downloadUrl}>{sourceUi.downloadAction}</a>}
                 </div>
               )}
             </div>
             <div className="border-l border-slate-200 bg-white">
-              <div className="border-b border-slate-200 px-4 py-2 text-sm font-semibold text-slate-800">Контекст / транскрибация</div>
+              <div className="border-b border-slate-200 px-4 py-2 text-sm font-semibold text-slate-800">{sourceUi.contextPanelTitle}</div>
               <div className="h-[calc(86vh-94px)] overflow-auto p-3">
                 {(isVideo || isAudio) && (
                   <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
-                    Статус транскрибации: {transcriptStatus || "unknown"}
+                    {sourceUi.transcriptStatusLabel}: {transcriptStatus || "unknown"}
                     {transcriptAllowed === false ? " · опция выключена" : ""}
                     {transcriptError ? ` · ${transcriptError}` : ""}
                     {transcriptRawCount != null ? ` · raw: ${transcriptRawCount}` : ""}
                     {transcriptMergedCount != null ? ` · merged: ${transcriptMergedCount}` : ""}
                   </div>
                 )}
-                {chunksLoading && <div className="text-sm text-slate-500">{(isVideo || isAudio) ? "Загрузка транскрибации..." : "Загрузка контекста..."}</div>}
+                {chunksLoading && <div className="text-sm text-slate-500">{(isVideo || isAudio) ? sourceUi.loadingTranscriptLabel : sourceUi.loadingContextLabel}</div>}
                 {!chunksLoading && (isVideo || isAudio) && transcriptAllowed === false && (
                   <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                    <div>Транскрибация недоступна в текущем тарифе.</div>
-                    <div className="text-xs">Подключите опцию в разделе Настройки → База знаний.</div>
+                    <div>{sourceUi.transcriptDisabledText}</div>
+                    <div className="text-xs">{sourceUi.transcriptSettingsHint}</div>
                   </div>
                 )}
                 {!chunksLoading && (isVideo || isAudio) && transcriptAllowed !== false && transcriptStatus && transcriptStatus !== "ready" && (
                   <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                    <div>Статус транскрибации: {transcriptStatus}</div>
+                    <div>{sourceUi.transcriptStatusLabel}: {transcriptStatus}</div>
                     {transcriptError ? <div className="text-xs text-rose-600">{transcriptError}</div> : null}
                     <button
                       type="button"
@@ -1401,11 +1409,11 @@ export function WebChatPage() {
                         void openSourcePreview(src);
                       }}
                     >
-                      Создать транскрибацию
+                      {sourceUi.createTranscriptAction}
                     </button>
                   </div>
                 )}
-                {!chunksLoading && previewChunks.length === 0 && !((isVideo || isAudio) && transcriptAllowed === false) && <div className="text-sm text-slate-500">{(isVideo || isAudio) ? "Транскрибация пока недоступна." : "Контекст пока недоступен."}</div>}
+                {!chunksLoading && previewChunks.length === 0 && !((isVideo || isAudio) && transcriptAllowed === false) && <div className="text-sm text-slate-500">{(isVideo || isAudio) ? sourceUi.transcriptUnavailableText : sourceUi.contextUnavailableText}</div>}
                 <div className="space-y-2">
                   {previewChunks.map((ch) => (
                     <button
@@ -1442,10 +1450,11 @@ export function WebChatPage() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-semibold text-slate-900">Чат</h1>
-        <p className="mt-1 text-slate-500">Диалог с моделью по базе знаний портала.</p>
-      </div>
+      <PageIntro
+        moduleId="chat"
+        fallbackTitle="Чат"
+        fallbackDescription="Диалог с моделью по базе знаний аккаунта."
+      />
 
       <div className="rounded-2xl border border-slate-200 bg-white p-4">
         <div
@@ -1457,7 +1466,7 @@ export function WebChatPage() {
           }}
         >
           {!messages.length ? (
-            <div className="text-sm text-slate-500">Задайте первый вопрос.</div>
+            <div className="text-sm text-slate-500">{sectionCopy.chatSubtitle}</div>
           ) : (
             <div className="space-y-3">
               {messages.map((m, idx) => (
@@ -1548,7 +1557,7 @@ export function WebChatPage() {
             className="min-h-[92px] flex-1 resize-y rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400"
           />
           <button type="submit" disabled={!canSend} className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">
-            {sending ? `Отправка...${queuedCount > 0 ? ` (+${queuedCount})` : ""}` : "Отправить"}
+            {sending ? `Отправка...${queuedCount > 0 ? ` (+${queuedCount})` : ""}` : sectionCopy.sendAction}
           </button>
         </form>
         {error && <div className="mt-2 text-sm text-rose-600">{error}</div>}

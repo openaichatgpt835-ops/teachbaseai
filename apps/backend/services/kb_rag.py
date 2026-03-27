@@ -2159,6 +2159,7 @@ def _append_lexical_recall_rows(
     if not probes:
         return
     conds = [KBChunk.text.ilike(f"%{p}%") for p in probes]
+    ids = [int(x) for x in (file_ids_filter or []) if int(x) > 0]
     q = (
         select(
             KBChunk.text,
@@ -2177,7 +2178,6 @@ def _append_lexical_recall_rows(
         .join(KBFile, KBFile.id == KBChunk.file_id)
         .join(KBSource, KBSource.id == KBFile.source_id, isouter=True)
         .where(
-            KBChunk.portal_id == portal_id,
             KBFile.status == "ready",
             KBFile.audience == audience,
             or_(*conds),
@@ -2185,9 +2185,10 @@ def _append_lexical_recall_rows(
         .order_by(KBChunk.id.desc())
         .limit(limit)
     )
-    ids = [int(x) for x in (file_ids_filter or []) if int(x) > 0]
     if ids:
         q = q.where(KBFile.id.in_(ids))
+    else:
+        q = q.where(KBChunk.portal_id == portal_id)
     rows = db.execute(q).all()
     for text, chunk_index, start_ms, end_ms, page_num, chunk_id, file_id, filename, mime_type, source_type, source_url, source_title in rows:
         txt = str(text or "")
@@ -2985,7 +2986,6 @@ def answer_from_kb(
             .join(KBFile, KBFile.id == KBChunk.file_id)
             .join(KBSource, KBSource.id == KBFile.source_id, isouter=True)
             .where(
-                KBChunk.portal_id == portal_id,
                 KBFile.status == "ready",
                 KBFile.audience == aud,
             )
@@ -2994,6 +2994,8 @@ def answer_from_kb(
         )
         if scoped_ids:
             base_query = base_query.where(KBFile.id.in_(scoped_ids))
+        else:
+            base_query = base_query.where(KBChunk.portal_id == portal_id)
         rows = db.execute(
             base_query.where(KBEmbedding.model == embed_model)
         ).all()

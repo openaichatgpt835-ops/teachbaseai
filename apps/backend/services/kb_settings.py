@@ -5,9 +5,12 @@ import time
 from sqlalchemy.orm import Session
 
 from apps.backend.models.app_setting import AppSetting
+from apps.backend.models.account import AccountIntegration
+from apps.backend.models.account_kb_setting import AccountKBSetting
+from apps.backend.models.portal import Portal
 from apps.backend.models.portal_kb_setting import PortalKBSetting
 from apps.backend.services.token_crypto import encrypt_token, decrypt_token, mask_token
-from apps.backend.services.billing import get_portal_effective_policy
+from apps.backend.services.billing import get_account_effective_policy, get_portal_effective_policy
 from apps.backend.config import get_settings
 
 
@@ -15,6 +18,34 @@ SETTINGS_KEY = "gigachat"
 BOT_SETTINGS_KEY = "bot_settings"
 DEFAULT_EMBEDDING_MODEL = "EmbeddingsGigaR"
 DEFAULT_CHAT_MODEL = "GigaChat-2-Pro"
+
+KB_SETTINGS_FIELDS = (
+    "embedding_model",
+    "chat_model",
+    "api_base",
+    "prompt_preset",
+    "temperature",
+    "max_tokens",
+    "top_p",
+    "presence_penalty",
+    "frequency_penalty",
+    "allow_general",
+    "strict_mode",
+    "context_messages",
+    "context_chars",
+    "retrieval_top_k",
+    "retrieval_max_chars",
+    "lex_boost",
+    "use_history",
+    "use_cache",
+    "system_prompt_extra",
+    "show_sources",
+    "sources_format",
+    "media_transcription_enabled",
+    "speaker_diarization_enabled",
+    "collections_multi_assign",
+    "smart_folder_threshold",
+)
 
 
 def _portal_feature_gates(db: Session, portal_id: int) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
@@ -37,6 +68,131 @@ def _portal_feature_gates(db: Session, portal_id: int) -> tuple[dict[str, dict[s
         },
         policy,
     )
+
+
+def _account_feature_gates(db: Session, account_id: int) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    policy = get_account_effective_policy(db, account_id)
+    features = dict(policy.get("features") or {})
+
+    def gate(key: str) -> dict[str, Any]:
+        allowed = bool(features.get(key, True))
+        return {
+            "allowed": allowed,
+            "reason": "" if allowed else "locked_by_tariff",
+        }
+
+    return (
+        {
+            "model_selection": gate("allow_model_selection"),
+            "advanced_model_tuning": gate("allow_advanced_model_tuning"),
+            "media_transcription": gate("allow_media_transcription"),
+            "speaker_diarization": gate("allow_speaker_diarization"),
+        },
+        policy,
+    )
+
+
+def _resolve_portal_account_id(db: Session, portal_id: int) -> int | None:
+    portal = db.get(Portal, int(portal_id))
+    if not portal or not portal.account_id:
+        return None
+    return int(portal.account_id)
+
+
+def _primary_account_portal_id(db: Session, account_id: int) -> int | None:
+    integrations = (
+        db.query(AccountIntegration)
+        .filter(AccountIntegration.account_id == int(account_id), AccountIntegration.provider == "bitrix")
+        .all()
+    )
+    for integration in integrations:
+        meta = dict(integration.credentials_json or {})
+        if meta.get("is_primary") and integration.portal_id:
+            return int(integration.portal_id)
+    for integration in integrations:
+        if integration.portal_id:
+            return int(integration.portal_id)
+    portal = db.query(Portal).filter(Portal.account_id == int(account_id)).order_by(Portal.id.asc()).first()
+    if not portal:
+        return None
+    return int(portal.id)
+
+
+def _default_kb_settings() -> dict[str, Any]:
+    return {
+        "embedding_model": DEFAULT_EMBEDDING_MODEL,
+        "chat_model": DEFAULT_CHAT_MODEL,
+        "api_base": "",
+        "prompt_preset": "auto",
+        "show_sources": True,
+        "sources_format": "detailed",
+        "media_transcription_enabled": True,
+        "speaker_diarization_enabled": False,
+        "collections_multi_assign": True,
+        "smart_folder_threshold": 5,
+    }
+
+
+def _row_to_kb_settings(row: Any) -> dict[str, Any]:
+    if not row:
+        return {}
+    return {
+        "embedding_model": row.embedding_model or DEFAULT_EMBEDDING_MODEL,
+        "chat_model": row.chat_model or DEFAULT_CHAT_MODEL,
+        "api_base": row.api_base or "",
+        "prompt_preset": row.prompt_preset or "auto",
+        "show_sources": row.show_sources if row.show_sources is not None else True,
+        "sources_format": row.sources_format or "detailed",
+        "media_transcription_enabled": row.media_transcription_enabled if row.media_transcription_enabled is not None else True,
+        "speaker_diarization_enabled": row.speaker_diarization_enabled if row.speaker_diarization_enabled is not None else False,
+        "collections_multi_assign": row.collections_multi_assign if row.collections_multi_assign is not None else True,
+        "smart_folder_threshold": row.smart_folder_threshold if row.smart_folder_threshold is not None else 5,
+        "temperature": row.temperature,
+        "max_tokens": row.max_tokens,
+        "top_p": row.top_p,
+        "presence_penalty": row.presence_penalty,
+        "frequency_penalty": row.frequency_penalty,
+        "allow_general": row.allow_general,
+        "strict_mode": row.strict_mode,
+        "context_messages": row.context_messages,
+        "context_chars": row.context_chars,
+        "retrieval_top_k": row.retrieval_top_k,
+        "retrieval_max_chars": row.retrieval_max_chars,
+        "lex_boost": row.lex_boost,
+        "use_history": row.use_history,
+        "use_cache": row.use_cache,
+        "system_prompt_extra": row.system_prompt_extra,
+    }
+
+
+def _clone_portal_settings_to_account(db: Session, account_id: int, portal_id: int) -> AccountKBSetting:
+    account_row = db.get(AccountKBSetting, int(account_id))
+    if account_row:
+        return account_row
+    portal_row = db.get(PortalKBSetting, int(portal_id))
+    account_row = AccountKBSetting(account_id=int(account_id))
+    if portal_row:
+        for field in KB_SETTINGS_FIELDS:
+            setattr(account_row, field, getattr(portal_row, field))
+        account_row.updated_at = portal_row.updated_at
+    db.add(account_row)
+    db.commit()
+    db.refresh(account_row)
+    return account_row
+
+
+def _get_or_create_account_kb_row(db: Session, account_id: int) -> AccountKBSetting:
+    row = db.get(AccountKBSetting, int(account_id))
+    if row:
+        return row
+    primary_portal_id = _primary_account_portal_id(db, int(account_id))
+    if primary_portal_id:
+        return _clone_portal_settings_to_account(db, int(account_id), int(primary_portal_id))
+    row = AccountKBSetting(account_id=int(account_id))
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 def _enc_key() -> str:
@@ -258,36 +414,43 @@ def get_portal_bot_settings(db: Session, portal_id: int) -> dict[str, Any]:
     }
 
 
+def get_account_kb_settings(db: Session, account_id: int, *, policy_portal_id: int | None = None) -> dict[str, Any]:
+    row = _get_or_create_account_kb_row(db, int(account_id))
+    out = {
+        **_default_kb_settings(),
+        **_row_to_kb_settings(row),
+    }
+    gates, policy = _account_feature_gates(db, int(account_id))
+    out["feature_gates"] = gates
+    out["billing_policy"] = {
+        "account_id": int(account_id),
+        "plan_code": policy.get("plan_code"),
+        "plan_name": (policy.get("plan") or {}).get("name") if policy.get("plan") else None,
+        "source": policy.get("source"),
+    }
+    out["settings_account_id"] = int(account_id)
+    primary_portal_id = _primary_account_portal_id(db, int(account_id))
+    if primary_portal_id is not None:
+        out["settings_portal_id"] = int(primary_portal_id)
+    elif policy_portal_id is not None:
+        out["settings_portal_id"] = int(policy_portal_id)
+    if not gates["media_transcription"]["allowed"]:
+        out["media_transcription_enabled"] = False
+        out["speaker_diarization_enabled"] = False
+    elif not gates["speaker_diarization"]["allowed"]:
+        out["speaker_diarization_enabled"] = False
+    return out
+
+
 def get_portal_kb_settings(db: Session, portal_id: int) -> dict[str, Any]:
+    account_id = _resolve_portal_account_id(db, int(portal_id))
+    if account_id:
+        return get_account_kb_settings(db, int(account_id), policy_portal_id=int(portal_id))
     row = db.get(PortalKBSetting, portal_id)
     if not row:
-        out = {
-            "embedding_model": DEFAULT_EMBEDDING_MODEL,
-            "chat_model": DEFAULT_CHAT_MODEL,
-            "api_base": "",
-            "prompt_preset": "auto",
-            "show_sources": True,
-            "sources_format": "detailed",
-            "media_transcription_enabled": True,
-            "speaker_diarization_enabled": False,
-            "collections_multi_assign": True,
-            "smart_folder_threshold": 5,
-            **get_portal_bot_settings(db, portal_id),
-        }
+        out = {**_default_kb_settings(), **get_portal_bot_settings(db, portal_id)}
     else:
-        out = {
-        "embedding_model": row.embedding_model or DEFAULT_EMBEDDING_MODEL,
-        "chat_model": row.chat_model or DEFAULT_CHAT_MODEL,
-        "api_base": row.api_base or "",
-        "prompt_preset": row.prompt_preset or "auto",
-        "show_sources": row.show_sources if row.show_sources is not None else True,
-        "sources_format": row.sources_format or "detailed",
-        "media_transcription_enabled": row.media_transcription_enabled if row.media_transcription_enabled is not None else True,
-        "speaker_diarization_enabled": row.speaker_diarization_enabled if row.speaker_diarization_enabled is not None else False,
-        "collections_multi_assign": row.collections_multi_assign if row.collections_multi_assign is not None else True,
-        "smart_folder_threshold": row.smart_folder_threshold if row.smart_folder_threshold is not None else 5,
-        **get_portal_bot_settings(db, portal_id),
-    }
+        out = {**_default_kb_settings(), **_row_to_kb_settings(row), **get_portal_bot_settings(db, portal_id)}
     gates, policy = _portal_feature_gates(db, portal_id)
     out["feature_gates"] = gates
     out["billing_policy"] = {
@@ -334,6 +497,38 @@ def set_portal_kb_settings(
     collections_multi_assign: bool | None = None,
     smart_folder_threshold: int | None = None,
 ) -> dict[str, Any]:
+    account_id = _resolve_portal_account_id(db, int(portal_id))
+    if account_id:
+        return set_account_kb_settings(
+            db,
+            int(account_id),
+            embedding_model,
+            chat_model,
+            api_base,
+            prompt_preset,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
+            allow_general=allow_general,
+            strict_mode=strict_mode,
+            context_messages=context_messages,
+            context_chars=context_chars,
+            retrieval_top_k=retrieval_top_k,
+            retrieval_max_chars=retrieval_max_chars,
+            lex_boost=lex_boost,
+            use_history=use_history,
+            use_cache=use_cache,
+            system_prompt_extra=system_prompt_extra,
+            show_sources=show_sources,
+            sources_format=sources_format,
+            media_transcription_enabled=media_transcription_enabled,
+            speaker_diarization_enabled=speaker_diarization_enabled,
+            collections_multi_assign=collections_multi_assign,
+            smart_folder_threshold=smart_folder_threshold,
+            policy_portal_id=int(portal_id),
+        )
     row = db.get(PortalKBSetting, portal_id)
     if not row:
         row = PortalKBSetting(portal_id=portal_id)
@@ -392,6 +587,94 @@ def set_portal_kb_settings(
     row.updated_at = datetime.utcnow()
     db.commit()
     return get_portal_kb_settings(db, portal_id)
+
+
+def set_account_kb_settings(
+    db: Session,
+    account_id: int,
+    embedding_model: str | None,
+    chat_model: str | None,
+    api_base: str | None,
+    prompt_preset: str | None = None,
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    top_p: float | None = None,
+    presence_penalty: float | None = None,
+    frequency_penalty: float | None = None,
+    allow_general: bool | None = None,
+    strict_mode: bool | None = None,
+    context_messages: int | None = None,
+    context_chars: int | None = None,
+    retrieval_top_k: int | None = None,
+    retrieval_max_chars: int | None = None,
+    lex_boost: float | None = None,
+    use_history: bool | None = None,
+    use_cache: bool | None = None,
+    system_prompt_extra: str | None = None,
+    show_sources: bool | None = None,
+    sources_format: str | None = None,
+    media_transcription_enabled: bool | None = None,
+    speaker_diarization_enabled: bool | None = None,
+    collections_multi_assign: bool | None = None,
+    smart_folder_threshold: int | None = None,
+    policy_portal_id: int | None = None,
+) -> dict[str, Any]:
+    row = _get_or_create_account_kb_row(db, int(account_id))
+    if embedding_model is not None:
+        row.embedding_model = (embedding_model or "").strip() or None
+    if chat_model is not None:
+        row.chat_model = (chat_model or "").strip() or None
+    if api_base is not None:
+        row.api_base = (api_base or "").strip() or None
+    if prompt_preset is not None:
+        row.prompt_preset = (prompt_preset or "").strip() or None
+    if temperature is not None:
+        row.temperature = temperature
+    if max_tokens is not None:
+        row.max_tokens = max_tokens
+    if top_p is not None:
+        row.top_p = top_p
+    if presence_penalty is not None:
+        row.presence_penalty = presence_penalty
+    if frequency_penalty is not None:
+        row.frequency_penalty = frequency_penalty
+    if allow_general is not None:
+        row.allow_general = allow_general
+    if strict_mode is not None:
+        row.strict_mode = strict_mode
+    if context_messages is not None:
+        row.context_messages = context_messages
+    if context_chars is not None:
+        row.context_chars = context_chars
+    if retrieval_top_k is not None:
+        row.retrieval_top_k = retrieval_top_k
+    if retrieval_max_chars is not None:
+        row.retrieval_max_chars = retrieval_max_chars
+    if lex_boost is not None:
+        row.lex_boost = lex_boost
+    if use_history is not None:
+        row.use_history = use_history
+    if use_cache is not None:
+        row.use_cache = use_cache
+    if system_prompt_extra is not None:
+        row.system_prompt_extra = (system_prompt_extra or "").strip() or None
+    if show_sources is not None:
+        row.show_sources = bool(show_sources)
+    if sources_format is not None:
+        row.sources_format = (sources_format or "").strip() or None
+    if media_transcription_enabled is not None:
+        row.media_transcription_enabled = bool(media_transcription_enabled)
+    if speaker_diarization_enabled is not None:
+        row.speaker_diarization_enabled = bool(speaker_diarization_enabled)
+    if collections_multi_assign is not None:
+        row.collections_multi_assign = bool(collections_multi_assign)
+    if smart_folder_threshold is not None:
+        row.smart_folder_threshold = int(smart_folder_threshold)
+    from datetime import datetime
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    return get_account_kb_settings(db, int(account_id), policy_portal_id=policy_portal_id)
 
 
 def get_effective_gigachat_settings(db: Session, portal_id: int) -> dict[str, Any]:

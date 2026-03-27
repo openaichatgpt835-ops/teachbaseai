@@ -11,11 +11,16 @@ from apps.backend.auth import create_access_token
 from apps.backend.database import Base, get_test_engine
 from apps.backend.deps import get_db
 from apps.backend.main import app
-from apps.backend.models.account import Account, AppUser, AppUserWebCredential
+from apps.backend.models.account import Account, AccountIntegration, AppUser, AppUserWebCredential
 from apps.backend.models.kb import KBChunk, KBFile
 from apps.backend.models.portal import Portal
 from apps.backend.models.billing import AccountPlanOverride, AccountSubscription, BillingPlan
-from apps.backend.services.billing import ensure_base_plans, would_exceed_account_media_minutes
+from apps.backend.services.billing import (
+    ensure_base_plans,
+    get_account_bitrix_portal_count,
+    is_account_bitrix_portal_limit_reached,
+    would_exceed_account_media_minutes,
+)
 
 
 client = TestClient(app)
@@ -54,6 +59,12 @@ def test_admin_billing_plans_seeded(test_db_session, override_get_db):
         data = resp.json()
         codes = [item["code"] for item in data["items"]]
         assert codes == ["start", "business", "pro"]
+        start = next(item for item in data["items"] if item["code"] == "start")
+        business = next(item for item in data["items"] if item["code"] == "business")
+        pro = next(item for item in data["items"] if item["code"] == "pro")
+        assert start["limits"]["max_bitrix_portals"] == 1
+        assert business["limits"]["max_bitrix_portals"] == 1
+        assert pro["limits"]["max_bitrix_portals"] == 5
     finally:
         app.dependency_overrides.pop(get_db, None)
 
@@ -289,3 +300,49 @@ def test_account_media_minutes_limit_uses_account_usage(test_db_session, overrid
 
     assert would_exceed_account_media_minutes(test_db_session, int(account.id), additional_minutes=90) is True
     assert would_exceed_account_media_minutes(test_db_session, int(account.id), additional_minutes=70) is False
+
+
+@pytest.mark.timeout(10)
+def test_account_bitrix_portal_limit_uses_account_policy(test_db_session, override_get_db):
+    account = Account(name="Bitrix Limit", status="active")
+    test_db_session.add(account)
+    test_db_session.flush()
+    ensure_base_plans(test_db_session)
+    start_plan = test_db_session.query(BillingPlan).filter(BillingPlan.code == "start").one()
+    pro_plan = test_db_session.query(BillingPlan).filter(BillingPlan.code == "pro").one()
+
+    test_db_session.add(
+        AccountSubscription(
+            account_id=account.id,
+            plan_id=start_plan.id,
+            status="active",
+            started_at=datetime.utcnow(),
+        )
+    )
+    test_db_session.add_all(
+        [
+            AccountIntegration(
+                account_id=account.id,
+                provider="bitrix",
+                external_key="b24-a.bitrix24.ru",
+                status="active",
+            ),
+            AccountIntegration(
+                account_id=account.id,
+                provider="amo",
+                external_key="amo-1",
+                status="active",
+            ),
+        ]
+    )
+    test_db_session.commit()
+
+    assert get_account_bitrix_portal_count(test_db_session, int(account.id)) == 1
+    assert is_account_bitrix_portal_limit_reached(test_db_session, int(account.id), extra_portals=1) is True
+    assert is_account_bitrix_portal_limit_reached(test_db_session, int(account.id), extra_portals=0) is False
+
+    subscription = test_db_session.query(AccountSubscription).filter(AccountSubscription.account_id == account.id).one()
+    subscription.plan_id = pro_plan.id
+    test_db_session.commit()
+
+    assert is_account_bitrix_portal_limit_reached(test_db_session, int(account.id), extra_portals=1) is False

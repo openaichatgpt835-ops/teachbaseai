@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
-import { LockedSection } from "../../components/LockedSection";
-import { fetchPortal, getWebPortalInfo } from "./auth";
+import { PageIntro } from "../../components/PageIntro";
+import { BitrixIntegrationsManager } from "../../components/BitrixIntegrationsManager";
+import { UpgradeFeatureCard, UpgradeNoticeBar } from "../../components/LockedSection";
+import { UPGRADE_COPY } from "../../shared/upgradeCopy";
+import { appStateCopy } from "../../../../shared/ui/stateCopy";
+import { fetchPortal, getActiveAccountId, getWebPortalInfo } from "./auth";
 
 type TelegramConfig = {
   enabled: boolean;
@@ -47,6 +51,7 @@ const integrationsCache = new Map<number, IntegrationsCacheState>();
 
 export function WebIntegrationsPage() {
   const { portalId, portalToken } = getWebPortalInfo();
+  const activeAccountId = getActiveAccountId();
   const cached = portalId ? integrationsCache.get(portalId) : null;
   const [integrationTab, setIntegrationTab] = useState<"telegram" | "bitrix" | "amocrm">(cached?.integrationTab || "telegram");
   const [staffConfig, setStaffConfig] = useState<TelegramConfig>(cached?.staffConfig || {
@@ -138,6 +143,7 @@ export function WebIntegrationsPage() {
   const clientBotAllowed = !!(portalBilling.feature_gates?.client_bot?.allowed ?? true);
   const amoAllowed = !!(portalBilling.feature_gates?.amocrm_integration?.allowed ?? true);
   const planName = portalBilling.billing_policy?.plan_name || "текущий тариф";
+  const stateCopy = appStateCopy();
 
   const saveTelegram = async (kind: "staff" | "client") => {
     if (!portalId || !portalToken) return;
@@ -153,7 +159,7 @@ export function WebIntegrationsPage() {
     const data = await res.json().catch(() => null);
     const ok = res.ok;
     if (kind === "staff") {
-      setStaffStatus(ok ? "Сохранено" : (data?.detail || data?.error || "Ошибка"));
+      setStaffStatus(ok ? stateCopy.savedLabel : (data?.detail || data?.error || stateCopy.genericError));
       if (ok) {
         setStaffToken("");
         setStaffConfig((prev) => ({
@@ -165,7 +171,7 @@ export function WebIntegrationsPage() {
       return;
     }
 
-    setClientStatus(ok ? "Сохранено" : (data?.detail || data?.error || "Ошибка"));
+    setClientStatus(ok ? stateCopy.savedLabel : (data?.detail || data?.error || stateCopy.genericError));
     if (ok) {
       setClientToken("");
       setClientConfig((prev) => ({
@@ -178,7 +184,7 @@ export function WebIntegrationsPage() {
 
   const saveBitrixCreds = async () => {
     if (!portalId || !portalToken) return;
-    setBitrixStatus("Сохранение...");
+    setBitrixStatus(stateCopy.savingLabel);
     const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/bitrix/credentials`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -195,19 +201,20 @@ export function WebIntegrationsPage() {
         const msg = refreshErrorMap[data.refresh_error] || data.refresh_error;
         setBitrixStatus(`Креды сохранены, но токен не обновлён: ${msg}`);
       } else {
-        setBitrixStatus("Сохранено");
+        setBitrixStatus(stateCopy.savedLabel);
       }
       return;
     }
-    setBitrixStatus(data?.error || "Ошибка");
+    setBitrixStatus(data?.error || stateCopy.genericError);
   };
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-slate-900">Интеграции</h1>
-        <p className="mt-1 text-sm text-slate-500">Подключайте внешние каналы и настраивайте доступы.</p>
-      </div>
+      <PageIntro
+        moduleId="integrations"
+        fallbackTitle="Интеграции"
+        fallbackDescription="Подключенные каналы, Bitrix-порталы и внешние интеграции аккаунта."
+      />
 
       <div className="flex flex-wrap gap-2">
         {[
@@ -315,12 +322,9 @@ export function WebIntegrationsPage() {
                   </div>
                 </>
               ) : (
-                <LockedSection
-                  title="Клиентский Telegram-бот"
-                  summary="В этом блоке включается клиентский бот, загрузка файлов и webhook для внешнего канала. На текущем тарифе раздел закрыт."
-                  planName={planName}
-                >
-                  <div className="space-y-3 p-1">
+                <div className="space-y-3">
+                  <UpgradeNoticeBar {...UPGRADE_COPY.telegramClient} planName={planName} compact />
+                  <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50/60 p-4 opacity-70">
                     <label className="flex items-center gap-2 text-sm text-slate-700">
                       <input type="checkbox" checked={clientConfig.enabled} disabled onChange={() => null} />
                       Бот для клиентов (RAG: client)
@@ -343,14 +347,15 @@ export function WebIntegrationsPage() {
                       </button>
                     </div>
                   </div>
-                </LockedSection>
+                </div>
               )}
             </div>
           </div>
         )}
 
         {integrationTab === "bitrix" && (
-          <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <div className="mt-4 space-y-4">
+            <div className="grid gap-4 md:grid-cols-2">
             <div className="space-y-3">
               <label className="text-xs text-slate-600">Client ID</label>
               <input
@@ -399,6 +404,8 @@ export function WebIntegrationsPage() {
                 </div>
               )}
             </div>
+            </div>
+            {activeAccountId > 0 && <BitrixIntegrationsManager accountId={activeAccountId} />}
           </div>
         )}
 
@@ -407,17 +414,12 @@ export function WebIntegrationsPage() {
             {amoAllowed ? (
               "Настройки интеграции AmoCRM добавим позже."
             ) : (
-              <LockedSection
-                title="Интеграция AmoCRM"
-                summary="Здесь будет подключение AmoCRM, настройка канала, статусов и обмена событиями. На текущем тарифе раздел закрыт."
-                planName={planName}
-                className="border-none bg-transparent"
-              >
+              <UpgradeFeatureCard {...UPGRADE_COPY.amocrm} planName={planName}>
                 <div className="rounded-xl border border-slate-100 bg-white px-4 py-4 text-sm text-slate-600">
-                  <div className="font-semibold text-slate-800">AmoCRM</div>
+                  <div className="font-semibold text-slate-800">{UPGRADE_COPY.amocrm.previewTitle}</div>
                   <div className="mt-2">Подключение аккаунта, настройка канала, вебхуков и передачи лидов.</div>
                 </div>
-              </LockedSection>
+              </UpgradeFeatureCard>
             )}
           </div>
         )}

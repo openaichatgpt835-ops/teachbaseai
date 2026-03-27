@@ -4,6 +4,7 @@ import sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 ROOTS = [
+    os.path.join(ROOT, "apps", "shared"),
     os.path.join(ROOT, "apps", "frontend", "src"),
     os.path.join(ROOT, "apps", "backend"),
     os.path.join(ROOT, "apps", "iframe-vue"),

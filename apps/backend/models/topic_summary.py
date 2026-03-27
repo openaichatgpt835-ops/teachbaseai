@@ -15,3 +15,15 @@ class PortalTopicSummary(Base):
     source_to = Column(DateTime, nullable=True)
     items = Column(JSONB, nullable=False, default=list)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AccountTopicSummary(Base):
+    __tablename__ = "account_topic_summaries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False, index=True)
+    day = Column(Date, nullable=False, index=True)
+    source_from = Column(DateTime, nullable=True)
+    source_to = Column(DateTime, nullable=True)
+    items = Column(JSONB, nullable=False, default=list)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

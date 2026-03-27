@@ -1,6 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { PageIntro } from "../../components/PageIntro";
 import { Select } from "../../components/Select";
-import { LockedSection } from "../../components/LockedSection";
+import { UpgradeNoticeBar } from "../../components/LockedSection";
+import { UPGRADE_COPY } from "../../shared/upgradeCopy";
+import { appStateCopy } from "../../../../shared/ui/stateCopy";
 import { fetchPortal, getWebPortalInfo } from "./auth";
 
 type KbSettings = {
@@ -130,6 +133,7 @@ export function WebSettingsPage() {
   const [settingsMessage, setSettingsMessage] = useState("");
   const [loadingSettings, setLoadingSettings] = useState(!cached);
   const currentPlanName = kbSettings.billing_policy?.plan_name || "текущий тариф";
+  const stateCopy = appStateCopy();
 
   useEffect(() => {
     if (!portalId || !portalToken) return;
@@ -222,7 +226,7 @@ export function WebSettingsPage() {
 
   const saveSettings = async () => {
     if (!portalId || !portalToken) return;
-    setSettingsMessage("Сохранение...");
+    setSettingsMessage(stateCopy.savingLabel);
     const payload = {
       ...kbSettings,
       top_p: toOptionalNumber(kbSettings.top_p),
@@ -246,23 +250,24 @@ export function WebSettingsPage() {
         body: JSON.stringify(payload),
       });
       const data = await res.json().catch(() => null);
-      setSettingsMessage(res.ok ? "Сохранено" : (data?.error || "Ошибка"));
+      setSettingsMessage(res.ok ? stateCopy.savedLabel : (data?.error || stateCopy.genericError));
     } catch {
-      setSettingsMessage("Ошибка");
+      setSettingsMessage(stateCopy.genericError);
     }
   };
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-slate-900">Настройки</h1>
-        <p className="mt-1 text-sm text-slate-500">Настройте модель, выдачу и интеграции ботов.</p>
-      </div>
+      <PageIntro
+        moduleId="settings"
+        fallbackTitle="Настройки"
+        fallbackDescription="Настройте модель, выдачу и интеграции ботов."
+      />
 
       <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-slate-900">База знаний</h2>
-          {loadingSettings && <span className="text-xs text-slate-500">Загрузка...</span>}
+          {loadingSettings && <span className="text-xs text-slate-500">{stateCopy.loadingLabel}</span>}
         </div>
         {kbSettings.billing_policy?.plan_name && (
           <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
@@ -292,12 +297,9 @@ export function WebSettingsPage() {
               </Field>
             </>
           ) : (
-            <LockedSection
-              title="Ручной выбор моделей"
-              summary="Здесь выбираются embedding- и chat-модели для поиска и генерации ответа. На текущем тарифе этот блок закрыт."
-              planName={currentPlanName}
-            >
-              <div className="space-y-4 p-1">
+            <div className="space-y-4">
+              <UpgradeNoticeBar {...UPGRADE_COPY.modelSelection} planName={currentPlanName} compact />
+              <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50/60 p-4 opacity-70">
                 <Field label="Embedding-модель" help="Модель для поиска по базе знаний. Обычно не требуется менять.">
                   <Select
                     value={kbSettings.embedding_model}
@@ -318,7 +320,7 @@ export function WebSettingsPage() {
                   />
                 </Field>
               </div>
-            </LockedSection>
+            </div>
           )}
 
           <Field label="Стиль ответа" help="Управляет подачей ответа: компактно, сбалансированно или более развернуто.">
@@ -571,13 +573,9 @@ export function WebSettingsPage() {
       ) : (
         <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
           <div className="text-sm font-semibold text-slate-900">Продвинутые параметры</div>
-          <div className="mt-4">
-            <LockedSection
-              title="Продвинутые параметры модели"
-              summary="Здесь настраиваются промпт, retrieval и параметры генерации. На текущем тарифе блок закрыт."
-              planName={currentPlanName}
-            >
-              <div className="space-y-4 p-1">
+          <div className="mt-4 space-y-4">
+            <UpgradeNoticeBar {...UPGRADE_COPY.advancedTuning} planName={currentPlanName} />
+            <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50/60 p-4 opacity-70">
                 <div className="grid gap-4 md:grid-cols-2">
                   <Field label="Температура" help="Чем выше, тем более креативные ответы. Обычно 0.2–0.5.">
                     <input type="number" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm" value={kbSettings.temperature} disabled onChange={() => null} />
@@ -604,8 +602,7 @@ export function WebSettingsPage() {
                   </Field>
                 </div>
               </div>
-            </LockedSection>
-          </div>
+            </div>
         </div>
       )}
     </div>

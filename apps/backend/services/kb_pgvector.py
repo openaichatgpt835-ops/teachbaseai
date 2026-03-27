@@ -65,6 +65,7 @@ def query_top_chunks_by_pgvector(
         return []
     ids = [int(x) for x in (file_ids or []) if int(x) > 0]
     extra_file_filter = " AND f.id = ANY(:file_ids) " if ids else ""
+    portal_filter = "" if ids else " AND c.portal_id = :portal_id "
     sql = text(
         """
         SELECT
@@ -86,12 +87,12 @@ def query_top_chunks_by_pgvector(
         JOIN kb_files f ON f.id = c.file_id
         LEFT JOIN kb_sources s ON s.id = f.source_id
         WHERE
-            c.portal_id = :portal_id
-            AND f.status = 'ready'
+            f.status = 'ready'
             AND f.audience = :audience
             AND e.model = :model
             AND e.vector_pg IS NOT NULL
             """
+        + portal_filter
         + extra_file_filter
         + """
         ORDER BY e.vector_pg <=> CAST(:qvec AS vector)

@@ -1,4 +1,5 @@
 ﻿import { useEffect, useState } from "react";
+import { PageIntro } from "../../components/PageIntro";
 import { fetchPortal, fetchWeb, getActiveAccountId, getWebPortalInfo } from "./auth";
 
 type WebUserItem = { id: string; name: string; telegram_username?: string | null };
@@ -447,6 +448,12 @@ export function WebUsersPage() {
 
   return (
     <div className="space-y-6">
+      <PageIntro
+        moduleId="users"
+        fallbackTitle="Пользователи и доступы"
+        fallbackDescription="Роли, права и доступы для участников аккаунта."
+      />
+
       <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
           <h2 className="text-sm font-semibold text-slate-900">Доп. пользователи (Telegram)</h2>
           <div className="mt-4 space-y-3">

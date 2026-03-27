@@ -9,8 +9,10 @@ from sqlalchemy.orm import Session
 from apps.backend.auth import require_portal_access
 from apps.backend.deps import get_db
 from apps.backend.models.bitrix_inbound_event import BitrixInboundEvent
+from apps.backend.models.account import AccountIntegration
 from apps.backend.models.dialog import Dialog, Message
-from apps.backend.models.topic_summary import PortalTopicSummary
+from apps.backend.models.topic_summary import PortalTopicSummary, AccountTopicSummary
+from apps.backend.models.portal import Portal
 from apps.backend.services.billing import get_portal_usage_summary
 from apps.backend.services.gigachat_client import DEFAULT_API_BASE, chat_complete
 from apps.backend.utils.api_errors import error_envelope
@@ -20,6 +22,45 @@ from apps.backend.services.kb_settings import (
 )
 
 router = APIRouter()
+
+
+def _account_scope_portal_ids(db: Session, portal_id: int) -> list[int]:
+    portal = db.get(Portal, int(portal_id))
+    if not portal or not portal.account_id:
+        return [int(portal_id)]
+    rows = db.execute(
+        select(Portal.id)
+        .where(Portal.account_id == int(portal.account_id))
+        .order_by(Portal.id.asc())
+    ).scalars().all()
+    ids = [int(x) for x in rows if x is not None]
+    return ids or [int(portal_id)]
+
+
+def _primary_account_portal_id(db: Session, portal_id: int) -> int:
+    portal = db.get(Portal, int(portal_id))
+    if not portal or not portal.account_id:
+        return int(portal_id)
+    integrations = db.execute(
+        select(AccountIntegration)
+        .where(AccountIntegration.account_id == int(portal.account_id))
+        .where(AccountIntegration.provider == "bitrix")
+        .where(AccountIntegration.status == "active")
+        .order_by(AccountIntegration.id.asc())
+    ).scalars().all()
+    for integration in integrations:
+        meta = dict(integration.credentials_json or {})
+        if meta.get("is_primary") and integration.portal_id:
+            return int(integration.portal_id)
+    ids = _account_scope_portal_ids(db, int(portal_id))
+    return int(ids[0]) if ids else int(portal_id)
+
+
+def _summary_scope(db: Session, portal_id: int) -> tuple[str, int]:
+    portal = db.get(Portal, int(portal_id))
+    if portal and portal.account_id:
+        return "account", int(portal.account_id)
+    return "portal", _primary_account_portal_id(db, int(portal_id))
 
 
 def _trace_id(request: Request) -> str:
@@ -54,10 +95,11 @@ async def get_recent_dialog_messages(
         limit = 1
     if limit > 100:
         limit = 100
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
     q = (
         select(Message, Dialog)
         .join(Dialog, Dialog.id == Message.dialog_id)
-        .where(Dialog.portal_id == portal_id)
+        .where(Dialog.portal_id.in_(scope_portal_ids))
         .order_by(Message.created_at.desc())
         .limit(limit)
     )
@@ -91,15 +133,26 @@ async def get_dialogs_summary(
         limit = 10
     if limit > 300:
         limit = 300
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+    summary_scope, summary_scope_id = _summary_scope(db, portal_id)
 
     today = datetime.utcnow().date()
-    latest = (
-        db.query(PortalTopicSummary)
-        .filter(PortalTopicSummary.portal_id == portal_id)
-        .filter(PortalTopicSummary.day == today)
-        .order_by(PortalTopicSummary.created_at.desc())
-        .first()
-    )
+    if summary_scope == "account":
+        latest = (
+            db.query(AccountTopicSummary)
+            .filter(AccountTopicSummary.account_id == summary_scope_id)
+            .filter(AccountTopicSummary.day == today)
+            .order_by(AccountTopicSummary.created_at.desc())
+            .first()
+        )
+    else:
+        latest = (
+            db.query(PortalTopicSummary)
+            .filter(PortalTopicSummary.portal_id == summary_scope_id)
+            .filter(PortalTopicSummary.day == today)
+            .order_by(PortalTopicSummary.created_at.desc())
+            .first()
+        )
     if latest:
         return JSONResponse(
             {
@@ -115,7 +168,7 @@ async def get_dialogs_summary(
     q = (
         select(Message.body)
         .join(Dialog, Dialog.id == Message.dialog_id)
-        .where(Dialog.portal_id == portal_id)
+        .where(Dialog.portal_id.in_(scope_portal_ids))
         .where(Message.direction == "rx")
         .where(Message.body.isnot(None))
         .where(Message.created_at >= day_start)
@@ -133,7 +186,7 @@ async def get_dialogs_summary(
         q = (
             select(Message.body)
             .join(Dialog, Dialog.id == Message.dialog_id)
-            .where(Dialog.portal_id == portal_id)
+            .where(Dialog.portal_id.in_(scope_portal_ids))
             .where(Message.direction == "rx")
             .where(Message.body.isnot(None))
             .where(Message.created_at >= week_start)
@@ -146,12 +199,20 @@ async def get_dialogs_summary(
         source_to = datetime.utcnow()
 
     if len(texts) < 8:
-        last = (
-            db.query(PortalTopicSummary)
-            .filter(PortalTopicSummary.portal_id == portal_id)
-            .order_by(PortalTopicSummary.day.desc())
-            .first()
-        )
+        if summary_scope == "account":
+            last = (
+                db.query(AccountTopicSummary)
+                .filter(AccountTopicSummary.account_id == summary_scope_id)
+                .order_by(AccountTopicSummary.day.desc())
+                .first()
+            )
+        else:
+            last = (
+                db.query(PortalTopicSummary)
+                .filter(PortalTopicSummary.portal_id == summary_scope_id)
+                .order_by(PortalTopicSummary.day.desc())
+                .first()
+            )
         if last:
             return JSONResponse(
                 {
@@ -209,13 +270,22 @@ async def get_dialogs_summary(
             items = []
 
     if len(items) >= 3:
-        rec = PortalTopicSummary(
-            portal_id=portal_id,
-            day=today,
-            source_from=source_from,
-            source_to=source_to,
-            items=items,
-        )
+        if summary_scope == "account":
+            rec = AccountTopicSummary(
+                account_id=summary_scope_id,
+                day=today,
+                source_from=source_from,
+                source_to=source_to,
+                items=items,
+            )
+        else:
+            rec = PortalTopicSummary(
+                portal_id=summary_scope_id,
+                day=today,
+                source_from=source_from,
+                source_to=source_to,
+                items=items,
+            )
         db.add(rec)
         db.commit()
         return JSONResponse(
@@ -227,12 +297,20 @@ async def get_dialogs_summary(
             }
         )
 
-    last = (
-        db.query(PortalTopicSummary)
-        .filter(PortalTopicSummary.portal_id == portal_id)
-        .order_by(PortalTopicSummary.day.desc())
-        .first()
-    )
+    if summary_scope == "account":
+        last = (
+            db.query(AccountTopicSummary)
+            .filter(AccountTopicSummary.account_id == summary_scope_id)
+            .order_by(AccountTopicSummary.day.desc())
+            .first()
+        )
+    else:
+        last = (
+            db.query(PortalTopicSummary)
+            .filter(PortalTopicSummary.portal_id == summary_scope_id)
+            .order_by(PortalTopicSummary.day.desc())
+            .first()
+        )
     if last:
         return JSONResponse(
             {
@@ -260,9 +338,10 @@ async def get_portal_user_stats(
     if hours > 168:
         hours = 168
     since = datetime.utcnow() - timedelta(hours=hours)
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
     q = (
         db.query(BitrixInboundEvent.user_id, func.count(BitrixInboundEvent.id))
-        .filter(BitrixInboundEvent.portal_id == portal_id)
+        .filter(BitrixInboundEvent.portal_id.in_(scope_portal_ids))
         .filter(BitrixInboundEvent.event_name == "ONIMBOTMESSAGEADD")
         .filter(BitrixInboundEvent.created_at >= since)
         .group_by(BitrixInboundEvent.user_id)

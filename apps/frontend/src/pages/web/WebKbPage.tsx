@@ -1,5 +1,6 @@
 ﻿
 import { useEffect, useMemo, useRef, useState } from "react";
+import { coreModuleDescription, coreModuleLabel } from "../../../../shared/ui/modules";
 import { fetchPortal, getWebPortalInfo } from "./auth";
 import { useLocation } from "react-router-dom";
 
@@ -1144,8 +1145,8 @@ export function WebKbPage() {
 
       <section className="space-y-6" onClick={closeFileMenu}>
         <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-slate-900">Добро пожаловать в базу знаний</h2>
-          <p className="text-sm text-slate-500 mt-1">Управляйте документами и доступами в едином пространстве.</p>
+          <h2 className="text-lg font-semibold text-slate-900">{coreModuleLabel("kb", "База знаний")}</h2>
+          <p className="text-sm text-slate-500 mt-1">{coreModuleDescription("kb", "Управляйте документами и доступами в едином пространстве.")}</p>
           <div className="mt-4 flex flex-wrap gap-3">
             <div className="flex-1 min-w-[240px]">
               <input

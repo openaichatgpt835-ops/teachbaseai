@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PageIntro } from "../../components/PageIntro";
 import { fetchWeb, getActiveAccountId } from "./auth";
 
 type BillingPlan = {
@@ -46,6 +47,8 @@ type BillingOverview = {
     storage_limit_gb: number;
     tokens_total: number;
     cost_rub: number;
+    bitrix_portals_used?: number;
+    bitrix_portals_limit?: number;
   };
 };
 
@@ -65,6 +68,7 @@ const LIMIT_LABELS: Record<string, string> = {
   media_minutes_per_month: "Минут медиа в месяц",
   max_users: "Пользователей",
   max_storage_gb: "Хранилище, ГБ",
+  max_bitrix_portals: "Bitrix24-порталов",
 };
 
 function formatMoneyRub(value: number | null | undefined) {
@@ -132,13 +136,13 @@ export function WebBillingPage() {
         const overviewData = await overviewRes.json().catch(() => null);
         if (cancelled) return;
         if (!plansRes.ok || !overviewRes.ok) {
-          setError((overviewData && (overviewData.error || overviewData.detail)) || "Не удалось загрузить тарифы");
+          setError((overviewData && (overviewData.error || overviewData.detail)) || "Не удалось загрузить тарифы.");
           return;
         }
         setPlans(Array.isArray(plansData?.items) ? plansData.items : []);
         setOverview(overviewData as BillingOverview);
       } catch {
-        if (!cancelled) setError("Не удалось загрузить тарифы");
+        if (!cancelled) setError("Не удалось загрузить тарифы.");
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -153,10 +157,11 @@ export function WebBillingPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-slate-900">Тарифы и оплата</h1>
-        <p className="mt-1 text-sm text-slate-500">Текущий тариф, лимиты и доступные функции вашего аккаунта.</p>
-      </div>
+      <PageIntro
+        moduleId="billing"
+        fallbackTitle="Тарифы и оплата"
+        fallbackDescription="Текущий тариф, лимиты и доступные функции вашего аккаунта."
+      />
 
       {loading && <div className="rounded-2xl border border-slate-100 bg-white p-6 text-sm text-slate-500 shadow-sm">Загрузка...</div>}
       {error && <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">{error}</div>}
@@ -189,11 +194,12 @@ export function WebBillingPage() {
             </div>
           </section>
 
-          <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
             <UsageCard title="Запросы" used={overview.usage.requests_used} limit={overview.usage.requests_limit} />
             <UsageCard title="Минуты медиа" used={overview.usage.media_minutes_used} limit={overview.usage.media_minutes_limit} />
             <UsageCard title="Пользователи" used={overview.usage.users_used} limit={overview.usage.users_limit} />
             <UsageCard title="Хранилище" used={overview.usage.storage_used_gb} limit={overview.usage.storage_limit_gb} suffix=" ГБ" />
+            <UsageCard title="Bitrix24-порталы" used={overview.usage.bitrix_portals_used || 0} limit={overview.usage.bitrix_portals_limit || 0} />
           </section>
 
           <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">

@@ -137,6 +137,20 @@ def _get_app_session_by_token(db: Session, token: str) -> AppSession | None:
 
 
 def _resolve_primary_portal(db: Session, account_id: int) -> Portal | None:
+    primary_integration = db.execute(
+        select(AccountIntegration)
+        .where(AccountIntegration.account_id == account_id)
+        .where(AccountIntegration.provider == "bitrix")
+        .where(AccountIntegration.status == "active")
+        .order_by(AccountIntegration.id.asc())
+    ).scalars().all()
+    for integration in primary_integration:
+        meta = dict(integration.credentials_json or {})
+        if meta.get("is_primary") and integration.portal_id:
+            portal = db.get(Portal, int(integration.portal_id))
+            if portal and int(portal.account_id or 0) == int(account_id):
+                return portal
+
     rows = db.execute(
         select(Portal)
         .where(Portal.account_id == account_id)

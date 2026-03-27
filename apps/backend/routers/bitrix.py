@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Bitrix OAuth, install, handler, events."""
 import json
 import logging
@@ -7,6 +9,7 @@ import uuid
 import time
 import hmac
 import math
+import secrets
 import importlib.util
 from urllib.parse import quote
 from pathlib import Path
@@ -50,7 +53,13 @@ from apps.backend.services.bitrix_events import process_imbot_message
 from apps.backend.services.portal_tokens import save_tokens, get_valid_access_token, BitrixAuthError, refresh_portal_tokens
 from apps.backend.services.token_crypto import encrypt_token
 from apps.backend.services.kb_storage import ensure_portal_dir, save_upload
-from apps.backend.services.billing import get_portal_effective_policy, would_exceed_account_media_minutes
+from apps.backend.services.billing import (
+    get_account_bitrix_portal_count,
+    get_account_effective_policy,
+    get_portal_effective_policy,
+    is_account_bitrix_portal_limit_reached,
+    would_exceed_account_media_minutes,
+)
 from apps.backend.services.kb_settings import (
     get_portal_kb_settings,
     set_portal_kb_settings,
@@ -75,13 +84,14 @@ from apps.backend.services.telegram_settings import (
     get_portal_telegram_secret,
     get_portal_telegram_token_plain,
 )
-from apps.backend.models.web_user import WebUser
-from apps.backend.models.account import Account, AppUserWebCredential
+from apps.backend.models.web_user import WebUser, WebSession
+from apps.backend.models.account import Account, AccountIntegration, AccountMembership, AccountPermission, AppUserWebCredential, AppSession
 from apps.backend.models.portal_link_request import PortalLinkRequest
 from apps.backend.services.activity import log_activity
 from apps.backend.clients.telegram import telegram_get_me, telegram_set_webhook
 from apps.backend.services.web_email import create_email_token, send_registration_email
-from apps.backend.services.rbac_service import ensure_rbac_for_web_user
+from apps.backend.services.rbac_service import ensure_account_member, ensure_rbac_for_web_user
+from apps.backend.services.account_workspace import build_unique_account_slug
 from apps.backend.services.transcript_utils import merge_transcript_items
 from apps.backend.utils.api_errors import error_envelope
 from apps.backend.utils.api_schema import is_schema_v2
@@ -120,7 +130,7 @@ def _resolve_linked_web_user(db: Session, portal: Portal | None) -> WebUser | No
         owner_account_email = (str(owner_row[0]).strip().lower() if owner_row and owner_row[0] else None)
         if owner_account_email:
             user = db.execute(select(WebUser).where(WebUser.email == owner_account_email)).scalars().first()
-            if user and int(user.portal_id or 0) == int(portal.id):
+            if user:
                 return user
 
     return (
@@ -136,6 +146,265 @@ def _resolve_linked_web_user(db: Session, portal: Portal | None) -> WebUser | No
         .scalars()
         .first()
     )
+
+
+def _authenticate_web_user_for_bitrix(db: Session, email: str, password: str) -> WebUser:
+    normalized_email = (email or "").strip().lower()
+    user = db.execute(select(WebUser).where(WebUser.email == normalized_email)).scalar_one_or_none()
+    if not user or not verify_password(password, user.password_hash):
+        raise HTTPException(status_code=401, detail="invalid_credentials")
+    if not user.email_verified_at:
+        raise HTTPException(status_code=403, detail="email_not_verified")
+    return user
+
+
+def _get_app_user_id_for_web_user(db: Session, web_user: WebUser) -> int | None:
+    email = (web_user.email or "").strip().lower()
+    if not email:
+        return None
+    cred = db.execute(select(AppUserWebCredential).where(AppUserWebCredential.email == email)).scalar_one_or_none()
+    if not cred:
+        return None
+    return int(cred.user_id)
+
+
+def _portal_account_membership_ctx(db: Session, portal_id: int, web_user: WebUser) -> dict[str, Any] | None:
+    portal = db.get(Portal, int(portal_id))
+    if not portal or not portal.account_id:
+        return None
+    app_user_id = _get_app_user_id_for_web_user(db, web_user)
+    if not app_user_id:
+        return None
+    row = db.execute(
+        select(AccountMembership, AccountPermission)
+        .join(AccountPermission, AccountPermission.membership_id == AccountMembership.id, isouter=True)
+        .where(AccountMembership.account_id == int(portal.account_id))
+        .where(AccountMembership.user_id == int(app_user_id))
+        .where(AccountMembership.status == "active")
+        .limit(1)
+    ).first()
+    if not row:
+        return None
+    membership, perm = row
+    return {
+        "account_id": int(portal.account_id),
+        "role": str(membership.role or "member"),
+        "can_manage_integrations": str(membership.role or "member") in {"owner", "admin"} or bool(
+            perm.can_manage_settings if perm else False
+        ),
+    }
+
+
+def _next_account_no(db: Session) -> int:
+    max_no = db.execute(select(func.max(Account.account_no))).scalar()
+    return int(max_no or 100000) + 1
+
+
+def _list_active_accounts(db: Session, app_user_id: int) -> list[dict[str, Any]]:
+    rows = db.execute(
+        select(AccountMembership, Account)
+        .join(Account, Account.id == AccountMembership.account_id)
+        .where(
+            AccountMembership.user_id == app_user_id,
+            AccountMembership.status.in_(["active", "invited"]),
+        )
+        .order_by(AccountMembership.role.desc(), Account.id.asc())
+    ).all()
+    items: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for membership, account in rows:
+        if int(account.id) in seen:
+            continue
+        seen.add(int(account.id))
+        items.append(
+            {
+                "id": int(account.id),
+                "account_no": int(account.account_no) if account.account_no is not None else None,
+                "name": account.name,
+                "slug": account.slug,
+                "role": membership.role,
+                "status": membership.status,
+            }
+        )
+    return items
+
+
+def _create_embedded_web_session(
+    db: Session,
+    *,
+    web_user: WebUser,
+    app_user_id: int,
+    active_account_id: int | None,
+) -> str:
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(days=30)
+    db.add(
+        WebSession(
+            user_id=int(web_user.id),
+            app_user_id=int(app_user_id),
+            token=token,
+            created_at=datetime.utcnow(),
+            expires_at=expires_at,
+        )
+    )
+    db.add(
+        AppSession(
+            user_id=int(app_user_id),
+            active_account_id=int(active_account_id) if active_account_id else None,
+            token=token,
+            created_at=datetime.utcnow(),
+            expires_at=expires_at,
+        )
+    )
+    db.commit()
+    return token
+
+
+def _upsert_bitrix_account_integration(db: Session, *, account_id: int, portal: Portal) -> AccountIntegration:
+    domain = str(portal.domain or "").strip().lower()
+    integ = db.execute(
+        select(AccountIntegration).where(
+            AccountIntegration.provider == "bitrix",
+            AccountIntegration.external_key == domain,
+        )
+    ).scalar_one_or_none()
+    now = datetime.utcnow()
+    if not integ:
+        integ = AccountIntegration(
+            account_id=int(account_id),
+            provider="bitrix",
+            status="active",
+            external_key=domain,
+            portal_id=int(portal.id),
+            credentials_json=None,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(integ)
+        db.flush()
+        return integ
+    integ.account_id = int(account_id)
+    integ.portal_id = int(portal.id)
+    integ.status = "active"
+    integ.updated_at = now
+    db.add(integ)
+    db.flush()
+    return integ
+
+
+def _ensure_portal_can_attach(db: Session, portal: Portal, account_id: int | None = None) -> None:
+    if portal.account_id and account_id is not None and int(portal.account_id) == int(account_id):
+        return
+    if portal.account_id:
+        raise HTTPException(status_code=409, detail="portal_already_attached")
+
+
+def _account_scope_portal_ids(db: Session, portal_id: int) -> list[int]:
+    portal = db.get(Portal, int(portal_id))
+    if not portal:
+        return [int(portal_id)]
+    if not portal.account_id:
+        return [int(portal_id)]
+    rows = db.execute(
+        select(Portal.id)
+        .where(Portal.account_id == int(portal.account_id))
+        .order_by(Portal.id.asc())
+    ).scalars().all()
+    ids = [int(x) for x in rows if x is not None]
+    return ids or [int(portal_id)]
+
+
+def _primary_account_portal_id(db: Session, portal_id: int) -> int:
+    portal = db.get(Portal, int(portal_id))
+    if not portal or not portal.account_id:
+        return int(portal_id)
+    integrations = db.execute(
+        select(AccountIntegration)
+        .where(AccountIntegration.account_id == int(portal.account_id))
+        .where(AccountIntegration.provider == "bitrix")
+        .where(AccountIntegration.status == "active")
+        .order_by(AccountIntegration.id.asc())
+    ).scalars().all()
+    for integration in integrations:
+        meta = dict(integration.credentials_json or {})
+        if meta.get("is_primary") and integration.portal_id:
+            return int(integration.portal_id)
+    ids = _account_scope_portal_ids(db, int(portal_id))
+    return int(ids[0]) if ids else int(portal_id)
+
+
+def _account_scoped_file(db: Session, portal_id: int, file_id: int) -> KBFile | None:
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+    return db.execute(
+        select(KBFile).where(KBFile.id == int(file_id), KBFile.portal_id.in_(scope_portal_ids))
+    ).scalar_one_or_none()
+
+
+def _account_scoped_collection(db: Session, portal_id: int, collection_id: int) -> KBCollection | None:
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+    return db.execute(
+        select(KBCollection).where(KBCollection.id == int(collection_id), KBCollection.portal_id.in_(scope_portal_ids))
+    ).scalar_one_or_none()
+
+
+def _account_scoped_smart_folder(db: Session, portal_id: int, folder_id: int) -> KBSmartFolder | None:
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+    return db.execute(
+        select(KBSmartFolder).where(KBSmartFolder.id == int(folder_id), KBSmartFolder.portal_id.in_(scope_portal_ids))
+    ).scalar_one_or_none()
+
+
+def _build_bitrix_attachable_accounts(db: Session, web_user: WebUser) -> list[BitrixPortalAttachAccountItem]:
+    email = (web_user.email or "").strip().lower()
+    if not email:
+        return []
+    cred = db.execute(select(AppUserWebCredential).where(AppUserWebCredential.email == email)).scalar_one_or_none()
+    if not cred:
+        return []
+
+    rows = db.execute(
+        select(AccountMembership, Account, AccountPermission)
+        .join(Account, Account.id == AccountMembership.account_id)
+        .join(AccountPermission, AccountPermission.membership_id == AccountMembership.id, isouter=True)
+        .where(AccountMembership.user_id == int(cred.user_id))
+        .where(AccountMembership.status == "active")
+        .order_by(Account.account_no.asc().nullslast(), Account.id.asc())
+    ).all()
+
+    items: list[BitrixPortalAttachAccountItem] = []
+    for membership, account, perm in rows:
+        role = str(membership.role or "member")
+        can_manage_integrations = role in {"owner", "admin"} or bool(
+            perm.can_manage_settings if perm else False
+        )
+        policy = get_account_effective_policy(db, int(account.id))
+        bitrix_limit = int((policy.get("limits") or {}).get("max_bitrix_portals") or 0)
+        attach_allowed = can_manage_integrations and not is_account_bitrix_portal_limit_reached(
+            db,
+            int(account.id),
+            extra_portals=1,
+        )
+        reason = None
+        if not can_manage_integrations:
+            reason = "insufficient_role"
+        elif bitrix_limit > 0 and not attach_allowed:
+            reason = "bitrix_portal_limit_reached"
+
+        items.append(
+            BitrixPortalAttachAccountItem(
+                account_id=int(account.id),
+                account_no=int(account.account_no) if account.account_no is not None else None,
+                name=account.name or f"Account #{account.id}",
+                slug=account.slug,
+                role=role,
+                can_manage_integrations=can_manage_integrations,
+                attach_allowed=attach_allowed,
+                reason=reason,
+                bitrix_portals_used=get_account_bitrix_portal_count(db, int(account.id)),
+                bitrix_portals_limit=bitrix_limit,
+            )
+        )
+    return items
 
 
 def _portal_product_gates(db: Session, portal_id: int) -> tuple[dict[str, Any], dict[str, Any], Portal | None]:
@@ -999,6 +1268,39 @@ class WebLoginBody(BaseModel):
     password: str
 
 
+class BitrixCreateAccountBody(WebLoginBody):
+    account_name: str | None = None
+
+
+class BitrixAttachExistingBody(WebLoginBody):
+    account_id: int
+
+
+class BitrixPortalAttachAccountItem(BaseModel):
+    account_id: int
+    account_no: int | None = None
+    name: str
+    slug: str | None = None
+    role: str
+    can_manage_integrations: bool
+    attach_allowed: bool
+    reason: str | None = None
+    bitrix_portals_used: int
+    bitrix_portals_limit: int
+
+
+class BitrixPortalLinkPrecheckResponse(BaseModel):
+    status: str
+    email: str
+    portal_id: int
+    portal_domain: str | None = None
+    same_portal_linked: bool = False
+    current_web_portal_id: int | None = None
+    can_create_new_account: bool = True
+    attachable_accounts: list[BitrixPortalAttachAccountItem]
+    recommended_action: str
+
+
 class CollectionBody(BaseModel):
     name: str | None = None
     color: str | None = None
@@ -1220,6 +1522,7 @@ def _resolve_scope_file_ids(
     smart_folder_ids: list[int] | None = None,
     topic_ids: list[str] | None = None,
 ) -> set[int] | None:
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
     scopes: list[set[int]] = []
     ids_file = {int(x) for x in (file_ids or []) if int(x) > 0}
     if ids_file:
@@ -1227,7 +1530,7 @@ def _resolve_scope_file_ids(
             int(x)
             for x in db.execute(
                 select(KBFile.id).where(
-                    KBFile.portal_id == portal_id,
+                    KBFile.portal_id.in_(scope_portal_ids),
                     KBFile.audience == audience,
                     KBFile.id.in_(sorted(ids_file)),
                 )
@@ -1243,7 +1546,7 @@ def _resolve_scope_file_ids(
                 .join(KBFile, KBFile.id == KBCollectionFile.file_id)
                 .where(
                     KBCollectionFile.collection_id.in_(col_ids),
-                    KBFile.portal_id == portal_id,
+                    KBFile.portal_id.in_(scope_portal_ids),
                     KBFile.audience == audience,
                 )
             ).scalars().all()
@@ -1253,7 +1556,7 @@ def _resolve_scope_file_ids(
     if smart_ids:
         rows = db.execute(
             select(KBSmartFolder.id, KBSmartFolder.name, KBSmartFolder.system_tag, KBSmartFolder.rules_json)
-            .where(KBSmartFolder.portal_id == portal_id, KBSmartFolder.id.in_(smart_ids))
+            .where(KBSmartFolder.portal_id.in_(scope_portal_ids), KBSmartFolder.id.in_(smart_ids))
         ).all()
         topic_keys: set[str] = set()
         for _sid, name, system_tag, rules_json in rows:
@@ -1270,7 +1573,7 @@ def _resolve_scope_file_ids(
             trows = db.execute(
                 select(KBFile.id, KBFile.filename, KBChunk.text)
                 .join(KBChunk, KBChunk.file_id == KBFile.id)
-                .where(KBFile.portal_id == portal_id, KBFile.audience == audience, KBChunk.portal_id == portal_id)
+                .where(KBFile.portal_id.in_(scope_portal_ids), KBFile.audience == audience, KBChunk.portal_id.in_(scope_portal_ids))
                 .limit(8000)
             ).all()
             hit_ids: set[int] = set()
@@ -1297,7 +1600,7 @@ def _resolve_scope_file_ids(
         trows = db.execute(
             select(KBFile.id, KBFile.filename, KBChunk.text)
             .join(KBChunk, KBChunk.file_id == KBFile.id)
-            .where(KBFile.portal_id == portal_id, KBFile.audience == audience, KBChunk.portal_id == portal_id)
+            .where(KBFile.portal_id.in_(scope_portal_ids), KBFile.audience == audience, KBChunk.portal_id.in_(scope_portal_ids))
             .limit(8000)
         ).all()
         hit_ids: set[int] = set()
@@ -1325,6 +1628,22 @@ def _resolve_scope_file_ids(
     for s in scopes[1:]:
         out &= s
     return out
+
+
+def _all_account_scope_file_ids(
+    db: Session,
+    *,
+    portal_id: int,
+    audience: str,
+) -> set[int]:
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+    rows = db.execute(
+        select(KBFile.id)
+        .where(KBFile.portal_id.in_(scope_portal_ids))
+        .where(KBFile.audience == audience)
+        .where(KBFile.status == "ready")
+    ).scalars().all()
+    return {int(x) for x in rows if x is not None}
 
 def _is_two_part_topic_name(name: str) -> bool:
     n = (name or "").strip().lower()
@@ -1439,6 +1758,9 @@ async def request_web_link(
     web_user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
     if not web_user:
         raise HTTPException(status_code=404, detail="web_user_not_found")
+    membership_ctx = _portal_account_membership_ctx(db, portal_id, web_user)
+    if membership_ctx:
+        return {"status": "already_linked"}
     if web_user.portal_id == portal_id:
         return {"status": "already_linked"}
     if not web_user.portal_id:
@@ -1477,9 +1799,212 @@ async def get_web_link_status(
     portal = db.get(Portal, portal_id)
     user = _resolve_linked_web_user(db, portal)
     if not user:
-        return {"linked": False}
+        return {
+            "linked": False,
+            "portal_id": int(portal_id),
+            "portal_domain": portal.domain if portal else None,
+            "account_id": int(portal.account_id) if portal and portal.account_id else None,
+        }
     demo_until = (user.created_at + timedelta(days=7)).date().isoformat()
-    return {"linked": True, "email": user.email, "demo_until": demo_until}
+    account = db.get(Account, int(portal.account_id)) if portal and portal.account_id else None
+    return {
+        "linked": True,
+        "email": user.email,
+        "demo_until": demo_until,
+        "portal_id": int(portal_id),
+        "portal_domain": portal.domain if portal else None,
+        "account_id": int(portal.account_id) if portal and portal.account_id else None,
+        "account_name": account.name if account else None,
+        "account_no": int(account.account_no) if account and account.account_no else None,
+    }
+
+
+@router.post("/portals/{portal_id}/web/link/precheck", response_model=BitrixPortalLinkPrecheckResponse)
+async def precheck_web_link_from_bitrix(
+    request: Request,
+    portal_id: int,
+    body: WebLoginBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        raise HTTPException(status_code=403, detail="portal_id mismatch")
+    _require_portal_admin(db, portal_id, request)
+    portal = db.get(Portal, portal_id)
+    if not portal:
+        raise HTTPException(status_code=404, detail="portal_not_found")
+
+    user = _authenticate_web_user_for_bitrix(db, str(body.email), body.password)
+    attachable_accounts = _build_bitrix_attachable_accounts(db, user)
+    same_portal_linked = bool(user.portal_id and int(user.portal_id) == int(portal_id))
+
+    recommended_action = "create_account"
+    if same_portal_linked:
+        recommended_action = "already_linked"
+    elif any(item.attach_allowed for item in attachable_accounts):
+        recommended_action = "attach_existing"
+    elif attachable_accounts:
+        recommended_action = "upgrade_or_create"
+
+    return BitrixPortalLinkPrecheckResponse(
+        status="ok",
+        email=(user.email or "").strip().lower(),
+        portal_id=int(portal_id),
+        portal_domain=portal.domain,
+        same_portal_linked=same_portal_linked,
+        current_web_portal_id=int(user.portal_id) if user.portal_id else None,
+        can_create_new_account=True,
+        attachable_accounts=attachable_accounts,
+        recommended_action=recommended_action,
+    )
+
+
+@router.post("/portals/{portal_id}/web/link/create-account")
+async def create_account_for_bitrix_portal(
+    request: Request,
+    portal_id: int,
+    body: BitrixCreateAccountBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        raise HTTPException(status_code=403, detail="portal_id mismatch")
+    _require_portal_admin(db, portal_id, request)
+    portal = db.get(Portal, portal_id)
+    if not portal:
+        raise HTTPException(status_code=404, detail="portal_not_found")
+    _ensure_portal_can_attach(db, portal)
+
+    user = _authenticate_web_user_for_bitrix(db, str(body.email), body.password)
+    now = datetime.utcnow()
+    app_user_id = _get_app_user_id_for_web_user(db, user)
+    if not app_user_id:
+        account_id, app_user_id = ensure_rbac_for_web_user(db, user, force_owner=True)
+        if not account_id or not app_user_id:
+            raise HTTPException(status_code=400, detail="account_create_failed")
+    account = Account(
+        account_no=_next_account_no(db),
+        name=(body.account_name or portal.domain or "").strip() or None,
+        slug=None,
+        status="active",
+        owner_user_id=int(app_user_id),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(account)
+    db.flush()
+    account.slug = build_unique_account_slug(
+        db,
+        account.name or portal.domain or None,
+        fallback=f"workspace-{int(account.account_no or account.id)}",
+        exclude_account_id=int(account.id),
+    )
+    db.add(account)
+    membership, _created = ensure_account_member(
+        db,
+        account_id=int(account.id),
+        user_id=int(app_user_id),
+        role="owner",
+        status="active",
+        kb_access="write",
+        can_invite_users=True,
+        can_manage_settings=True,
+        can_view_finance=True,
+    )
+    membership.role = "owner"
+    membership.status = "active"
+    membership.updated_at = now
+    db.add(membership)
+
+    portal.account_id = int(account.id)
+    db.add(portal)
+    _upsert_bitrix_account_integration(db, account_id=int(account.id), portal=portal)
+    db.commit()
+    return {
+        "status": "linked",
+        "action": "create_account",
+        "account_id": int(account.id),
+        "portal_id": int(portal_id),
+    }
+
+
+@router.post("/portals/{portal_id}/web/link/attach-existing")
+async def attach_bitrix_portal_to_existing_account(
+    request: Request,
+    portal_id: int,
+    body: BitrixAttachExistingBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        raise HTTPException(status_code=403, detail="portal_id mismatch")
+    _require_portal_admin(db, portal_id, request)
+    portal = db.get(Portal, portal_id)
+    if not portal:
+        raise HTTPException(status_code=404, detail="portal_not_found")
+    _ensure_portal_can_attach(db, portal, int(body.account_id))
+
+    user = _authenticate_web_user_for_bitrix(db, str(body.email), body.password)
+    attachable = _build_bitrix_attachable_accounts(db, user)
+    target = next((item for item in attachable if int(item.account_id) == int(body.account_id)), None)
+    if not target:
+        raise HTTPException(status_code=403, detail="forbidden")
+    if not target.can_manage_integrations:
+        raise HTTPException(status_code=403, detail="insufficient_role")
+    if not target.attach_allowed:
+        raise HTTPException(status_code=403, detail=target.reason or "bitrix_portal_limit_reached")
+
+    portal.account_id = int(body.account_id)
+    db.add(portal)
+    _upsert_bitrix_account_integration(db, account_id=int(body.account_id), portal=portal)
+    db.commit()
+    return {
+        "status": "linked",
+        "action": "attach_existing",
+        "account_id": int(body.account_id),
+        "portal_id": int(portal_id),
+    }
+
+
+@router.post("/portals/{portal_id}/web/embedded-session")
+async def create_embedded_session_for_linked_web_user(
+    request: Request,
+    portal_id: int,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        raise HTTPException(status_code=403, detail="portal_id mismatch")
+    _require_portal_admin(db, portal_id, request)
+    portal = db.get(Portal, portal_id)
+    user = _resolve_linked_web_user(db, portal)
+    if not portal or not portal.account_id or not user:
+        raise HTTPException(status_code=404, detail="web_link_not_found")
+    app_user_id = _get_app_user_id_for_web_user(db, user)
+    if not app_user_id:
+        raise HTTPException(status_code=400, detail="app_user_not_found")
+    membership_ctx = _portal_account_membership_ctx(db, portal_id, user)
+    if not membership_ctx:
+        raise HTTPException(status_code=403, detail="portal_mismatch")
+    session_token = _create_embedded_web_session(
+        db,
+        web_user=user,
+        app_user_id=int(app_user_id),
+        active_account_id=int(portal.account_id),
+    )
+    portal_token = create_portal_token_with_user(int(portal_id), int(portal.admin_user_id) if portal.admin_user_id else None, expires_minutes=60)
+    account = db.get(Account, int(portal.account_id))
+    return {
+        "status": "ok",
+        "session_token": session_token,
+        "portal_id": int(portal_id),
+        "portal_token": portal_token,
+        "email": user.email,
+        "active_account_id": int(portal.account_id),
+        "accounts": _list_active_accounts(db, int(app_user_id)),
+        "account_name": account.name if account else None,
+        "account_no": int(account.account_no) if account and account.account_no is not None else None,
+    }
 
 
 @router.post("/portals/{portal_id}/web/login")
@@ -1494,11 +2019,11 @@ async def login_web_from_bitrix(
         raise HTTPException(status_code=403, detail="portal_id mismatch")
     _require_portal_admin(db, portal_id, request)
     email = body.email.lower().strip()
-    user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
-    if not user or not verify_password(body.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="invalid_credentials")
-    if not user.email_verified_at:
-        raise HTTPException(status_code=403, detail="email_not_verified")
+    user = _authenticate_web_user_for_bitrix(db, email, body.password)
+    membership_ctx = _portal_account_membership_ctx(db, portal_id, user)
+    if membership_ctx:
+        demo_until = (user.created_at + timedelta(days=7)).date().isoformat()
+        return {"status": "linked", "email": user.email, "demo_until": demo_until}
     if not user.portal_id:
         raise HTTPException(status_code=400, detail="missing_portal")
     if int(user.portal_id) == int(portal_id):
@@ -1566,10 +2091,11 @@ async def get_portal_kb_files(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
     q = (
         select(KBFile, KBSource.source_type, KBSource.url)
         .join(KBSource, KBSource.id == KBFile.source_id, isouter=True)
-        .where(KBFile.portal_id == portal_id)
+        .where(KBFile.portal_id.in_(scope_portal_ids))
         .order_by(KBFile.id.desc())
         .limit(200)
     )
@@ -1630,6 +2156,7 @@ async def search_portal_kb(
     aud = (audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
+    account_scope_ids = _all_account_scope_file_ids(db, portal_id=portal_id, audience=aud)
     scoped_ids = _resolve_scope_file_ids(
         db,
         portal_id=portal_id,
@@ -1639,11 +2166,14 @@ async def search_portal_kb(
         smart_folder_ids=_parse_csv_ints(smart_folder_ids),
         topic_ids=[x.strip() for x in str(topic_ids or "").split(",") if x.strip()],
     )
+    if scoped_ids is None:
+        scoped_ids = account_scope_ids
     if scoped_ids is not None and not scoped_ids:
         if is_schema_v2(request):
             return JSONResponse({"ok": True, "data": {"file_ids": [], "matches": []}, "meta": {"schema": "v2", "audience": aud}})
         return JSONResponse({"file_ids": [], "matches": []})
     like_q = f"%{q}%"
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
     q_stmt = (
         select(
             KBFile.id,
@@ -1655,9 +2185,9 @@ async def search_portal_kb(
         )
         .join(KBChunk, KBChunk.file_id == KBFile.id)
         .where(
-            KBFile.portal_id == portal_id,
+            KBFile.portal_id.in_(scope_portal_ids),
             KBFile.audience == aud,
-            KBChunk.portal_id == portal_id,
+            KBChunk.portal_id.in_(scope_portal_ids),
             (KBChunk.text.ilike(like_q) | KBFile.filename.ilike(like_q)),
         )
         .order_by(KBFile.id.desc())
@@ -1722,6 +2252,7 @@ async def ask_portal_kb(
     aud = (body.audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
+    account_scope_ids = _all_account_scope_file_ids(db, portal_id=portal_id, audience=aud)
     scope = body.scope or {}
     scoped_ids = _resolve_scope_file_ids(
         db,
@@ -1732,6 +2263,8 @@ async def ask_portal_kb(
         smart_folder_ids=[int(x) for x in (scope.get("smart_folder_ids") or []) if str(x).isdigit()],
         topic_ids=[str(x).strip() for x in (scope.get("topic_ids") or []) if str(x).strip()],
     )
+    if scoped_ids is None:
+        scoped_ids = account_scope_ids
     if scoped_ids is not None and not scoped_ids:
         if is_schema_v2(request):
             return JSONResponse({
@@ -1796,7 +2329,8 @@ async def upload_portal_kb_file(
     _require_portal_admin(db, portal_id, request)
     if not file.filename:
         raise HTTPException(status_code=400, detail="Файл не задан")
-    portal_dir = ensure_portal_dir(portal_id)
+    owner_portal_id = _primary_account_portal_id(db, portal_id)
+    portal_dir = ensure_portal_dir(owner_portal_id)
     safe_name = os.path.basename(file.filename)
     suffix = uuid.uuid4().hex[:8]
     dst_path = os.path.join(portal_dir, f"{suffix}_{safe_name}")
@@ -1817,7 +2351,7 @@ async def upload_portal_kb_file(
                 pass
             return _err(request, "media_minutes_limit_reached", "media_minutes_limit_reached", 403)
     rec = KBFile(
-        portal_id=portal_id,
+        portal_id=owner_portal_id,
         filename=safe_name,
         audience=aud,
         mime_type=file.content_type,
@@ -1872,9 +2406,10 @@ async def reindex_portal_kb(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
     files = db.execute(
         select(KBFile).where(
-            KBFile.portal_id == portal_id,
+            KBFile.portal_id.in_(scope_portal_ids),
             KBFile.status.in_(["uploaded", "error", "queued"]),
         )
     ).scalars().all()
@@ -1937,7 +2472,7 @@ async def reindex_kb_file(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    rec = db.execute(select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)).scalar_one_or_none()
+    rec = _account_scoped_file(db, portal_id, file_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     account_id = db.execute(select(Portal.account_id).where(Portal.id == portal_id)).scalar()
@@ -1987,7 +2522,7 @@ async def delete_kb_file(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    rec = db.execute(select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)).scalar_one_or_none()
+    rec = _account_scoped_file(db, portal_id, file_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     chunk_ids = db.execute(
@@ -1997,7 +2532,7 @@ async def delete_kb_file(
     db.execute(delete(KBCollectionFile).where(KBCollectionFile.file_id == rec.id))
     # drop pending/history jobs for this file
     jobs = db.execute(
-        select(KBJob).where(KBJob.portal_id == portal_id)
+        select(KBJob).where(KBJob.portal_id == rec.portal_id)
     ).scalars().all()
     job_ids_to_delete: list[int] = []
     for j in jobs:
@@ -2034,9 +2569,7 @@ async def download_kb_file(
 ):
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
-    rec = db.execute(
-        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
-    ).scalar_one_or_none()
+    rec = _account_scoped_file(db, portal_id, file_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     if not rec.storage_path or not os.path.exists(rec.storage_path):
@@ -2064,9 +2597,7 @@ async def get_kb_file_signed_url(
 ):
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
-    rec = db.execute(
-        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
-    ).scalar_one_or_none()
+    rec = _account_scoped_file(db, portal_id, file_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     ttl = max(30, min(int(ttl_seconds or 300), 3600))
@@ -2111,9 +2642,7 @@ async def get_kb_file_content(
     expected = _make_file_sig(portal_id, file_id, int(exp), inl, rend)
     if int(exp) < now or not hmac.compare_digest(expected, str(sig or "")):
         return _err(request, "forbidden", "Forbidden", 403)
-    rec = db.execute(
-        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
-    ).scalar_one_or_none()
+    rec = _account_scoped_file(db, portal_id, file_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     storage_path = rec.storage_path
@@ -2160,15 +2689,13 @@ async def get_kb_file_chunks(
 ):
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
-    rec = db.execute(
-        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
-    ).scalar_one_or_none()
+    rec = _account_scoped_file(db, portal_id, file_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     lim = max(1, min(int(limit or 1500), 4000))
     rows = db.execute(
         select(KBChunk)
-        .where(KBChunk.portal_id == portal_id, KBChunk.file_id == file_id)
+        .where(KBChunk.portal_id == rec.portal_id, KBChunk.file_id == file_id)
         .order_by(KBChunk.chunk_index.asc())
         .limit(lim)
     ).scalars().all()
@@ -2200,9 +2727,7 @@ async def get_kb_file_transcript_status(
 ):
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
-    rec = db.execute(
-        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
-    ).scalar_one_or_none()
+    rec = _account_scoped_file(db, portal_id, file_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     is_media = _is_media_file(rec.filename, rec.mime_type)
@@ -2242,9 +2767,7 @@ async def start_kb_file_transcript(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    rec = db.execute(
-        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
-    ).scalar_one_or_none()
+    rec = _account_scoped_file(db, portal_id, file_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     if not _is_media_file(rec.filename, rec.mime_type):
@@ -2299,9 +2822,7 @@ async def get_kb_file_transcript(
 ):
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
-    rec = db.execute(
-        select(KBFile).where(KBFile.id == file_id, KBFile.portal_id == portal_id)
-    ).scalar_one_or_none()
+    rec = _account_scoped_file(db, portal_id, file_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     if not _is_media_file(rec.filename, rec.mime_type):
@@ -2373,8 +2894,9 @@ async def list_kb_collections(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
     rows = db.execute(
-        select(KBCollection).where(KBCollection.portal_id == portal_id).order_by(KBCollection.id.desc())
+        select(KBCollection).where(KBCollection.portal_id.in_(scope_portal_ids)).order_by(KBCollection.id.desc())
     ).scalars().all()
     if rows:
         counts = dict(db.execute(
@@ -2412,8 +2934,9 @@ async def create_kb_collection(
     name = (body.name or "").strip()
     if not name:
         return _err(request, "missing_name", "missing_name", 400)
+    owner_portal_id = _primary_account_portal_id(db, portal_id)
     rec = KBCollection(
-        portal_id=portal_id,
+        portal_id=owner_portal_id,
         name=name[:128],
         color=(body.color or "").strip() or None,
         created_at=datetime.utcnow(),
@@ -2436,9 +2959,7 @@ async def update_kb_collection(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    rec = db.execute(
-        select(KBCollection).where(KBCollection.id == collection_id, KBCollection.portal_id == portal_id)
-    ).scalar_one_or_none()
+    rec = _account_scoped_collection(db, portal_id, collection_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     if body.name is not None:
@@ -2463,12 +2984,11 @@ async def delete_kb_collection(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    db.execute(
-        delete(KBCollectionFile).where(KBCollectionFile.collection_id == collection_id)
-    )
-    db.execute(
-        delete(KBCollection).where(KBCollection.id == collection_id, KBCollection.portal_id == portal_id)
-    )
+    rec = _account_scoped_collection(db, portal_id, collection_id)
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    db.execute(delete(KBCollectionFile).where(KBCollectionFile.collection_id == collection_id))
+    db.execute(delete(KBCollection).where(KBCollection.id == collection_id))
     db.commit()
     return JSONResponse({"status": "ok"})
 
@@ -2485,14 +3005,10 @@ async def add_file_to_collection(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    rec = db.execute(
-        select(KBCollection).where(KBCollection.id == collection_id, KBCollection.portal_id == portal_id)
-    ).scalar_one_or_none()
+    rec = _account_scoped_collection(db, portal_id, collection_id)
     if not rec:
         return _err(request, "collection_not_found", "collection_not_found", 404)
-    file_rec = db.execute(
-        select(KBFile).where(KBFile.id == body.file_id, KBFile.portal_id == portal_id)
-    ).scalar_one_or_none()
+    file_rec = _account_scoped_file(db, portal_id, body.file_id)
     if not file_rec:
         return _err(request, "file_not_found", "file_not_found", 404)
     settings = get_portal_kb_settings(db, portal_id)
@@ -2522,6 +3038,12 @@ async def list_collection_files(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+    collection = db.execute(
+        select(KBCollection).where(KBCollection.id == collection_id, KBCollection.portal_id.in_(scope_portal_ids))
+    ).scalar_one_or_none()
+    if not collection:
+        return _err(request, "not_found", "not_found", 404)
     rows = db.execute(
         select(KBCollectionFile.file_id)
         .where(KBCollectionFile.collection_id == collection_id)
@@ -2541,10 +3063,16 @@ async def remove_file_from_collection(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    collection = _account_scoped_collection(db, portal_id, collection_id)
+    if not collection:
+        return _err(request, "collection_not_found", "collection_not_found", 404)
+    file_rec = _account_scoped_file(db, portal_id, file_id)
+    if not file_rec:
+        return _err(request, "file_not_found", "file_not_found", 404)
     db.execute(
         delete(KBCollectionFile).where(
             KBCollectionFile.collection_id == collection_id,
-            KBCollectionFile.file_id == file_id,
+            KBCollectionFile.file_id == file_rec.id,
         )
     )
     db.commit()
@@ -2561,8 +3089,9 @@ async def list_kb_smart_folders(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
     rows = db.execute(
-        select(KBSmartFolder).where(KBSmartFolder.portal_id == portal_id).order_by(KBSmartFolder.id.desc())
+        select(KBSmartFolder).where(KBSmartFolder.portal_id.in_(scope_portal_ids)).order_by(KBSmartFolder.id.desc())
     ).scalars().all()
     return JSONResponse({
         "items": [
@@ -2592,8 +3121,9 @@ async def create_kb_smart_folder(
     name = (body.name or "").strip()
     if not name:
         return _err(request, "missing_name", "missing_name", 400)
+    owner_portal_id = _primary_account_portal_id(db, portal_id)
     rec = KBSmartFolder(
-        portal_id=portal_id,
+        portal_id=owner_portal_id,
         name=name[:128],
         system_tag=(body.system_tag or "").strip() or None,
         rules_json=body.rules_json or {},
@@ -2616,9 +3146,10 @@ async def delete_kb_smart_folder(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    db.execute(
-        delete(KBSmartFolder).where(KBSmartFolder.id == folder_id, KBSmartFolder.portal_id == portal_id)
-    )
+    rec = _account_scoped_smart_folder(db, portal_id, folder_id)
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    db.execute(delete(KBSmartFolder).where(KBSmartFolder.id == folder_id))
     db.commit()
     return JSONResponse({"status": "ok"})
 
@@ -2633,9 +3164,10 @@ async def get_kb_topics(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
     files = db.execute(
         select(KBFile.id, KBFile.filename)
-        .where(KBFile.portal_id == portal_id)
+        .where(KBFile.portal_id.in_(scope_portal_ids))
         .order_by(KBFile.id.desc())
     ).all()
     topic_hits: dict[str, list[int]] = {t["id"]: [] for t in _KB_TOPICS}
@@ -2643,7 +3175,7 @@ async def get_kb_topics(
     for file_id, filename in files:
         chunks = db.execute(
             select(KBChunk.text)
-            .where(KBChunk.portal_id == portal_id, KBChunk.file_id == file_id)
+            .where(KBChunk.portal_id.in_(scope_portal_ids), KBChunk.file_id == file_id)
             .limit(20)
         ).scalars().all()
         text = (filename or "") + " " + " ".join(chunks)
@@ -2655,10 +3187,10 @@ async def get_kb_topics(
     threshold = int(settings.get("smart_folder_threshold") or 5)
     existing = db.execute(
         select(KBSmartFolder.system_tag)
-        .where(KBSmartFolder.portal_id == portal_id, KBSmartFolder.system_tag.isnot(None))
+        .where(KBSmartFolder.portal_id.in_(scope_portal_ids), KBSmartFolder.system_tag.isnot(None))
     ).scalars().all()
     existing_names = db.execute(
-        select(KBSmartFolder.name).where(KBSmartFolder.portal_id == portal_id)
+        select(KBSmartFolder.name).where(KBSmartFolder.portal_id.in_(scope_portal_ids))
     ).scalars().all()
     existing_tags = {str(x) for x in existing if x}
     existing_name_set = {str(x or "").strip().lower() for x in existing_names if str(x or "").strip()}
@@ -2730,6 +3262,7 @@ async def get_portal_kb_settings_api(
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     out = get_portal_kb_settings(db, portal_id)
+    out["settings_portal_id"] = int(out.get("settings_portal_id") or portal_id)
     available, reason = _diarization_runtime_status()
     diar_gate = ((out.get("feature_gates") or {}).get("speaker_diarization") or {})
     media_gate = ((out.get("feature_gates") or {}).get("media_transcription") or {})
@@ -2870,6 +3403,7 @@ async def set_portal_kb_settings_api(
         collections_multi_assign=body.collections_multi_assign,
         smart_folder_threshold=body.smart_folder_threshold,
     )
+    out["settings_portal_id"] = int(out.get("settings_portal_id") or portal_id)
     return JSONResponse(out)
 
 
@@ -3095,10 +3629,11 @@ async def add_portal_kb_url_source(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    owner_portal_id = _primary_account_portal_id(db, portal_id)
     aud = (body.audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
-    result = create_url_source(db, portal_id, body.url, body.title, audience=aud)
+    result = create_url_source(db, owner_portal_id, body.url, body.title, audience=aud)
     if not result.get("ok"):
         err = str(result.get("error") or "source_create_failed")
         return _err(request, err, err, 400)
@@ -3133,7 +3668,8 @@ async def list_portal_kb_sources(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    q = select(KBSource).where(KBSource.portal_id == portal_id).order_by(KBSource.id.desc()).limit(200)
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+    q = select(KBSource).where(KBSource.portal_id.in_(scope_portal_ids)).order_by(KBSource.id.desc()).limit(200)
     rows = db.execute(q).scalars().all()
     # show only latest entry per URL
     seen: set[str] = set()

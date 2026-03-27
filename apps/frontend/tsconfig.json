@@ -20,5 +20,6 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src"]
+  "include": ["src", "../shared/**/*"],
+  "exclude": ["src/pages/web/WebFlowPage.tsx"]
 }

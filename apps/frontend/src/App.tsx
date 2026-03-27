@@ -30,7 +30,6 @@ import { WebUsersPage } from "./pages/web/WebUsersPage";
 import { WebSettingsPage } from "./pages/web/WebSettingsPage";
 import { WebBillingPage } from "./pages/web/WebBillingPage";
 import { WebIntegrationsPage } from "./pages/web/WebIntegrationsPage";
-import { WebFlowPage } from "./pages/web/WebFlowPage";
 import { ConfirmEmailPage } from "./pages/web/ConfirmEmailPage";
 import { AcceptInvitePage } from "./pages/web/AcceptInvitePage";
 import { WebForgotPasswordPage } from "./pages/web/WebForgotPasswordPage";
@@ -38,6 +37,10 @@ import { WebResetPasswordPage } from "./pages/web/WebResetPasswordPage";
 import { WebAiRopPage } from "./pages/web/WebAiRopPage";
 import { WebAiRopAccessPage } from "./pages/web/WebAiRopAccessPage";
 import { WebChatPage } from "./pages/web/WebChatPage";
+import { EmbeddedBitrixGate } from "./pages/embedded/EmbeddedBitrixGate";
+import { EmbeddedBitrixLayout } from "./pages/embedded/EmbeddedBitrixLayout";
+import { EmbeddedBitrixUsersPage } from "./pages/embedded/EmbeddedBitrixUsersPage";
+import { EmbeddedTelegramPage } from "./pages/embedded/EmbeddedTelegramPage";
 
 export default function App() {
   return (
@@ -64,7 +67,19 @@ export default function App() {
         <Route path="ai-rop/access" element={<WebAiRopAccessPage />} />
         <Route path="ai-rop/trainer" element={<WebStubPage title="AI Тренер" />} />
         <Route path="ai-rop/analyst" element={<WebStubPage title="AI Аналитик" />} />
-        <Route path="flow" element={<WebFlowPage />} />
+      </Route>
+      <Route path="/embedded/bitrix" element={<EmbeddedBitrixGate />}>
+        <Route element={<EmbeddedBitrixLayout />}>
+          <Route index element={<Navigate to="/embedded/bitrix/overview" replace />} />
+          <Route path="overview" element={<WebOverviewPage />} />
+          <Route path="chat" element={<WebChatPage />} />
+          <Route path="kb" element={<WebKbPage />} />
+          <Route path="sources" element={<WebSourcesPage />} />
+          <Route path="users" element={<EmbeddedBitrixUsersPage />} />
+          <Route path="settings" element={<WebSettingsPage />} />
+          <Route path="billing" element={<WebBillingPage />} />
+          <Route path="settings/telegram" element={<EmbeddedTelegramPage />} />
+        </Route>
       </Route>
       <Route path="/admin/login" element={<LoginPage />} />
       <Route path="/admin" element={<AdminLayout />}>

@@ -183,3 +183,39 @@ Detailed checklist: `docs/security_tech_debt_backlog.md`.
 - Bring Bitrix iframe visual language to the same design system as web.
 - Converge layout, typography, cards, states, and navigation patterns.
 - Do this as phased UI migration, preserving existing iframe production flows.
+
+### P1.5 Account-first Bitrix architecture cleanup
+- Treat `Account` as the only business source of truth for product data and settings.
+- Treat Bitrix `Portal` only as an integration leaf under `Account`.
+- Treat `primary portal` only as a transitional technical carrier while KB/settings are still physically keyed by `portal_id`.
+- Plan the full detachment of KB/settings/runtime context from `portal_id` to native `account_id`.
+
+### 2026-03-27 execution pool
+- Current execution pool is fixed in `docs/next_execution_pool_2026-03-27.md`.
+- This pool supersedes ad-hoc iframe parity fixes and groups the next slices into:
+  - embedded parity hardening
+  - Bitrix-only users refinement
+  - billing parity completion
+  - account-native runtime cleanup
+  - iframe-vue removal
+- Runtime cleanup inventory is fixed in:
+  - `docs/account_native_runtime_cleanup_2026-03-27.md`
+- Tech debt lane is fixed in:
+  - `docs/tech_debt_program_2026-03-27.md`
+
+### P1.5 KB structure and permission model
+- Add real KB hierarchy:
+  - folders
+  - subfolders
+  - files inside folder tree
+- Add access control on folder and file level.
+- Support department-isolated visibility:
+  - employee sees only files available to their department / role
+  - shared files remain visible where explicitly allowed
+- Add `client` role / audience for client-facing Telegram bot scenarios.
+- Retrieval must be permission-aware:
+  - search / ask only across files accessible to the current user
+  - removing access from a file must immediately remove that file from retrieval scope
+- Define runtime semantics for revoked access:
+  - no stale search hits from revoked files
+  - deterministic permission sync / cache invalidation / reindex behaviour

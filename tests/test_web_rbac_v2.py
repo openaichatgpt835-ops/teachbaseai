@@ -305,6 +305,82 @@ def test_web_rbac_access_center_filters_identities_to_current_account(test_db_se
 
 
 @pytest.mark.timeout(10)
+def test_web_rbac_bitrix_integrations_list_make_primary_and_disconnect(test_db_session, override_get_db):
+    seeded = _seed_owner(test_db_session)
+    account_id = seeded["account_id"]
+    portal_a = test_db_session.execute(select(Portal).where(Portal.account_id == account_id)).scalar_one()
+    portal_b = Portal(domain="second.bitrix24.ru", status="active", account_id=account_id)
+    test_db_session.add(portal_b)
+    test_db_session.flush()
+    integ_a = AccountIntegration(
+        account_id=account_id,
+        provider="bitrix",
+        status="active",
+        external_key="acme.bitrix24.ru",
+        portal_id=portal_a.id,
+        credentials_json={"is_primary": True},
+    )
+    integ_b = AccountIntegration(
+        account_id=account_id,
+        provider="bitrix",
+        status="active",
+        external_key="second.bitrix24.ru",
+        portal_id=portal_b.id,
+        credentials_json={},
+    )
+    test_db_session.add_all([integ_a, integ_b])
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        listed = client.get(
+            f"/v2/web/accounts/{account_id}/integrations/bitrix",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+        )
+        make_primary = client.post(
+            f"/v2/web/accounts/{account_id}/integrations/bitrix/{integ_b.id}/make-primary",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert listed.status_code == 200, listed.text
+    assert len(listed.json()["items"]) == 2
+    assert any(item["is_primary"] for item in listed.json()["items"])
+
+    assert make_primary.status_code == 200, make_primary.text
+    items = make_primary.json()["items"]
+    primary = next(item for item in items if item["id"] == integ_b.id)
+    assert primary["is_primary"] is True
+
+    test_db_session.expire_all()
+    owner_web = test_db_session.execute(select(WebUser).where(WebUser.email == "owner@example.com")).scalar_one()
+    assert owner_web.portal_id == portal_b.id
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        disconnect = client.delete(
+            f"/v2/web/accounts/{account_id}/integrations/bitrix/{integ_b.id}",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert disconnect.status_code == 200, disconnect.text
+    items = disconnect.json()["items"]
+    deleted = next(item for item in items if item["id"] == integ_b.id)
+    survivor = next(item for item in items if item["id"] == integ_a.id)
+    assert deleted["status"] == "deleted"
+    assert survivor["is_primary"] is True
+
+    test_db_session.expire_all()
+    owner_web = test_db_session.execute(select(WebUser).where(WebUser.email == "owner@example.com")).scalar_one()
+    assert owner_web.portal_id == portal_a.id
+    portal_b_db = test_db_session.get(Portal, portal_b.id)
+    assert portal_b_db.account_id is None
+
+
+@pytest.mark.timeout(10)
 def test_web_rbac_billing_endpoints(test_db_session, override_get_db):
     seeded = _seed_owner(test_db_session)
     account_id = seeded["account_id"]

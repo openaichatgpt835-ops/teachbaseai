@@ -1,4 +1,9 @@
 ﻿import { useEffect, useMemo, useState } from "react";
+import { coreModuleEmptyState } from "../../../../shared/ui/modules";
+import { coreSectionCopy } from "../../../../shared/ui/sections";
+import { EmptyStateBlock } from "../../components/EmptyStateBlock";
+import { PageIntro } from "../../components/PageIntro";
+import { SectionCard } from "../../components/SectionCard";
 import { fetchPortal, getActiveAccountId, getWebPortalInfo } from "./auth";
 
 type KbFile = { id: number; status: string; created_at?: string };
@@ -49,6 +54,12 @@ export function WebOverviewPage() {
   const sortedTopicSummaries = useMemo(() => {
     return [...overview.topicSummaries].sort((a, b) => Number(b.score ?? -1) - Number(a.score ?? -1));
   }, [overview.topicSummaries]);
+  const overviewEmpty = coreModuleEmptyState(
+    "overview",
+    "Обзор пока пуст",
+    "Подключите источники и задайте первый вопрос, чтобы наполнить рабочий обзор.",
+  );
+  const sectionCopy = coreSectionCopy("overview");
 
   useEffect(() => {
     if (!portalId || !portalToken) return;
@@ -111,35 +122,33 @@ export function WebOverviewPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-slate-900">Обзор</h1>
-        <p className="text-sm text-slate-500 mt-1">Ключевые метрики и фокус запросов.</p>
-      </div>
+      <PageIntro
+        moduleId="overview"
+        fallbackTitle="Обзор"
+        fallbackDescription="Ключевые метрики и фокус запросов."
+      />
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-          <h2 className="text-sm font-semibold text-slate-900">База знаний</h2>
+        <SectionCard title={sectionCopy.overviewKnowledgeTitle}>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <Metric label="Файлов" value={overview.kbFiles.length} />
-            <Metric label="URL‑источников" value={overview.kbSources.length} />
-            <Metric label="Последнее обновление" value={overview.lastUpdated} />
-            <Metric label="Статус" value={kbCounts.error > 0 ? "Есть ошибки" : "Актуальна"} />
+            <Metric label={sectionCopy.overviewMetricLabel("files")} value={overview.kbFiles.length} />
+            <Metric label={sectionCopy.overviewMetricLabel("url_sources")} value={overview.kbSources.length} />
+            <Metric label={sectionCopy.overviewMetricLabel("last_updated")} value={overview.lastUpdated} />
+            <Metric label={sectionCopy.overviewMetricLabel("status")} value={kbCounts.error > 0 ? "Есть ошибки" : "Актуальна"} />
           </div>
-        </div>
+        </SectionCard>
 
-        <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-          <h2 className="text-sm font-semibold text-slate-900">Использование</h2>
+        <SectionCard title={sectionCopy.overviewUsageTitle}>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <Metric label="Активные сегодня" value={overview.activeUsers} />
-            <Metric label="Всего сотрудников" value={overview.usersCount} />
-            <Metric label="Доступ разрешён" value={overview.selectedUsersCount} />
-            <Metric label="Ошибки индексации" value={kbCounts.error} />
+            <Metric label={sectionCopy.overviewMetricLabel("active_today")} value={overview.activeUsers} />
+            <Metric label={sectionCopy.overviewMetricLabel("users_total")} value={overview.usersCount} />
+            <Metric label={sectionCopy.overviewMetricLabel("access_granted")} value={overview.selectedUsersCount} />
+            <Metric label={sectionCopy.overviewMetricLabel("index_errors")} value={kbCounts.error} />
           </div>
-        </div>
+        </SectionCard>
       </div>
 
-      <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-        <h2 className="text-sm font-semibold text-slate-900">Фокус запросов</h2>
+      <SectionCard title={sectionCopy.overviewFocusTitle}>
         {sortedTopicSummaries.length ? (
           <div className="mt-4 space-y-3">
             {sortedTopicSummaries.map((t, idx) => (
@@ -152,9 +161,9 @@ export function WebOverviewPage() {
             ))}
           </div>
         ) : (
-          <div className="mt-4 text-sm text-slate-500">Недостаточно данных.</div>
+          <EmptyStateBlock className="mt-4" title={overviewEmpty.title} description={overviewEmpty.description} />
         )}
-      </div>
+      </SectionCard>
     </div>
   );
 }

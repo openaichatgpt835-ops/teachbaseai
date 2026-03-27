@@ -51,7 +51,7 @@ export function RegisterPage() {
           </div>
           <h1 className="text-4xl font-semibold text-slate-900">Запустите свой AI-кабинет</h1>
           <p className="text-slate-600">
-            Регистрация без Bitrix24. Получите доступ к базе знаний, конструкторам и настройкам ботов.
+            Регистрация без Bitrix24. Получите доступ к базе знаний, чату и настройкам ботов.
           </p>
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="rounded-2xl bg-white p-4 shadow-sm border border-slate-100">
@@ -59,8 +59,8 @@ export function RegisterPage() {
               <div className="text-xs text-slate-500 mt-1">Файлы, URL-источники, индексация.</div>
             </div>
             <div className="rounded-2xl bg-white p-4 shadow-sm border border-slate-100">
-              <div className="text-sm font-semibold text-slate-900">Конструктор бота</div>
-              <div className="text-xs text-slate-500 mt-1">Готовые сценарии и тестовый прогон.</div>
+              <div className="text-sm font-semibold text-slate-900">Чат по базе знаний</div>
+              <div className="text-xs text-slate-500 mt-1">Ответы по документам и источникам аккаунта.</div>
             </div>
             <div className="rounded-2xl bg-white p-4 shadow-sm border border-slate-100">
               <div className="text-sm font-semibold text-slate-900">Интеграции</div>
