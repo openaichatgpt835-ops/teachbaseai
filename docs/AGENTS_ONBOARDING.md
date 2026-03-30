@@ -6,7 +6,7 @@
 - Backend API: `apps/backend`
 - Workers: `apps/worker`
 - Web/Admin React: `apps/frontend`
-- Iframe (legacy Vue): `apps/iframe-vue`
+- Embedded Bitrix route: `apps/frontend` via `/embedded/bitrix`
 - Миграции: `alembic/versions`
 - Инфра Docker: `infra/docker`
 - Деплой скрипт: `scripts/deploy_teachbase.ps1`

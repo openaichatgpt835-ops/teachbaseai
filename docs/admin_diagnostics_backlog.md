@@ -197,7 +197,7 @@ Detailed checklist: `docs/security_tech_debt_backlog.md`.
   - Bitrix-only users refinement
   - billing parity completion
   - account-native runtime cleanup
-  - iframe-vue removal
+  - iframe-vue removal (done)
 - Runtime cleanup inventory is fixed in:
   - `docs/account_native_runtime_cleanup_2026-03-27.md`
 - Tech debt lane is fixed in:

@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -7,7 +7,6 @@ ROOTS = [
     os.path.join(ROOT, "apps", "shared"),
     os.path.join(ROOT, "apps", "frontend", "src"),
     os.path.join(ROOT, "apps", "backend"),
-    os.path.join(ROOT, "apps", "iframe-vue"),
     os.path.join(ROOT, "alembic"),
     os.path.join(ROOT, "docs"),
     os.path.join(ROOT, "infra"),
@@ -24,14 +23,14 @@ IGNORE_DIRS = {
     "node_modules", "dist", "build", ".git", ".venv", "venv", "__pycache__",
 }
 
-BAD_SEQ = ["???", "\u043f\u0457\u0405", "\ufffd"]
+BAD_SEQ = ["???", "\u043f\u0457\u0405", "\ufffd", "Рџ", "РЎ", "Рќ", "Рў", "Рђ", "вЂ”", "в„–", "В·"]
 
 SUPPLEMENT_RANGES = [
     (0x0400, 0x040F),
     (0x0450, 0x045F),
 ]
 
-SUPPLEMENT_ALLOW = {0x0401, 0x0451}  # Ё/ё allowed
+SUPPLEMENT_ALLOW = {0x0401, 0x0451}  # РЃ/С‘ allowed
 
 
 def is_text_file(path: str) -> bool:
@@ -105,3 +104,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

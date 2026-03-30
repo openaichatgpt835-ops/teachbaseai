@@ -18,6 +18,7 @@
 
 - Bitrix handler opens React embedded route, not old Vue product UI.
 - Old `/iframe/` product usage is disabled via redirect shim.
+- Old `apps/iframe-vue` production build path is removed; `/iframe/` is now a redirect shim from frontend static assets.
 - Embedded React can bootstrap both Bitrix portal session and web session.
 - Shared React pages already power:
   - `Overview`
@@ -93,10 +94,11 @@ Reference:
 Goal:
 - stop carrying dead second-frontend product code
 
-Tasks:
-- remove product-only remnants from `apps/iframe-vue`
-- keep only the minimum redirect/bootstrap shim until safe deletion
-- then delete `apps/iframe-vue` fully
+Status:
+- done
+- production build path removed
+- `/iframe/` shim moved to `apps/frontend/public/iframe/index.html`
+- `apps/iframe-vue` deleted from repo
 
 ### 6. Product analytics implementation
 

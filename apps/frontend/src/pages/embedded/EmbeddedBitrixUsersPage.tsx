@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import type { EmbeddedBitrixContext } from "./EmbeddedBitrixGate";
 import { fetchPortal } from "../web/auth";
+import type { EmbeddedBitrixContext } from "./EmbeddedBitrixGate";
 
 type BitrixPortalUser = {
   id: number | string;
@@ -19,26 +19,28 @@ type AccessItem = {
 };
 
 const LABELS = {
-  title: "Пользователи Bitrix24",
-  subtitle: "Управление доступом сотрудников текущего Bitrix-портала. Доступно только администратору портала.",
-  adminOnly: "Управление пользователями Bitrix24 доступно только администратору текущего портала.",
-  refresh: "Обновить",
-  save: "Сохранить доступ",
-  saving: "Сохраняю...",
-  search: "Поиск по имени или email",
-  access: "Доступ",
+  title: "\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0438 Bitrix24",
+  subtitle:
+    "\u0423\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u0434\u043e\u0441\u0442\u0443\u043f\u043e\u043c \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u043e\u0432 \u0442\u0435\u043a\u0443\u0449\u0435\u0433\u043e Bitrix-\u043f\u043e\u0440\u0442\u0430\u043b\u0430. \u0414\u043e\u0441\u0442\u0443\u043f\u043d\u043e \u0442\u043e\u043b\u044c\u043a\u043e \u0430\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440\u0443 \u043f\u043e\u0440\u0442\u0430\u043b\u0430.",
+  adminOnly:
+    "\u0423\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f\u043c\u0438 Bitrix24 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e \u0442\u043e\u043b\u044c\u043a\u043e \u0430\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440\u0443 \u0442\u0435\u043a\u0443\u0449\u0435\u0433\u043e \u043f\u043e\u0440\u0442\u0430\u043b\u0430.",
+  refresh: "\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c",
+  save: "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0434\u043e\u0441\u0442\u0443\u043f",
+  saving: "\u0421\u043e\u0445\u0440\u0430\u043d\u044f\u044e...",
+  search: "\u041f\u043e\u0438\u0441\u043a \u043f\u043e \u0438\u043c\u0435\u043d\u0438 \u0438\u043b\u0438 email",
+  access: "\u0414\u043e\u0441\u0442\u0443\u043f",
   telegram: "Telegram username",
-  employee: "Сотрудник",
-  empty: "Сотрудники Bitrix24 не найдены.",
-  selected: "Разрешён доступ",
-  users: "пользователей",
-  loadUsersError: "Не удалось загрузить сотрудников Bitrix24.",
-  loadAccessError: "Не удалось загрузить текущий доступ Bitrix24.",
-  saveError: "Не удалось сохранить доступ Bitrix24.",
-  saveOk: "Доступ сохранён.",
-  noEmail: "—",
-  enabled: "Разрешён",
-  disabled: "Отключён",
+  employee: "\u0421\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a",
+  empty: "\u0421\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0438 Bitrix24 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b.",
+  selected: "\u0420\u0430\u0437\u0440\u0435\u0448\u0451\u043d \u0434\u043e\u0441\u0442\u0443\u043f",
+  users: "\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0435\u0439",
+  loadUsersError: "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u043e\u0432 Bitrix24.",
+  loadAccessError: "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u0442\u0435\u043a\u0443\u0449\u0438\u0439 \u0434\u043e\u0441\u0442\u0443\u043f Bitrix24.",
+  saveError: "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0434\u043e\u0441\u0442\u0443\u043f Bitrix24.",
+  saveOk: "\u0414\u043e\u0441\u0442\u0443\u043f \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d.",
+  noEmail: "\u2014",
+  enabled: "\u0420\u0430\u0437\u0440\u0435\u0448\u0451\u043d",
+  disabled: "\u041e\u0442\u043a\u043b\u044e\u0447\u0451\u043d",
 } as const;
 
 function userDisplayName(user: BitrixPortalUser) {

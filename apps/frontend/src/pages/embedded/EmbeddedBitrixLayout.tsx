@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { Link, Navigate, Outlet, useLocation, useOutletContext } from "react-router-dom";
 import { coreModulesByGroup, coreModuleLabel } from "../../../../shared/ui/modules";
 import type { EmbeddedBitrixContext } from "./EmbeddedBitrixGate";
@@ -138,3 +138,4 @@ export function EmbeddedBitrixLayout() {
     </div>
   );
 }
+
