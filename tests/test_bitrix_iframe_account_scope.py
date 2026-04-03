@@ -801,6 +801,90 @@ def test_bitrix_folder_crud_and_file_move_work_across_account_scope(test_db_sess
 
 
 @pytest.mark.timeout(10)
+def test_bitrix_folder_list_exposes_space_roots_and_space_metadata(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    client_root = KBFolder(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        name="Клиенты",
+        root_space="clients",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db_session.add(client_root)
+    test_db_session.flush()
+    child = KBFolder(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        parent_id=client_root.id,
+        name="Acme",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db_session.add(child)
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    original_require_admin = bitrix_router._require_portal_admin
+    bitrix_router._require_portal_admin = lambda db, portal_id, request: None
+    try:
+        resp = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/folders",
+            headers={"Authorization": "Bearer tok"},
+        )
+    finally:
+        bitrix_router._require_portal_admin = original_require_admin
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    roots = {item["root_space"] for item in items if item.get("is_space_root")}
+    assert {"shared", "departments", "clients"}.issubset(roots)
+    child_payload = next(item for item in items if int(item["id"]) == child.id)
+    assert child_payload["root_space"] == "clients"
+    assert child_payload["is_space_root"] is False
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_space_root_folder_cannot_be_deleted_or_renamed(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    root = KBFolder(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        name="Отделы",
+        root_space="departments",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db_session.add(root)
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    original_require_admin = bitrix_router._require_portal_admin
+    bitrix_router._require_portal_admin = lambda db, portal_id, request: None
+    try:
+        patch_resp = client.patch(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/folders/{root.id}",
+            headers={"Authorization": "Bearer tok"},
+            json={"name": "New name"},
+        )
+        delete_resp = client.delete(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/folders/{root.id}",
+            headers={"Authorization": "Bearer tok"},
+        )
+    finally:
+        bitrix_router._require_portal_admin = original_require_admin
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+    assert patch_resp.status_code == 409
+    assert delete_resp.status_code == 409
+
+
+@pytest.mark.timeout(10)
 def test_bitrix_folder_delete_blocks_non_empty_folder(test_db_session):
     account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
     folder = KBFolder(account_id=account.id, portal_id=portal_a.id, name="Dept", created_at=datetime.utcnow(), updated_at=datetime.utcnow())

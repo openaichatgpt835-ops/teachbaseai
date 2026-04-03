@@ -1,5 +1,5 @@
 ﻿import * as Dialog from "@radix-ui/react-dialog";
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -44,6 +44,8 @@ type KbFolder = {
   id: number;
   name: string;
   parent_id?: number | null;
+  root_space?: RootSpace | null;
+  is_space_root?: boolean;
   access_badges?: { staff?: string; client?: string };
 };
 
@@ -104,6 +106,8 @@ type UploadDialogState = {
   saving: boolean;
   message: string;
 };
+
+const KB_LAST_FOLDER_KEY = "kb_v2_last_folder_id";
 
 const EMPTY_SUMMARY: KbAccessSummary = {
   total_ready_files: 0,
@@ -174,21 +178,17 @@ function buildFolderPath(folderId: number | null, folderMap: Map<number, KbFolde
   return parts.join(" / ") || "Корень базы знаний";
 }
 
-function topAncestor(folder: KbFolder, folderMap: Map<number, KbFolder>): KbFolder {
-  let current = folder;
-  let cursor = current.parent_id != null ? folderMap.get(Number(current.parent_id)) : undefined;
-  while (cursor) {
-    current = cursor;
-    cursor = current.parent_id != null ? folderMap.get(Number(current.parent_id)) : undefined;
-  }
-  return current;
-}
-
 function rootSpaceForFolder(folder: KbFolder, folderMap: Map<number, KbFolder>): RootSpace {
-  const rootName = topAncestor(folder, folderMap).name.trim().toLowerCase();
-  if (rootName.includes("общ")) return "shared";
-  if (rootName.includes("отдел")) return "departments";
-  if (rootName.includes("клиент")) return "clients";
+  const direct = String(folder.root_space || "").trim().toLowerCase();
+  if (direct === "shared" || direct === "departments" || direct === "clients") return direct;
+  let current = folder.parent_id != null ? folderMap.get(Number(folder.parent_id)) : undefined;
+  const visited = new Set<number>();
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    const space = String(current.root_space || "").trim().toLowerCase();
+    if (space === "shared" || space === "departments" || space === "clients") return space;
+    current = current.parent_id != null ? folderMap.get(Number(current.parent_id)) : undefined;
+  }
   return "all";
 }
 
@@ -387,17 +387,6 @@ function countFilesForRootSpace(files: KbFile[], folderMap: Map<number, KbFolder
   return files.filter((file) => rootSpaceForFile(file, folderMap) === rootSpace).length;
 }
 
-function countFoldersForRootSpace(folders: KbFolder[], folderMap: Map<number, KbFolder>, rootSpace: RootSpace) {
-  if (rootSpace === "all") return folders.length;
-  return folders.filter((folder) => rootSpaceForFolder(folder, folderMap) === rootSpace).length;
-}
-
-function countRootFilesForRootSpace(files: KbFile[], folderMap: Map<number, KbFolder>, rootSpace: RootSpace) {
-  const rootFiles = files.filter((file) => file.folder_id == null);
-  if (rootSpace === "all") return rootFiles.length;
-  return rootFiles.filter((file) => rootSpaceForFile(file, folderMap) === rootSpace).length;
-}
-
 function clientVisibilityCategory(value?: string) {
   if (value === "client_all") return "all";
   if (value === "client_groups") return "groups";
@@ -451,6 +440,7 @@ export function WebKbPageV2() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [mode, setMode] = useState<InspectorMode>("overview");
   const [rootSpace, setRootSpace] = useState<RootSpace>("all");
+  const [expandedRootSpace, setExpandedRootSpace] = useState<RootSpace | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [selection, setSelection] = useState<Selection>(null);
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
@@ -461,6 +451,9 @@ export function WebKbPageV2() {
   const [accessDraft, setAccessDraft] = useState<KbAclDraftItem[]>([]);
   const [bulkAccessDraft, setBulkAccessDraft] = useState<KbAclDraftItem[]>([]);
   const [selectedFileIds, setSelectedFileIds] = useState<number[]>([]);
+  const [draggedFileId, setDraggedFileId] = useState<number | null>(null);
+  const [dragOverFolderId, setDragOverFolderId] = useState<number | null | undefined>(undefined);
+  const restoreSelectionRef = useRef(false);
   const [bulkAccessOpen, setBulkAccessOpen] = useState(false);
   const [templateStaffGroupId, setTemplateStaffGroupId] = useState(0);
   const [templateClientGroupId, setTemplateClientGroupId] = useState(0);
@@ -503,6 +496,11 @@ export function WebKbPageV2() {
 
   const folderMap = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders]);
   const childrenMap = useMemo(() => buildFolderChildrenMap(folders), [folders]);
+  const spaceRoots = useMemo(() => ({
+    shared: folders.find((folder) => folder.is_space_root && folder.root_space === "shared") ?? null,
+    departments: folders.find((folder) => folder.is_space_root && folder.root_space === "departments") ?? null,
+    clients: folders.find((folder) => folder.is_space_root && folder.root_space === "clients") ?? null,
+  }), [folders]);
   const ownerOptions = useMemo(() => Array.from(new Set(files.map((file) => file.uploaded_by_name || "Не указан"))).sort((a, b) => a.localeCompare(b, "ru")), [files]);
   const typeOptions = useMemo(() => Array.from(new Set(files.map((file) => fileTypeLabel(file)))).sort((a, b) => a.localeCompare(b, "ru")), [files]);
   const staffGroups = useMemo(() => groups.filter((group) => group.kind === "staff"), [groups]);
@@ -577,7 +575,7 @@ export function WebKbPageV2() {
           if (current?.kind === "folder" && nextFolders.some((folder: KbFolder) => folder.id === current.id)) return current;
           if (current?.kind === "file" && nextFiles.some((file: KbFile) => file.id === current.id)) return current;
           const map = new Map<number, KbFolder>(nextFolders.map((item: KbFolder) => [item.id, item]));
-          const firstClientFolder = nextFolders.find((folder: KbFolder) => rootSpaceForFolder(folder, map) === "clients");
+          const firstClientFolder = nextFolders.find((folder: KbFolder) => !folder.is_space_root && rootSpaceForFolder(folder, map) === "clients");
           const fallback = firstClientFolder || nextFolders[0];
           return fallback ? { kind: "folder", id: fallback.id } : null;
         });
@@ -717,6 +715,41 @@ export function WebKbPageV2() {
       setBulkAccessDraft([]);
     }
   }, [selectedFileIds]);
+
+  useEffect(() => {
+    if (restoreSelectionRef.current) return;
+    if (!folders.length) return;
+    restoreSelectionRef.current = true;
+    const raw = window.localStorage.getItem(KB_LAST_FOLDER_KEY);
+    const lastFolderId = raw ? Number(raw) : NaN;
+    if (Number.isFinite(lastFolderId) && folderMap.has(lastFolderId)) {
+      const folder = folderMap.get(lastFolderId)!;
+      setSelection({ kind: "folder", id: lastFolderId });
+      setRootFilesMode(false);
+      const folderRootSpace = rootSpaceForFolder(folder, folderMap);
+      setRootSpace(folderRootSpace);
+      setExpandedRootSpace(folderRootSpace);
+      const parentChain: number[] = [];
+      let current = folder.parent_id != null ? folderMap.get(Number(folder.parent_id)) : undefined;
+      while (current) {
+        parentChain.push(current.id);
+        current = current.parent_id != null ? folderMap.get(Number(current.parent_id)) : undefined;
+      }
+      setExpanded((existing) => {
+        const next = { ...existing };
+        parentChain.forEach((id) => {
+          next[id] = true;
+        });
+        return next;
+      });
+    }
+  }, [folderMap, folders.length]);
+
+  useEffect(() => {
+    if (selection?.kind === "folder") {
+      window.localStorage.setItem(KB_LAST_FOLDER_KEY, String(selection.id));
+    }
+  }, [selection]);
 
   const applyTemplate = (template: KbTemplate) => {
     const groupId = template === "group" ? templateStaffGroupId : template === "client_group" ? templateClientGroupId : 0;
@@ -977,8 +1010,43 @@ export function WebKbPageV2() {
     void moveFilesToFolder(folderId, ids);
   };
 
+  const onDragEnterFolder = (folderId: number | null) => {
+    setDragOverFolderId(folderId);
+  };
+
+  const onDragLeaveFolder = (folderId: number | null) => {
+    setDragOverFolderId((current) => (current === folderId ? undefined : current));
+  };
+
+  const onDropToFolder = (folderId: number | null, event: DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragOverFolderId(undefined);
+    const ids: number[] = [];
+    if (selectedFileIds.length) {
+      ids.push(...selectedFileIds);
+    } else {
+      const payload = event.dataTransfer.getData("text/plain");
+      const parsed = Number(payload);
+      if (Number.isFinite(parsed)) ids.push(parsed);
+      else if (draggedFileId != null) ids.push(draggedFileId);
+    }
+    if (!ids.length) return;
+    requestMoveFilesToFolder(folderId, ids);
+    setDraggedFileId(null);
+  };
+
   const createFolder = () => {
-    const parentId = selection?.kind === "folder" ? selection.id : null;
+    const parentId =
+      selection?.kind === "folder"
+        ? selection.id
+        : rootSpace === "shared"
+          ? spaceRoots.shared?.id ?? null
+          : rootSpace === "departments"
+            ? spaceRoots.departments?.id ?? null
+            : rootSpace === "clients"
+              ? spaceRoots.clients?.id ?? null
+              : null;
     setFolderDialog({ open: true, mode: "create", parentId, name: "" });
   };
 
@@ -1084,31 +1152,25 @@ export function WebKbPageV2() {
     setMoveDialog({ open: false });
   };
 
-  const visibleRootFolders = useMemo(() => {
-    const roots = childrenMap.get(null) || [];
-    if (rootSpace === "all") return roots;
-    return roots.filter((folder) => rootSpaceForFolder(folder, folderMap) === rootSpace);
-  }, [childrenMap, folderMap, rootSpace]);
-
   const selectedFolder = selection?.kind === "folder" ? folderMap.get(selection.id) ?? null : null;
   const selectedFile = selection?.kind === "file" ? files.find((file) => file.id === selection.id) ?? null : null;
   const rootStats = useMemo(
     () => ({
-      all: { fileCount: countFilesForRootSpace(files, folderMap, "all"), folderCount: countFoldersForRootSpace(folders, folderMap, "all") },
-      shared: { fileCount: countFilesForRootSpace(files, folderMap, "shared"), folderCount: countFoldersForRootSpace(folders, folderMap, "shared") },
-      departments: { fileCount: countFilesForRootSpace(files, folderMap, "departments"), folderCount: countFoldersForRootSpace(folders, folderMap, "departments") },
-      clients: { fileCount: countFilesForRootSpace(files, folderMap, "clients"), folderCount: countFoldersForRootSpace(folders, folderMap, "clients") },
+      all: { fileCount: countFilesForRootSpace(files, folderMap, "all"), folderCount: folders.filter((folder) => !folder.is_space_root).length },
+      shared: { fileCount: countFilesForRootSpace(files, folderMap, "shared"), folderCount: folders.filter((folder) => !folder.is_space_root && rootSpaceForFolder(folder, folderMap) === "shared").length },
+      departments: { fileCount: countFilesForRootSpace(files, folderMap, "departments"), folderCount: folders.filter((folder) => !folder.is_space_root && rootSpaceForFolder(folder, folderMap) === "departments").length },
+      clients: { fileCount: countFilesForRootSpace(files, folderMap, "clients"), folderCount: folders.filter((folder) => !folder.is_space_root && rootSpaceForFolder(folder, folderMap) === "clients").length },
     }),
     [files, folderMap, folders],
   );
   const rootFileCounts = useMemo(
     () => ({
-      all: countRootFilesForRootSpace(files, folderMap, "all"),
-      shared: countRootFilesForRootSpace(files, folderMap, "shared"),
-      departments: countRootFilesForRootSpace(files, folderMap, "departments"),
-      clients: countRootFilesForRootSpace(files, folderMap, "clients"),
+      all: files.filter((file) => file.folder_id == null).length,
+      shared: files.filter((file) => file.folder_id != null && file.folder_id === spaceRoots.shared?.id).length,
+      departments: files.filter((file) => file.folder_id != null && file.folder_id === spaceRoots.departments?.id).length,
+      clients: files.filter((file) => file.folder_id != null && file.folder_id === spaceRoots.clients?.id).length,
     }),
-    [files, folderMap],
+    [files, spaceRoots.clients?.id, spaceRoots.departments?.id, spaceRoots.shared?.id],
   );
   const selectedFolderIds = useMemo(() => {
     if (!selectedFolder) return null;
@@ -1119,7 +1181,15 @@ export function WebKbPageV2() {
     let items = files.slice();
     if (rootSpace !== "all") items = items.filter((file) => rootSpaceForFile(file, folderMap) === rootSpace);
     if (rootFilesMode) {
-      items = items.filter((file) => file.folder_id == null);
+      const rootFolderId =
+        rootSpace === "shared"
+          ? spaceRoots.shared?.id ?? null
+          : rootSpace === "departments"
+            ? spaceRoots.departments?.id ?? null
+            : rootSpace === "clients"
+              ? spaceRoots.clients?.id ?? null
+              : null;
+      items = items.filter((file) => (rootSpace === "all" ? file.folder_id == null : file.folder_id === rootFolderId));
     } else if (selectedFolderIds) {
       items = items.filter((file) => file.folder_id != null && selectedFolderIds.has(Number(file.folder_id)));
     }
@@ -1137,18 +1207,18 @@ export function WebKbPageV2() {
     if (ownerFilter !== "all") items = items.filter((file) => (file.uploaded_by_name || "Не указан") === ownerFilter);
     if (typeFilter !== "all") items = items.filter((file) => fileTypeLabel(file) === typeFilter);
     return items.sort((a, b) => String(a.filename || "").localeCompare(String(b.filename || ""), "ru"));
-  }, [files, folderMap, ownerFilter, rootSpace, search, selectedFolderIds, statusFilter, typeFilter, visibilityFilter]);
+  }, [files, folderMap, ownerFilter, rootSpace, search, selectedFolderIds, spaceRoots.clients?.id, spaceRoots.departments?.id, spaceRoots.shared?.id, statusFilter, typeFilter, visibilityFilter]);
 
   const activeCoverage = selectedFolder ? details.folderCoverage : coverage;
   const currentTitle = selectedFolder ? buildFolderPath(selectedFolder.id, folderMap) : rootFilesMode ? "Без папки" : rootSpaceLabel(rootSpace);
   const currentSubtitle = selectedFolder
     ? `${countReadyFiles(filteredFiles)} материалов · ${activeCoverage.open_all_clients + activeCoverage.open_client_groups} доступны клиентскому боту`
     : rootFilesMode
-      ? `${countReadyFiles(filteredFiles)} материалов лежат в корне базы знаний`
+      ? `${countReadyFiles(filteredFiles)} материалов лежат ${rootSpace === "all" ? "в корне базы знаний" : `в корне пространства «${rootSpaceLabel(rootSpace)}»`}`
       : `${countReadyFiles(filteredFiles)} материалов в текущем представлении`;
 
   return (
-    <div className="space-y-4 bg-[#F5F7FA] px-6 py-4">
+    <div className="space-y-3 bg-[#F5F7FA] px-6 py-0.5">
       <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(event) => { void uploadFiles(event.target.files); event.target.value = ""; }} />
       <OnboardingDialog open={onboardingOpen} step={onboardingStep} onOpenChange={setOnboardingOpen} onNext={() => setOnboardingStep((step) => Math.min(step + 1, ONBOARDING_STEPS.length - 1))} onPrev={() => setOnboardingStep((step) => Math.max(step - 1, 0))} />
       <KnowledgeInfoDialog open={knowledgeInfoOpen} onOpenChange={setKnowledgeInfoOpen} />
@@ -1195,20 +1265,25 @@ export function WebKbPageV2() {
       />
       <PageShellHeader onOpenOnboarding={() => setOnboardingOpen(true)} onOpenInfo={() => setKnowledgeInfoOpen(true)} />
       {error ? <Panel tone="elevated" className="border-rose-200 bg-rose-50"><PanelBody className="mt-0 text-sm text-rose-700">{error}</PanelBody></Panel> : null}
-      {actionMessage ? <div className="flex items-center justify-between gap-3 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800"><span>{actionMessage}</span><button type="button" className="text-sky-600 transition hover:text-sky-800" onClick={() => setActionMessage("")}><X className="h-4 w-4" /></button></div> : null}
+      {actionMessage ? (
+        <div className="pointer-events-none fixed right-8 top-20 z-40 flex max-w-[420px] items-start gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-[0_12px_30px_rgba(15,23,42,0.12)]">
+          <div className="min-w-0 flex-1 leading-6">{actionMessage}</div>
+          <button type="button" className="pointer-events-auto text-slate-400 transition hover:text-slate-700" onClick={() => setActionMessage("")}><X className="h-4 w-4" /></button>
+        </div>
+      ) : null}
       <WorkspaceSplit
         className="gap-4 xl:grid-cols-[304px_minmax(0,1fr)_400px]"
-        sidebar={<LibraryRail rootSpace={rootSpace} onRootSpaceChange={(value) => { setRootSpace(value); setSelection(null); setRootFilesMode(false); setMode("overview"); }} folders={visibleRootFolders} folderMap={folderMap} childrenMap={childrenMap} expanded={expanded} selection={selection} rootFilesMode={rootFilesMode} onToggle={(id) => setExpanded((current) => ({ ...current, [id]: !current[id] }))} onSelectFolder={(id) => { setRootFilesMode(false); setSelection({ kind: "folder", id }); setMode("overview"); }} onSelectRootFiles={() => { setSelection(null); setRootFilesMode(true); setMode("overview"); }} onOpenUploadDialog={openUploadDialog} onCreateFolder={createFolder} rootStats={rootStats} rootFileCounts={rootFileCounts} />}
-        main={<div className="space-y-4"><MaterialsHeader title={currentTitle} subtitle={currentSubtitle} loading={loading} search={search} onSearchChange={setSearch} typeFilter={typeFilter} onTypeFilterChange={setTypeFilter} statusFilter={statusFilter} onStatusFilterChange={setStatusFilter} visibilityFilter={visibilityFilter} onVisibilityFilterChange={setVisibilityFilter} ownerFilter={ownerFilter} onOwnerFilterChange={setOwnerFilter} ownerOptions={ownerOptions} typeOptions={typeOptions} viewMode={viewMode} onViewModeChange={setViewMode} />{selectedFileIds.length > 0 ? <BulkActionBar selectedCount={selectedFileIds.length} folders={folders} folderMap={folderMap} onOpenAccess={() => { setBulkAccessOpen(true); setMode("access"); }} onMove={(value) => requestMoveFilesToFolder(value === "root" ? null : Number(value), selectedFileIds)} onDelete={() => deleteFiles(selectedFileIds)} onClear={() => setSelectedFileIds([])} /> : null}<CoverageStrip summary={activeCoverage} /><MaterialsList files={filteredFiles} folderMap={folderMap} viewMode={viewMode} loading={loading} selectedFileId={selectedFile?.id ?? null} selectedFileIds={selectedFileIds} onSelectFile={(id) => { setSelection({ kind: "file", id }); setMode("overview"); }} onToggleSelectedFile={(id) => setSelectedFileIds((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]))} onPreviewFile={(id) => void openPreview(id)} /></div>}
+        sidebar={<LibraryRail rootSpace={rootSpace} expandedRootSpace={expandedRootSpace} onRootSpaceChange={(value) => { setRootSpace(value); setExpandedRootSpace((current) => current === value ? null : value); setSelection(null); setRootFilesMode(false); setMode("overview"); }} folders={folders} folderMap={folderMap} childrenMap={childrenMap} expanded={expanded} selection={selection} rootFilesMode={rootFilesMode} onToggle={(id) => setExpanded((current) => ({ ...current, [id]: !current[id] }))} onSelectFolder={(id) => { const folder = folderMap.get(id); setRootFilesMode(false); setSelection({ kind: "folder", id }); setMode("overview"); if (folder) { const folderRootSpace = rootSpaceForFolder(folder, folderMap); setRootSpace(folderRootSpace); setExpandedRootSpace(folderRootSpace); } }} onSelectRootFiles={() => { setSelection(null); setRootFilesMode(true); setMode("overview"); setExpandedRootSpace(rootSpace); }} onOpenUploadDialog={openUploadDialog} onCreateFolder={createFolder} rootStats={rootStats} rootFileCounts={rootFileCounts} dragOverFolderId={dragOverFolderId} onDragEnterFolder={onDragEnterFolder} onDragLeaveFolder={onDragLeaveFolder} onDropToFolder={onDropToFolder} setActionMessage={setActionMessage} draggedFileId={draggedFileId} selectedFileIds={selectedFileIds} onRequestMoveFilesToFolder={requestMoveFilesToFolder} spaceRoots={spaceRoots} />}
+        main={<div className="space-y-4"><MaterialsHeader title={currentTitle} subtitle={currentSubtitle} loading={loading} search={search} onSearchChange={setSearch} typeFilter={typeFilter} onTypeFilterChange={setTypeFilter} statusFilter={statusFilter} onStatusFilterChange={setStatusFilter} visibilityFilter={visibilityFilter} onVisibilityFilterChange={setVisibilityFilter} ownerFilter={ownerFilter} onOwnerFilterChange={setOwnerFilter} ownerOptions={ownerOptions} typeOptions={typeOptions} viewMode={viewMode} onViewModeChange={setViewMode} /><MaterialsList files={filteredFiles} folderMap={folderMap} folders={folders.filter((folder) => !folder.is_space_root)} spaceRoots={spaceRoots} viewMode={viewMode} loading={loading} selectedFileId={selectedFile?.id ?? null} selectedFileIds={selectedFileIds} onSelectFile={(id) => { setSelection({ kind: "file", id }); setMode("overview"); }} onToggleSelectedFile={(id) => setSelectedFileIds((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]))} onToggleSelectAll={() => setSelectedFileIds((current) => { const visibleIds = filteredFiles.map((file) => file.id); const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => current.includes(id)); return allVisibleSelected ? current.filter((id) => !visibleIds.includes(id)) : Array.from(new Set([...current, ...visibleIds])); })} onOpenBulkAccess={() => { setBulkAccessOpen(true); setMode("access"); }} onBulkMove={(value) => requestMoveFilesToFolder(value === "root" ? null : Number(value), selectedFileIds)} onBulkDelete={() => deleteFiles(selectedFileIds)} onClearSelection={() => setSelectedFileIds([])} onPreviewFile={(id) => void openPreview(id)} onDragStartFile={setDraggedFileId} onDragEndFile={() => setDraggedFileId(null)} /></div>}
         inspector={
-          <div>
+          <div className="space-y-4">
           <InspectorPanel
             title={selectedFolder ? selectedFolder.name : selectedFile ? selectedFile.filename : "Инспектор"}
             subtitle={selectedFolder ? "Папка" : selectedFile ? "Файл" : "Выбери объект"}
             mode={mode}
             modes={selection ? [{ value: "overview", label: "Обзор" }, { value: "access", label: "Доступ" }] : undefined}
             onModeChange={selection ? (value) => setMode(value as InspectorMode) : undefined}
-            actions={selection ? <div className="flex items-center gap-2">{selectedFolder ? <><Button size="sm" variant="secondary" onClick={() => void renameFolder(selectedFolder.id)}>Переименовать</Button><Button size="sm" variant="danger" onClick={() => void deleteFolder(selectedFolder.id)}>Удалить</Button></> : null}{selectedFile ? <Button size="sm" variant="danger" onClick={() => void deleteFiles([selectedFile.id])}>Удалить</Button> : null}<Button size="sm" variant="ghost" onClick={() => { setSelection(null); setMode("overview"); }}>Очистить</Button></div> : undefined}
+            actions={selection ? <div className="flex flex-wrap items-center gap-2">{selectedFolder ? <><Button size="sm" variant="secondary" onClick={() => void renameFolder(selectedFolder.id)}>Переименовать</Button><Button size="sm" variant="danger" onClick={() => void deleteFolder(selectedFolder.id)}>Удалить</Button></> : null}{selectedFile ? <Button size="sm" variant="danger" onClick={() => void deleteFiles([selectedFile.id])}>Удалить</Button> : null}<Button size="sm" variant="ghost" onClick={() => { setSelection(null); setMode("overview"); }}>Очистить</Button></div> : undefined}
           >
             {bulkAccessOpen && selectedFileIds.length ? (<BulkAccessShell selectedCount={selectedFileIds.length} draft={bulkAccessDraft} groups={groups} staffGroups={staffGroups} clientGroups={clientGroups} templateStaffGroupId={templateStaffGroupId} templateClientGroupId={templateClientGroupId} onTemplateStaffGroupIdChange={setTemplateStaffGroupId} onTemplateClientGroupIdChange={setTemplateClientGroupId} onApplyTemplate={applyBulkTemplate} onSave={saveBulkAccessDraft} saving={detailsSaving} message={detailsMessage} />) : !selection ? (
               <EmptyInspector />
@@ -1265,11 +1340,11 @@ export function WebKbPageV2() {
 }
 function PageShellHeader(props: { onOpenOnboarding: () => void; onOpenInfo: () => void }) {
   return (
-    <div className="rounded-[24px] border border-slate-200/80 bg-[linear-gradient(180deg,#ffffff_0%,#fbfcfe_100%)] px-6 py-4 shadow-[0_8px_24px_rgba(15,23,42,0.04)]">
+    <div className="rounded-[24px] border border-slate-200/80 bg-white px-6 py-2 shadow-[0_8px_24px_rgba(15,23,42,0.04)]">
       <div className="flex items-start justify-between gap-6">
         <div className="min-w-0">
           <div className="text-[24px] font-bold leading-none tracking-tight text-slate-950">База знаний</div>
-          <div className="mt-2 flex items-center gap-2 text-sm text-slate-500">
+          <div className="mt-0.5 flex items-center gap-2 text-sm text-slate-500">
             <span>Папки задают доступ, файл наследует его по умолчанию.</span>
             <button type="button" onClick={props.onOpenInfo} className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:text-slate-700" aria-label="Открыть справку">
               <Info className="h-4 w-4" />
@@ -1282,20 +1357,71 @@ function PageShellHeader(props: { onOpenOnboarding: () => void; onOpenInfo: () =
   );
 }
 
-function LibraryRail(props: { rootSpace: RootSpace; onRootSpaceChange: (value: RootSpace) => void; folders: KbFolder[]; folderMap: Map<number, KbFolder>; childrenMap: Map<number | null, KbFolder[]>; expanded: Record<number, boolean>; selection: Selection; rootFilesMode: boolean; onToggle: (id: number) => void; onSelectFolder: (id: number) => void; onSelectRootFiles: () => void; onOpenUploadDialog: () => void; onCreateFolder: () => void; rootStats: Record<RootSpace, { fileCount: number; folderCount: number }>; rootFileCounts: Record<RootSpace, number>; }) {
+function LibraryRail(props: { rootSpace: RootSpace; expandedRootSpace: RootSpace | null; onRootSpaceChange: (value: RootSpace) => void; folders: KbFolder[]; folderMap: Map<number, KbFolder>; childrenMap: Map<number | null, KbFolder[]>; expanded: Record<number, boolean>; selection: Selection; rootFilesMode: boolean; onToggle: (id: number) => void; onSelectFolder: (id: number) => void; onSelectRootFiles: () => void; onOpenUploadDialog: () => void; onCreateFolder: () => void; rootStats: Record<RootSpace, { fileCount: number; folderCount: number }>; rootFileCounts: Record<RootSpace, number>; dragOverFolderId: number | null | undefined; onDragEnterFolder: (folderId: number | null) => void; onDragLeaveFolder: (folderId: number | null) => void; onDropToFolder: (folderId: number | null, event: DragEvent) => void; setActionMessage: (value: string) => void; draggedFileId: number | null; selectedFileIds: number[]; onRequestMoveFilesToFolder: (folderId: number | null, ids: number[]) => void; spaceRoots: { shared: KbFolder | null; departments: KbFolder | null; clients: KbFolder | null }; }) {
   const rootSections: Array<{ value: RootSpace; title: string; subtitle: string; accent: string }> = [
     { value: "all", title: "Все материалы", subtitle: "Полная библиотека аккаунта", accent: "bg-slate-900" },
     { value: "shared", title: "Общие", subtitle: "Материалы для сотрудников", accent: "bg-sky-500" },
     { value: "departments", title: "Отделы", subtitle: "Внутренние рабочие папки", accent: "bg-violet-500" },
     { value: "clients", title: "Клиенты", subtitle: "Клиентские материалы и группы", accent: "bg-emerald-500" },
   ];
+  const [activeBadgeHintFolderId, setActiveBadgeHintFolderId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (activeBadgeHintFolderId == null) return;
+    const close = () => setActiveBadgeHintFolderId(null);
+    const handlePointerDown = () => close();
+    const handleScroll = () => close();
+    const handleKeyDown = () => close();
+    document.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("scroll", handleScroll, true);
+    window.addEventListener("wheel", handleScroll, { passive: true });
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("scroll", handleScroll, true);
+      window.removeEventListener("wheel", handleScroll);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [activeBadgeHintFolderId]);
+
+  const resolveDraggedIds = (event: DragEvent) => {
+    const ids: number[] = [];
+    if (props.selectedFileIds.length) ids.push(...props.selectedFileIds);
+    else {
+      const payload = event.dataTransfer.getData("text/plain");
+      const parsed = Number(payload);
+      if (Number.isFinite(parsed)) ids.push(parsed);
+      else if (props.draggedFileId != null) ids.push(props.draggedFileId);
+    }
+    return ids;
+  };
+
+  const onDropToRootSpace = (space: RootSpace, event: DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setActiveBadgeHintFolderId(null);
+    const ids = resolveDraggedIds(event);
+    if (!ids.length) return;
+    if (space === "all") {
+      props.onRequestMoveFilesToFolder(null, ids);
+      return;
+    }
+    const rootFolder =
+      space === "shared"
+        ? props.spaceRoots.shared
+        : space === "departments"
+          ? props.spaceRoots.departments
+          : props.spaceRoots.clients;
+    if (!rootFolder) return;
+    props.onRequestMoveFilesToFolder(rootFolder.id, ids);
+  };
+
   return (
     <Panel tone="elevated">
       <PanelBody className="mt-0 space-y-4">
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Навигация</div>
-            <div className="mt-1 text-sm text-slate-500">Пространства и дерево папок.</div>
           </div>
           <Button size="sm" variant="secondary" onClick={props.onOpenUploadDialog}><Upload className="mr-2 h-4 w-4" /> Загрузить</Button>
         </div>
@@ -1303,14 +1429,34 @@ function LibraryRail(props: { rootSpace: RootSpace; onRootSpaceChange: (value: R
           <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Пространства</div>
           <div className="mt-3 space-y-2">
               {rootSections.map((section) => {
-                const active = props.rootSpace === section.value;
+                const active = props.expandedRootSpace === section.value;
                 const stats = props.rootStats[section.value];
-                const sectionFolders = section.value === "all" ? props.folders : props.folders.filter((folder) => rootSpaceForFolder(folder, props.folderMap) === section.value);
+                const sectionFolders =
+                  section.value === "all"
+                    ? props.folders.filter((folder) => folder.parent_id == null && !folder.is_space_root)
+                    : section.value === "shared"
+                      ? (props.spaceRoots.shared ? props.childrenMap.get(props.spaceRoots.shared.id) || [] : [])
+                      : section.value === "departments"
+                        ? (props.spaceRoots.departments ? props.childrenMap.get(props.spaceRoots.departments.id) || [] : [])
+                        : (props.spaceRoots.clients ? props.childrenMap.get(props.spaceRoots.clients.id) || [] : []);
+                const sectionDropFolderId =
+                  section.value === "all"
+                    ? null
+                    : section.value === "shared"
+                      ? props.spaceRoots.shared?.id ?? null
+                      : section.value === "departments"
+                        ? props.spaceRoots.departments?.id ?? null
+                        : props.spaceRoots.clients?.id ?? null;
+                const isSpaceDropTarget = props.dragOverFolderId === sectionDropFolderId;
                 return (
-                  <div key={section.value} className={`overflow-hidden rounded-[18px] border transition ${active ? "border-slate-300 bg-slate-50/70" : "border-slate-200 bg-white"}`}>
+                  <div key={section.value} className={`overflow-hidden rounded-[18px] border transition ${active ? "border-slate-300 bg-slate-50/70" : "border-slate-200 bg-white"} ${isSpaceDropTarget ? "ring-2 ring-sky-200 ring-offset-1" : ""}`}>
                     <button
                       type="button"
                       onClick={() => props.onRootSpaceChange(section.value)}
+                      onDragEnter={() => props.onDragEnterFolder(sectionDropFolderId)}
+                      onDragLeave={() => props.onDragLeaveFolder(sectionDropFolderId)}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => onDropToRootSpace(section.value, event)}
                       className="flex w-full items-start gap-3 px-4 py-3 text-left"
                     >
                       <span className={`mt-1 h-6 w-1.5 shrink-0 rounded-full ${section.accent}`} />
@@ -1336,16 +1482,20 @@ function LibraryRail(props: { rootSpace: RootSpace; onRootSpaceChange: (value: R
                         <button
                           type="button"
                           onClick={props.onSelectRootFiles}
-                          className={`mb-2 flex w-full items-center justify-between rounded-2xl border px-3 py-2.5 text-left transition ${props.rootFilesMode ? "border-sky-200 bg-sky-50 text-slate-900" : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"}`}
+                          onDragEnter={() => props.onDragEnterFolder(section.value === "all" ? null : (section.value === "shared" ? props.spaceRoots.shared?.id ?? null : section.value === "departments" ? props.spaceRoots.departments?.id ?? null : props.spaceRoots.clients?.id ?? null))}
+                          onDragLeave={() => props.onDragLeaveFolder(section.value === "all" ? null : (section.value === "shared" ? props.spaceRoots.shared?.id ?? null : section.value === "departments" ? props.spaceRoots.departments?.id ?? null : props.spaceRoots.clients?.id ?? null))}
+                          onDragOver={(event) => event.preventDefault()}
+                          onDrop={(event) => props.onDropToFolder(section.value === "all" ? null : (section.value === "shared" ? props.spaceRoots.shared?.id ?? null : section.value === "departments" ? props.spaceRoots.departments?.id ?? null : props.spaceRoots.clients?.id ?? null), event)}
+                          className={`mb-2 flex w-full items-center justify-between rounded-2xl border px-3 py-2.5 text-left transition ${props.rootFilesMode ? "border-sky-200 bg-sky-50 text-slate-900" : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"} ${props.dragOverFolderId === (section.value === "all" ? null : section.value === "shared" ? props.spaceRoots.shared?.id ?? null : section.value === "departments" ? props.spaceRoots.departments?.id ?? null : props.spaceRoots.clients?.id ?? null) ? "ring-2 ring-sky-200 ring-offset-1" : ""}`}
                         >
                           <span>
                             <span className="block text-sm font-medium">Без папки</span>
-                            <span className="mt-1 block text-xs text-slate-500">Материалы, которые лежат в корне базы знаний</span>
+                            <span className="mt-1 block text-xs text-slate-500">{section.value === "all" ? "Материалы, которые лежат в корне базы знаний" : `Материалы, которые лежат в корне пространства «${section.title}»`}</span>
                           </span>
                           <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600">{props.rootFileCounts[section.value]}</span>
                         </button>
                         <div className="space-y-2">
-                          {sectionFolders.length ? sectionFolders.map((folder) => <FolderNode key={folder.id} folder={folder} folderMap={props.folderMap} childrenMap={props.childrenMap} expanded={props.expanded} selection={props.selection} onToggle={props.onToggle} onSelectFolder={props.onSelectFolder} level={0} />) : <div className="rounded-[20px] border border-dashed border-slate-200 bg-slate-50 px-4 py-5 text-sm leading-6 text-slate-500">В этом пространстве пока нет папок.</div>}
+                          {sectionFolders.length ? sectionFolders.map((folder) => <FolderNode key={folder.id} folder={folder} folderMap={props.folderMap} childrenMap={props.childrenMap} expanded={props.expanded} selection={props.selection} onToggle={props.onToggle} onSelectFolder={props.onSelectFolder} level={0} dragOverFolderId={props.dragOverFolderId} onDragEnterFolder={props.onDragEnterFolder} onDragLeaveFolder={props.onDragLeaveFolder} onDropToFolder={props.onDropToFolder} activeBadgeHintFolderId={activeBadgeHintFolderId} onToggleBadgeHint={(folderId) => setActiveBadgeHintFolderId((current) => current === folderId ? null : folderId)} onCloseBadgeHint={() => setActiveBadgeHintFolderId(null)} />) : <div className="rounded-[20px] border border-dashed border-slate-200 bg-slate-50 px-4 py-5 text-sm leading-6 text-slate-500">В этом пространстве пока нет папок.</div>}
                         </div>
                       </div>
                     ) : null}
@@ -1359,11 +1509,11 @@ function LibraryRail(props: { rootSpace: RootSpace; onRootSpaceChange: (value: R
   );
 }
 
-function FolderNode(props: { folder: KbFolder; folderMap: Map<number, KbFolder>; childrenMap: Map<number | null, KbFolder[]>; expanded: Record<number, boolean>; selection: Selection; onToggle: (id: number) => void; onSelectFolder: (id: number) => void; level: number; }) {
+function FolderNode(props: { folder: KbFolder; folderMap: Map<number, KbFolder>; childrenMap: Map<number | null, KbFolder[]>; expanded: Record<number, boolean>; selection: Selection; onToggle: (id: number) => void; onSelectFolder: (id: number) => void; level: number; dragOverFolderId: number | null | undefined; onDragEnterFolder: (folderId: number | null) => void; onDragLeaveFolder: (folderId: number | null) => void; onDropToFolder: (folderId: number | null, event: DragEvent) => void; activeBadgeHintFolderId: number | null; onToggleBadgeHint: (folderId: number) => void; onCloseBadgeHint: () => void; }) {
   const children = props.childrenMap.get(props.folder.id) || [];
   const isExpanded = props.expanded[props.folder.id] ?? false;
   const selected = props.selection?.kind === "folder" && props.selection.id === props.folder.id;
-  const [showBadgeHint, setShowBadgeHint] = useState(false);
+  const showBadgeHint = props.activeBadgeHintFolderId === props.folder.id;
   return (
     <div className="space-y-2">
       <div
@@ -1376,11 +1526,15 @@ function FolderNode(props: { folder: KbFolder; folderMap: Map<number, KbFolder>;
             props.onSelectFolder(props.folder.id);
           }
         }}
+        onDragEnter={() => props.onDragEnterFolder(props.folder.id)}
+        onDragLeave={() => props.onDragLeaveFolder(props.folder.id)}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => props.onDropToFolder(props.folder.id, event)}
         className={`rounded-[18px] border transition ${
           selected
             ? "border-sky-200 bg-sky-50"
             : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
-        }`}
+        } ${props.dragOverFolderId === props.folder.id ? "ring-2 ring-sky-200 ring-offset-1" : ""}`}
         style={{ marginLeft: props.level * 12 }}
       >
         <div className="flex items-center gap-2 px-3 py-2.5">
@@ -1410,17 +1564,28 @@ function FolderNode(props: { folder: KbFolder; folderMap: Map<number, KbFolder>;
             selected={selected}
             onClick={(event) => {
               event.stopPropagation();
-              setShowBadgeHint((current) => !current);
+              props.onToggleBadgeHint(props.folder.id);
             }}
           />
           {showBadgeHint ? (
             <div className="absolute left-3 top-full z-10 mt-2 w-56 rounded-2xl border border-slate-200 bg-white px-3 py-3 text-left text-xs leading-5 text-slate-600 shadow-[0_10px_30px_rgba(15,23,42,0.12)]">
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  props.onCloseBadgeHint();
+                }}
+                className="absolute right-2 top-2 rounded-full border border-slate-200 p-1 text-slate-400 transition hover:border-slate-300 hover:text-slate-600"
+                aria-label="Закрыть подсказку"
+              >
+                <X className="h-3 w-3" />
+              </button>
               Бейдж показывает доступ клиентов к папке: `К: всем` — видно всем клиентам, `К: группам` — только клиентским группам, `К: закрыто` — бот не использует материалы из этой папки.
             </div>
           ) : null}
         </div>
       </div>
-      {children.length && isExpanded ? <div className="space-y-2">{children.map((child) => <FolderNode key={child.id} folder={child} folderMap={props.folderMap} childrenMap={props.childrenMap} expanded={props.expanded} selection={props.selection} onToggle={props.onToggle} onSelectFolder={props.onSelectFolder} level={props.level + 1} />)}</div> : null}
+      {children.length && isExpanded ? <div className="space-y-2">{children.map((child) => <FolderNode key={child.id} folder={child} folderMap={props.folderMap} childrenMap={props.childrenMap} expanded={props.expanded} selection={props.selection} onToggle={props.onToggle} onSelectFolder={props.onSelectFolder} level={props.level + 1} dragOverFolderId={props.dragOverFolderId} onDragEnterFolder={props.onDragEnterFolder} onDragLeaveFolder={props.onDragLeaveFolder} onDropToFolder={props.onDropToFolder} activeBadgeHintFolderId={props.activeBadgeHintFolderId} onToggleBadgeHint={props.onToggleBadgeHint} onCloseBadgeHint={props.onCloseBadgeHint} />)}</div> : null}
     </div>
   );
 }
@@ -1428,20 +1593,20 @@ function FolderNode(props: { folder: KbFolder; folderMap: Map<number, KbFolder>;
 function MaterialsHeader(props: { title: string; subtitle: string; loading: boolean; search: string; onSearchChange: (value: string) => void; typeFilter: string; onTypeFilterChange: (value: string) => void; statusFilter: string; onStatusFilterChange: (value: string) => void; visibilityFilter: string; onVisibilityFilterChange: (value: string) => void; ownerFilter: string; onOwnerFilterChange: (value: string) => void; ownerOptions: string[]; typeOptions: string[]; viewMode: ViewMode; onViewModeChange: (value: ViewMode) => void; }) {
   return (
     <Panel tone="elevated">
-      <PanelBody className="mt-0 space-y-4">
+      <PanelBody className="mt-0 space-y-3">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Текущее пространство</div>
-            <div className="mt-2 text-[28px] font-semibold leading-none tracking-tight text-slate-950">{props.title}</div>
-            <div className="mt-2 text-sm leading-6 text-slate-500">{props.subtitle}</div>
+            <div className="mt-1.5 text-[24px] font-semibold leading-none tracking-tight text-slate-950">{props.title}</div>
+            <div className="mt-1 text-sm leading-6 text-slate-500">{props.subtitle}</div>
           </div>
           <div className="flex items-center gap-1 rounded-2xl border border-slate-200 bg-slate-50 p-1">
             <button type="button" onClick={() => props.onViewModeChange("list")} className={`rounded-xl px-3 py-2 text-sm ${props.viewMode === "list" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500"}`}>Список</button>
             <button type="button" onClick={() => props.onViewModeChange("compact")} className={`rounded-xl px-3 py-2 text-sm ${props.viewMode === "compact" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500"}`}>Компактно</button>
           </div>
         </div>
-        <div className="space-y-3">
-          <div className="flex min-w-0 items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-2.5">
+        <div className="space-y-2.5">
+          <div className="flex min-w-0 items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-2">
             <Search className="h-4 w-4 text-slate-400" />
             <input value={props.search} onChange={(event) => props.onSearchChange(event.target.value)} placeholder="Поиск материалов, владельцев и папок" className="w-full bg-transparent text-sm text-slate-700 outline-none placeholder:text-slate-400" />
             {props.loading ? <span className="text-xs text-slate-400">Загрузка...</span> : null}
@@ -1458,41 +1623,38 @@ function MaterialsHeader(props: { title: string; subtitle: string; loading: bool
   );
 }
 
-function CoverageStrip(props: { summary: KbAccessSummary }) {
-  return (
-    <div className="grid gap-2 xl:grid-cols-4">
-      <MetricCard title="Готово" value={props.summary.total_ready_files} description="ready" tone="neutral" compact />
-      <MetricCard title="Клиентам" value={props.summary.open_all_clients} description="Всем клиентам" tone="emerald" compact />
-      <MetricCard title="Группам" value={props.summary.open_client_groups} description="Только группам" tone="sky" compact />
-      <MetricCard title="Закрыто" value={props.summary.closed_for_clients} description="Не попадут в бот" tone="rose" compact />
-    </div>
-  );
-}
-function MaterialsList(props: { files: KbFile[]; folderMap: Map<number, KbFolder>; viewMode: ViewMode; loading: boolean; selectedFileId: number | null; selectedFileIds: number[]; onSelectFile: (id: number) => void; onToggleSelectedFile: (id: number) => void; onPreviewFile: (id: number) => void; }) {
+function MaterialsList(props: { files: KbFile[]; folderMap: Map<number, KbFolder>; folders: KbFolder[]; spaceRoots: { shared: KbFolder | null; departments: KbFolder | null; clients: KbFolder | null }; viewMode: ViewMode; loading: boolean; selectedFileId: number | null; selectedFileIds: number[]; onSelectFile: (id: number) => void; onToggleSelectedFile: (id: number) => void; onToggleSelectAll: () => void; onOpenBulkAccess: () => void; onBulkMove: (value: string) => void; onBulkDelete: () => void; onClearSelection: () => void; onPreviewFile: (id: number) => void; onDragStartFile: (id: number) => void; onDragEndFile: () => void; }) {
+  const allSelected = !!props.files.length && props.files.every((file) => props.selectedFileIds.includes(file.id));
+  const moveOptions = [
+    { value: "", label: "Переместить" },
+    { value: "root", label: "В корень базы знаний" },
+    ...(props.spaceRoots.shared ? [{ value: String(props.spaceRoots.shared.id), label: "В пространство «Общие»" }] : []),
+    ...(props.spaceRoots.departments ? [{ value: String(props.spaceRoots.departments.id), label: "В пространство «Отделы»" }] : []),
+    ...(props.spaceRoots.clients ? [{ value: String(props.spaceRoots.clients.id), label: "В пространство «Клиенты»" }] : []),
+    ...props.folders.map((folder) => ({ value: String(folder.id), label: buildFolderPath(folder.id, props.folderMap) })),
+  ];
   return (
     <Panel tone="elevated">
-      <PanelHeader title="Материалы" subtitle="Доступ и наследование видны сразу в списке." actions={<div className="text-xs text-slate-400">Выбор открывает массовые действия</div>} />
+      <PanelHeader title="Материалы" subtitle="Доступ и наследование видны сразу в списке." />
       <PanelBody>
-        {props.loading ? <div className="rounded-[24px] border border-dashed border-slate-200 bg-slate-50 px-6 py-12 text-center"><div className="text-sm font-medium text-slate-700">Загружаю материалы</div><div className="mt-2 text-sm text-slate-500">Подтягиваю папки, доступы и покрытие клиентского бота.</div></div> : props.files.length === 0 ? <div className="rounded-[24px] border border-dashed border-slate-200 bg-slate-50 px-6 py-12 text-center"><div className="text-sm font-medium text-slate-700">Материалов пока нет</div><div className="mt-2 text-sm text-slate-500">Загрузи файлы или создай папку, чтобы собрать новую структуру базы знаний.</div></div> : <div className="divide-y divide-slate-100 overflow-hidden rounded-2xl border border-slate-200 bg-white">{props.files.map((file) => props.viewMode === "compact" ? <div key={file.id} className={`transition ${props.selectedFileId === file.id ? "bg-sky-50" : "bg-white hover:bg-slate-50"}`}><div className="flex items-center gap-3 px-4 py-3"><input type="checkbox" checked={props.selectedFileIds.includes(file.id)} onChange={() => props.onToggleSelectedFile(file.id)} className="h-4 w-4 rounded border-slate-300" /><button type="button" onClick={() => props.onSelectFile(file.id)} className="grid min-w-0 flex-1 grid-cols-[minmax(0,1.8fr)_auto] items-center gap-3 text-left"><div className="min-w-0"><div className="truncate text-sm font-semibold text-slate-900">{file.filename}</div><div className="mt-0.5 truncate text-xs text-slate-500">{buildFolderPath(file.folder_id ?? null, props.folderMap)} · {file.uploaded_by_name || "Не указан"}</div></div><div className="flex items-center gap-2"><Badge tone={statusTone(file.status)}>{statusLabel(file.status)}</Badge>{renderVisibilityChip(file)}</div></button><button type="button" onClick={() => props.onPreviewFile(file.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 text-slate-500 transition hover:border-slate-300 hover:text-slate-700" aria-label="Открыть предпросмотр файла"><Eye className="h-4 w-4" /></button></div></div> : <div key={file.id} className={`transition ${props.selectedFileId === file.id ? "bg-sky-50/60" : "bg-white hover:bg-slate-50"}`}><div className="flex items-start gap-3 px-4 py-3"><input type="checkbox" checked={props.selectedFileIds.includes(file.id)} onChange={() => props.onToggleSelectedFile(file.id)} className="mt-1 h-4 w-4 rounded border-slate-300" /><button type="button" onClick={() => props.onSelectFile(file.id)} className="grid min-w-0 flex-1 grid-cols-[minmax(0,1.8fr)_auto] items-start gap-4 text-left"><div className="min-w-0"><div className="truncate text-[15px] font-semibold text-slate-900">{file.filename}</div><div className="mt-1 truncate text-sm text-slate-500">{buildFolderPath(file.folder_id ?? null, props.folderMap)}</div><div className="mt-2 text-xs text-slate-400">{fileTypeLabel(file)} · {file.uploaded_by_name || "Не указан"}{typeof file.query_count === "number" ? ` · ${file.query_count} запросов` : ""}</div></div><div className="flex flex-wrap items-center justify-end gap-2"><Badge tone={statusTone(file.status)}>{statusLabel(file.status)}</Badge>{renderVisibilityChip(file)}<span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-500">{hasExplicitFileRules(file) ? "Исключение" : "Наследует"}</span></div></button><button type="button" onClick={() => props.onPreviewFile(file.id)} className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 text-slate-500 transition hover:border-slate-300 hover:text-slate-700" aria-label="Открыть предпросмотр файла"><Eye className="h-4 w-4" /></button></div></div>)}</div>}
-      </PanelBody>
-    </Panel>
-  );
-}
-
-function BulkActionBar(props: { selectedCount: number; folders: KbFolder[]; folderMap: Map<number, KbFolder>; onOpenAccess: () => void; onMove: (value: string) => void; onDelete: () => void; onClear: () => void }) {
-  return (
-    <Panel tone="elevated" className="border-sky-200 bg-sky-50/60">
-      <PanelBody className="mt-0 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-sky-700">Массовые действия</div>
-          <div className="mt-1 text-sm font-medium text-slate-900">Выбрано файлов: {props.selectedCount}</div>
+        <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5">
+          <div className="flex min-h-[40px] items-center gap-3">
+          <label className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap text-sm font-medium text-slate-700">
+            <input type="checkbox" checked={allSelected} onChange={props.onToggleSelectAll} className="h-4 w-4 rounded border-slate-300 accent-sky-600" />
+            Выбрать все
+          </label>
+          {props.selectedFileIds.length > 0 ? (
+            <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+              <span className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-1 text-sm font-medium text-slate-700">Выбрано: {props.selectedFileIds.length}</span>
+              <SelectBox className="min-w-[220px]" value="" onChange={(value) => { if (value) props.onBulkMove(value); }} options={moveOptions} />
+              <Button size="sm" variant="danger" onClick={props.onBulkDelete}>Удалить</Button>
+            </div>
+          ) : (
+            <div className="min-w-0 flex-1 text-right text-sm text-slate-400">Выбери материалы чекбоксами, чтобы открыть массовые действия.</div>
+          )}
+          </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant="secondary" onClick={props.onOpenAccess}>Доступ</Button>
-          <SelectBox className="min-w-[240px]" value="" onChange={(value) => { if (value) props.onMove(value); }} options={[{ value: "", label: "Переместить..." }, { value: "root", label: "В корень базы знаний" }, ...props.folders.map((folder) => ({ value: String(folder.id), label: buildFolderPath(folder.id, props.folderMap) }))]} />
-          <Button size="sm" variant="danger" onClick={props.onDelete}>Удалить</Button>
-          <Button size="sm" variant="ghost" onClick={props.onClear}>Снять выбор</Button>
-        </div>
+        {props.loading ? <div className="rounded-[24px] border border-dashed border-slate-200 bg-slate-50 px-6 py-12 text-center"><div className="text-sm font-medium text-slate-700">Загружаю материалы</div><div className="mt-2 text-sm text-slate-500">Подтягиваю папки, доступы и покрытие клиентского бота.</div></div> : props.files.length === 0 ? <div className="rounded-[24px] border border-dashed border-slate-200 bg-slate-50 px-6 py-12 text-center"><div className="text-sm font-medium text-slate-700">Материалов пока нет</div><div className="mt-2 text-sm text-slate-500">Загрузи файлы или создай папку, чтобы собрать новую структуру базы знаний.</div></div> : <div className="divide-y divide-slate-100 overflow-hidden rounded-2xl border border-slate-200 bg-white">{props.files.map((file) => props.viewMode === "compact" ? <div key={file.id} draggable onDragStart={(event) => { props.onDragStartFile(file.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(file.id)); }} onDragEnd={props.onDragEndFile} className={`transition ${props.selectedFileId === file.id ? "bg-sky-50" : "bg-white hover:bg-slate-50"}`}><div className="flex items-center gap-3 px-4 py-3"><input type="checkbox" checked={props.selectedFileIds.includes(file.id)} onChange={() => props.onToggleSelectedFile(file.id)} className="h-4 w-4 rounded border-slate-300 accent-sky-600" /><button type="button" onClick={() => props.onSelectFile(file.id)} className="grid min-w-0 flex-1 grid-cols-[minmax(0,1.8fr)_auto] items-center gap-3 text-left"><div className="min-w-0"><div className="truncate text-sm font-semibold text-slate-900">{file.filename}</div><div className="mt-0.5 truncate text-xs text-slate-500">{buildFolderPath(file.folder_id ?? null, props.folderMap)} · {file.uploaded_by_name || "Не указан"}</div></div><div className="flex items-center gap-2"><Badge tone={statusTone(file.status)}>{statusLabel(file.status)}</Badge>{renderVisibilityChip(file)}</div></button><button type="button" onClick={() => props.onPreviewFile(file.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 text-slate-500 transition hover:border-slate-300 hover:text-slate-700" aria-label="Открыть предпросмотр файла"><Eye className="h-4 w-4" /></button></div></div> : <div key={file.id} draggable onDragStart={(event) => { props.onDragStartFile(file.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(file.id)); }} onDragEnd={props.onDragEndFile} className={`transition ${props.selectedFileId === file.id ? "bg-sky-50/60" : "bg-white hover:bg-slate-50"}`}><div className="flex items-start gap-3 px-4 py-3"><input type="checkbox" checked={props.selectedFileIds.includes(file.id)} onChange={() => props.onToggleSelectedFile(file.id)} className="mt-1 h-4 w-4 rounded border-slate-300 accent-sky-600" /><button type="button" onClick={() => props.onSelectFile(file.id)} className="grid min-w-0 flex-1 grid-cols-[minmax(0,1.8fr)_auto] items-start gap-4 text-left"><div className="min-w-0"><div className="truncate text-[15px] font-semibold text-slate-900">{file.filename}</div><div className="mt-1 truncate text-sm text-slate-500">{buildFolderPath(file.folder_id ?? null, props.folderMap)}</div><div className="mt-2 text-xs text-slate-400">{fileTypeLabel(file)} · {file.uploaded_by_name || "Не указан"}{typeof file.query_count === "number" ? ` · ${file.query_count} запросов` : ""}</div></div><div className="flex flex-wrap items-center justify-end gap-2"><Badge tone={statusTone(file.status)}>{statusLabel(file.status)}</Badge>{renderVisibilityChip(file)}<span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-500">{hasExplicitFileRules(file) ? "Исключение" : "Наследует"}</span></div></button><button type="button" onClick={() => props.onPreviewFile(file.id)} className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 text-slate-500 transition hover:border-slate-300 hover:text-slate-700" aria-label="Открыть предпросмотр файла"><Eye className="h-4 w-4" /></button></div></div>)}</div>}
       </PanelBody>
     </Panel>
   );
@@ -1730,19 +1892,6 @@ function MiniStat(props: { title: string; value: number }) {
   return <div className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3"><div className="text-[11px] uppercase tracking-[0.12em] text-slate-400">{props.title}</div><div className="mt-2 text-xl font-semibold text-slate-950">{props.value}</div></div>;
 }
 
-function MetricCard(props: { title: string; value: number; description: string; tone: "neutral" | "emerald" | "sky" | "rose"; compact?: boolean }) {
-  const toneClass = { neutral: "border-slate-200 bg-white", emerald: "border-emerald-200 bg-emerald-50/60", sky: "border-sky-200 bg-sky-50/60", rose: "border-rose-200 bg-rose-50/60" }[props.tone];
-  return (
-    <Panel tone="elevated" className={toneClass} padding={props.compact ? "sm" : "md"}>
-      <PanelBody className="mt-0">
-        <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">{props.title}</div>
-        <div className={props.compact ? "mt-2 text-[30px] font-semibold leading-none text-slate-950" : "mt-3 text-[40px] font-semibold leading-none text-slate-950"}>{props.value}</div>
-        <div className={props.compact ? "mt-2 text-xs text-slate-500" : "mt-3 text-sm text-slate-500"}>{props.description}</div>
-      </PanelBody>
-    </Panel>
-  );
-}
-
 function SelectBox(props: { value: string; onChange: (value: string) => void; options: Array<{ value: string; label: string }>; className?: string }) {
   return <select value={props.value} onChange={(event) => props.onChange(event.target.value)} className={`min-w-[132px] rounded-2xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-700 outline-none transition hover:border-slate-300 ${props.className || ""}`}>{props.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
 }
@@ -1973,10 +2122,10 @@ function PreviewDialog(props: { file: KbFile | null; inlineUrl: string | null; d
   const externalEmbedUrl = buildExternalEmbedUrl(props.file.source_url);
   const officeSrc = buildOfficeViewerUrl(baseSrc);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-6">
-      <div className="flex h-[85vh] w-[92vw] max-w-6xl flex-col rounded-2xl bg-white shadow-2xl">
-        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-          <div className="truncate text-sm font-semibold text-slate-900">{props.file.filename}</div>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-6" onClick={props.onClose}>
+      <div className="flex h-[85vh] w-[92vw] max-w-6xl flex-col rounded-2xl bg-white shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+          <div className="min-w-0 truncate text-sm font-semibold text-slate-900">{props.file.filename}</div>
           <div className="flex items-center gap-2">
             {props.downloadUrl ? <a className="rounded-lg border border-slate-200 px-3 py-1 text-sm text-slate-700" href={props.downloadUrl} target="_blank" rel="noreferrer">Скачать</a> : null}
             <button className="rounded-lg border border-slate-200 px-3 py-1 text-sm" onClick={props.onClose}>Закрыть</button>

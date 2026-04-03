@@ -485,6 +485,95 @@ def _account_scoped_kb_folder(db: Session, portal_id: int, folder_id: int) -> KB
     return db.execute(select(KBFolder).where(KBFolder.id == int(folder_id), KBFolder.portal_id.in_(scope_portal_ids))).scalar_one_or_none()
 
 
+def _ensure_kb_root_folders(db: Session, portal_id: int) -> dict[str, KBFolder]:
+    portal = db.get(Portal, int(portal_id))
+    owner_portal_id = _kb_storage_portal_id(db, portal_id)
+    if portal and portal.account_id:
+        scope_filter = sa.or_(
+            KBFolder.account_id == int(portal.account_id),
+            sa.and_(KBFolder.account_id.is_(None), KBFolder.portal_id.in_(_account_scope_portal_ids(db, portal_id))),
+        )
+    else:
+        scope_filter = KBFolder.portal_id.in_(_account_scope_portal_ids(db, portal_id))
+
+    rows = db.execute(
+        select(KBFolder)
+        .where(scope_filter)
+        .where(KBFolder.parent_id.is_(None))
+        .order_by(KBFolder.id.asc())
+    ).scalars().all()
+
+    by_space: dict[str, KBFolder] = {}
+    for row in rows:
+        space = str(row.root_space or "").strip().lower()
+        if space in KB_ROOT_SPACE_LABELS and space not in by_space:
+            by_space[space] = row
+
+    def _matches_root_name(folder_name: str, space: str) -> bool:
+        value = str(folder_name or "").strip().lower()
+        if not value:
+            return False
+        if space == "shared":
+            return "общ" in value or "shared" in value
+        if space == "departments":
+            return "отдел" in value or "department" in value
+        if space == "clients":
+            return "клиент" in value or "client" in value
+        return False
+
+    changed = False
+    for space in KB_ROOT_SPACE_LABELS:
+        if space in by_space:
+            continue
+        for row in rows:
+            if row.root_space:
+                continue
+            if _matches_root_name(row.name, space):
+                row.root_space = space
+                row.updated_at = datetime.utcnow()
+                db.add(row)
+                by_space[space] = row
+                changed = True
+                break
+
+    for space, label in KB_ROOT_SPACE_LABELS.items():
+        if space in by_space:
+            continue
+        rec = KBFolder(
+            account_id=int(portal.account_id) if portal and portal.account_id else None,
+            portal_id=owner_portal_id,
+            parent_id=None,
+            root_space=space,
+            name=label,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        db.add(rec)
+        db.flush()
+        by_space[space] = rec
+        changed = True
+    if changed:
+        db.commit()
+    return by_space
+
+
+def _kb_folder_root_space(folder: KBFolder, folder_map: dict[int, KBFolder]) -> str | None:
+    current = folder
+    visited: set[int] = set()
+    while current and int(current.id) not in visited:
+        visited.add(int(current.id))
+        space = str(current.root_space or "").strip().lower()
+        if space in KB_ROOT_SPACE_LABELS:
+            return space
+        if current.parent_id is None:
+            return None
+        parent = folder_map.get(int(current.parent_id))
+        if not parent:
+            return None
+        current = parent
+    return None
+
+
 def _acl_items_payload(rows: list[Any]) -> list[dict[str, str]]:
     return [
         {
@@ -1504,6 +1593,13 @@ class FolderBody(BaseModel):
 
 class FileFolderBody(BaseModel):
     folder_id: int | None = None
+
+
+KB_ROOT_SPACE_LABELS = {
+    "shared": "Общие",
+    "departments": "Отделы",
+    "clients": "Клиенты",
+}
 
 
 class ACLItemBody(BaseModel):
@@ -3769,6 +3865,7 @@ async def list_kb_folders(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    _ensure_kb_root_folders(db, portal_id)
     portal = db.get(Portal, int(portal_id))
     scope_portal_ids = _account_scope_portal_ids(db, portal_id)
     if portal and portal.account_id:
@@ -3786,6 +3883,7 @@ async def list_kb_folders(
         rows = db.execute(
             select(KBFolder).where(KBFolder.portal_id.in_(scope_portal_ids)).order_by(KBFolder.parent_id.asc().nullsfirst(), KBFolder.id.asc())
         ).scalars().all()
+    folder_map = {int(row.id): row for row in rows}
     return JSONResponse(
         {
             "items": [
@@ -3793,6 +3891,8 @@ async def list_kb_folders(
                     "id": row.id,
                     "name": row.name,
                     "parent_id": row.parent_id,
+                    "root_space": _kb_folder_root_space(row, folder_map),
+                    "is_space_root": bool(str(row.root_space or "").strip().lower() in KB_ROOT_SPACE_LABELS),
                     "access_badges": _kb_folder_access_badges(db, int(row.id)),
                     "created_at": row.created_at.isoformat() if row.created_at else None,
                 }
@@ -3813,6 +3913,7 @@ async def create_kb_folder(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    _ensure_kb_root_folders(db, portal_id)
     name = (body.name or "").strip()
     if not name:
         return _err(request, "missing_name", "missing_name", 400)
@@ -3827,6 +3928,7 @@ async def create_kb_folder(
         account_id=int(portal.account_id) if portal and portal.account_id else None,
         portal_id=owner_portal_id,
         parent_id=parent.id if parent else None,
+        root_space=None,
         name=name[:128],
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
@@ -3834,7 +3936,8 @@ async def create_kb_folder(
     db.add(rec)
     db.commit()
     db.refresh(rec)
-    return JSONResponse({"id": rec.id, "name": rec.name, "parent_id": rec.parent_id})
+    root_space = _kb_folder_root_space(rec, {int(rec.id): rec, **({int(parent.id): parent} if parent else {})})
+    return JSONResponse({"id": rec.id, "name": rec.name, "parent_id": rec.parent_id, "root_space": root_space, "is_space_root": False})
 
 
 @router.patch("/portals/{portal_id}/kb/folders/{folder_id}")
@@ -3849,9 +3952,17 @@ async def update_kb_folder(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    _ensure_kb_root_folders(db, portal_id)
     rec = _account_scoped_kb_folder(db, portal_id, folder_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
+    if str(rec.root_space or "").strip().lower() in KB_ROOT_SPACE_LABELS:
+        if body.parent_id is not None:
+            return _err(request, "space_root_locked", "space_root_locked", 409)
+        name = (body.name or "").strip()
+        if name and name[:128] != rec.name:
+            return _err(request, "space_root_locked", "space_root_locked", 409)
+        return JSONResponse({"status": "ok"})
     name = (body.name or "").strip()
     if name:
         rec.name = name[:128]
@@ -3882,9 +3993,12 @@ async def delete_kb_folder(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    _ensure_kb_root_folders(db, portal_id)
     rec = _account_scoped_kb_folder(db, portal_id, folder_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
+    if str(rec.root_space or "").strip().lower() in KB_ROOT_SPACE_LABELS:
+        return _err(request, "space_root_locked", "space_root_locked", 409)
     has_children = db.execute(select(KBFolder.id).where(KBFolder.parent_id == rec.id).limit(1)).scalar_one_or_none()
     has_files = db.execute(select(KBFile.id).where(KBFile.folder_id == rec.id).limit(1)).scalar_one_or_none()
     if has_children or has_files:
@@ -3977,6 +4091,7 @@ async def get_kb_file_access(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    _ensure_kb_root_folders(db, portal_id)
     rec = _account_scoped_file(db, portal_id, file_id)
     if not rec:
         return _err(request, "not_found", "not_found", 404)

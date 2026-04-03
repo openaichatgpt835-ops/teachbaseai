@@ -163,6 +163,7 @@ class KBFolder(Base):
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True, index=True)
     portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
     parent_id = Column(Integer, ForeignKey("kb_folders.id"), nullable=True, index=True)
+    root_space = Column(String(32), nullable=True, index=True)
     name = Column(String(128), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

@@ -235,7 +235,7 @@ export function WebLayout() {
 
       <div className="ml-64">
         <header className="sticky top-0 z-10 bg-white/90 backdrop-blur border-b border-slate-100">
-          <div className="w-full px-8 py-4 flex items-center justify-between">
+          <div className="w-full px-8 py-2 flex items-center justify-between">
             <div className="text-sm text-slate-500">{LABELS.webCabinet}</div>
             <div className="flex items-center gap-3">
               {accounts.length > 0 && (
@@ -273,7 +273,7 @@ export function WebLayout() {
             </div>
           </div>
         </header>
-        <main className="w-full px-8 py-8">
+        <main className="w-full px-8 py-1">
           <Outlet />
         </main>
       </div>
