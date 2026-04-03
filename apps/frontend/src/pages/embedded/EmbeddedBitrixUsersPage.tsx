@@ -33,11 +33,15 @@ const LABELS = {
   employee: "\u0421\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a",
   empty: "\u0421\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0438 Bitrix24 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b.",
   selected: "\u0420\u0430\u0437\u0440\u0435\u0448\u0451\u043d \u0434\u043e\u0441\u0442\u0443\u043f",
+  total: "\u0412\u0441\u0435\u0433\u043e \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u043e\u0432",
   users: "\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0435\u0439",
+  note:
+    "\u0414\u043e\u0441\u0442\u0443\u043f \u0440\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442 \u043f\u043e\u0438\u0441\u043a \u0438 \u043e\u0442\u0432\u0435\u0442\u044b \u043f\u043e \u0431\u0430\u0437\u0435 \u0437\u043d\u0430\u043d\u0438\u0439 \u0438\u0437 \u0442\u0435\u043a\u0443\u0449\u0435\u0433\u043e Bitrix24-\u043f\u043e\u0440\u0442\u0430\u043b\u0430.",
   loadUsersError: "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u043e\u0432 Bitrix24.",
   loadAccessError: "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u0442\u0435\u043a\u0443\u0449\u0438\u0439 \u0434\u043e\u0441\u0442\u0443\u043f Bitrix24.",
   saveError: "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0434\u043e\u0441\u0442\u0443\u043f Bitrix24.",
   saveOk: "\u0414\u043e\u0441\u0442\u0443\u043f \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d.",
+  loading: "\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430 \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u043e\u0432...",
   noEmail: "\u2014",
   enabled: "\u0420\u0430\u0437\u0440\u0435\u0448\u0451\u043d",
   disabled: "\u041e\u0442\u043a\u043b\u044e\u0447\u0451\u043d",
@@ -55,12 +59,14 @@ export function EmbeddedBitrixUsersPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const [messageTone, setMessageTone] = useState<"info" | "error" | "success">("info");
   const [query, setQuery] = useState("");
 
   const load = async () => {
     if (!ctx?.portalId) return;
     setLoading(true);
     setMessage("");
+    setMessageTone("info");
     try {
       const [usersRes, accessRes] = await Promise.all([
         fetchPortal(`/api/v1/bitrix/users?portal_id=${ctx.portalId}&start=0&limit=200`),
@@ -70,10 +76,12 @@ export function EmbeddedBitrixUsersPage() {
       const accessData = await accessRes.json().catch(() => null);
 
       if (!usersRes.ok) {
+        setMessageTone("error");
         setMessage(usersData?.detail || usersData?.error || LABELS.loadUsersError);
         return;
       }
       if (!accessRes.ok) {
+        setMessageTone("error");
         setMessage(accessData?.detail || accessData?.error || LABELS.loadAccessError);
         return;
       }
@@ -133,6 +141,7 @@ export function EmbeddedBitrixUsersPage() {
     if (!ctx?.portalId || !ctx?.isPortalAdmin) return;
     setSaving(true);
     setMessage("");
+    setMessageTone("info");
     try {
       const items = selectedUsers.map((id) => ({
         user_id: id,
@@ -145,9 +154,11 @@ export function EmbeddedBitrixUsersPage() {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
+        setMessageTone("error");
         setMessage(data?.detail || data?.error || LABELS.saveError);
         return;
       }
+      setMessageTone("success");
       setMessage(LABELS.saveOk);
       await load();
     } finally {
@@ -161,6 +172,9 @@ export function EmbeddedBitrixUsersPage() {
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">{LABELS.title}</h1>
           <p className="mt-1 text-sm text-slate-500">{LABELS.subtitle}</p>
+        </div>
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+          {LABELS.note}
         </div>
         <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
           {LABELS.adminOnly}
@@ -176,10 +190,19 @@ export function EmbeddedBitrixUsersPage() {
         <p className="mt-1 text-sm text-slate-500">{LABELS.subtitle}</p>
       </div>
 
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+        {LABELS.note}
+      </div>
+
       <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-sm text-slate-600">
-            {LABELS.selected}: <span className="font-semibold text-slate-900">{selectedUsers.length}</span> {LABELS.users}
+          <div className="flex flex-wrap items-center gap-4 text-sm text-slate-600">
+            <div>
+              {LABELS.selected}: <span className="font-semibold text-slate-900">{selectedUsers.length}</span> {LABELS.users}
+            </div>
+            <div>
+              {LABELS.total}: <span className="font-semibold text-slate-900">{users.length}</span>
+            </div>
           </div>
           <div className="flex items-center gap-3">
             <button
@@ -210,7 +233,19 @@ export function EmbeddedBitrixUsersPage() {
           />
         </div>
 
-        {message && <div className="mt-3 text-sm text-slate-600">{message}</div>}
+        {message && (
+          <div
+            className={`mt-3 rounded-xl px-3 py-2 text-sm ${
+              messageTone === "error"
+                ? "border border-rose-200 bg-rose-50 text-rose-700"
+                : messageTone === "success"
+                  ? "border border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : "border border-slate-200 bg-slate-50 text-slate-600"
+            }`}
+          >
+            {message}
+          </div>
+        )}
 
         <div className="mt-4 overflow-auto rounded-xl border border-slate-100">
           <table className="min-w-full text-sm">
@@ -222,6 +257,13 @@ export function EmbeddedBitrixUsersPage() {
               </tr>
             </thead>
             <tbody>
+              {loading && (
+                <tr>
+                  <td className="px-3 py-3 text-slate-500" colSpan={3}>
+                    {LABELS.loading}
+                  </td>
+                </tr>
+              )}
               {!loading && filteredUsers.length === 0 && (
                 <tr>
                   <td className="px-3 py-3 text-slate-500" colSpan={3}>

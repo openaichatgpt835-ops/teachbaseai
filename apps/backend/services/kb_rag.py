@@ -2188,7 +2188,7 @@ def _append_lexical_recall_rows(
     if ids:
         q = q.where(KBFile.id.in_(ids))
     else:
-        q = q.where(KBChunk.portal_id == portal_id)
+        q = q.where(KBFile.portal_id == portal_id)
     rows = db.execute(q).all()
     for text, chunk_index, start_ms, end_ms, page_num, chunk_id, file_id, filename, mime_type, source_type, source_url, source_title in rows:
         txt = str(text or "")
@@ -2995,7 +2995,7 @@ def answer_from_kb(
         if scoped_ids:
             base_query = base_query.where(KBFile.id.in_(scoped_ids))
         else:
-            base_query = base_query.where(KBChunk.portal_id == portal_id)
+            base_query = base_query.where(KBFile.portal_id == portal_id)
         rows = db.execute(
             base_query.where(KBEmbedding.model == embed_model)
         ).all()

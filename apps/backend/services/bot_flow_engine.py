@@ -190,6 +190,7 @@ def _execute_flow(
     preview: bool = False,
     state_override: dict[str, Any] | None = None,
     collect_trace: bool = False,
+    file_ids_filter: list[int] | None = None,
 ) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
     nodes = flow.get("nodes") or []
     edges = flow.get("edges") or []
@@ -316,6 +317,7 @@ def _execute_flow(
                 audience="client",
                 system_prompt_extra_override=extra if extra else None,
                 model_overrides=config.get("model_override") or None,
+                file_ids_filter=file_ids_filter,
             )
             if answer:
                 if extra:
@@ -398,9 +400,19 @@ def execute_client_flow(
     portal_id: int,
     dialog_id: int,
     user_text: str,
+    *,
+    file_ids_filter: list[int] | None = None,
 ) -> str:
     flow = _get_flow(db, portal_id, "client")
-    text, _state, _trace = _execute_flow(db, portal_id, dialog_id, user_text, flow=flow, preview=False)
+    text, _state, _trace = _execute_flow(
+        db,
+        portal_id,
+        dialog_id,
+        user_text,
+        flow=flow,
+        preview=False,
+        file_ids_filter=file_ids_filter,
+    )
     return text
 
 

@@ -91,6 +91,7 @@ def recover_stuck_kb_jobs_once(
             file_rec.error_message = None
             db.add(file_rec)
             new_job = KBJob(
+                account_id=file_rec.account_id,
                 portal_id=file_rec.portal_id,
                 job_type="ingest",
                 status="queued",
@@ -117,6 +118,7 @@ def recover_stuck_kb_jobs_once(
             file_rec.error_message = None
             db.add(file_rec)
             new_job = KBJob(
+                account_id=file_rec.account_id,
                 portal_id=file_rec.portal_id,
                 job_type="ingest",
                 status="queued",
@@ -143,6 +145,7 @@ def recover_stuck_kb_jobs_once(
             file_rec.error_message = None
             db.add(file_rec)
             new_job = KBJob(
+                account_id=file_rec.account_id,
                 portal_id=file_rec.portal_id,
                 job_type="ingest",
                 status="queued",

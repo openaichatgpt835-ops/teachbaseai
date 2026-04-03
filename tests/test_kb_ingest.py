@@ -54,6 +54,7 @@ def test_ingest_csv_creates_chunks_and_embeddings(tmp_path, test_db_session, mon
     monkeypatch.setattr("apps.backend.services.kb_ingest.create_embeddings", fake_create_embeddings)
 
     rec = KBFile(
+        account_id=42,
         portal_id=1,
         filename="test.csv",
         mime_type="text/csv",
@@ -70,3 +71,6 @@ def test_ingest_csv_creates_chunks_and_embeddings(tmp_path, test_db_session, mon
     assert res.get("ok") is True
     assert test_db_session.query(KBChunk).count() > 0
     assert test_db_session.query(KBEmbedding).count() > 0
+    first_chunk = test_db_session.query(KBChunk).order_by(KBChunk.id.asc()).first()
+    assert first_chunk is not None
+    assert first_chunk.account_id == 42

@@ -219,3 +219,38 @@ Detailed checklist: `docs/security_tech_debt_backlog.md`.
 - Define runtime semantics for revoked access:
   - no stale search hits from revoked files
   - deterministic permission sync / cache invalidation / reindex behaviour
+
+### P1.5 KB permissions UI polish
+- After ACL foundation is stable, do a dedicated UI polish pass for `Web -> База знаний`:
+  - fix button sizing consistency
+  - fix layout overflow / elements leaving viewport
+  - align spacing and action hierarchy
+  - make folder/file access editor visually stable on desktop and mobile widths
+- Treat current ACL UI as functional foundation, not final UX.
+- Verify on:
+  - `1920x1080`
+  - `1440x900`
+  - `1280x720`
+  - `390x844`
+  - `360x800`
+
+### P1.5 KB v2 redesign
+- Stop extending the current KB screen beyond critical fixes.
+- Build a new KB workspace from scratch as `KB v2`.
+- Core direction:
+  - folder-first knowledge library
+  - policy-first access UX
+  - file inheritance by default
+  - file override as an exception
+  - client-bot coverage as a first-class concept
+- Include onboarding:
+  - first-open modal
+  - first access-edit modal
+  - client policy hint
+  - bulk change impact confirm
+- Design spec is fixed in:
+  - `docs/kb_v2_design_spec_2026-04-01.md`
+- KB v2 visual references and moodboard are fixed in:
+  - `docs/kb_v2_visual_references_2026-04-01.md`
+- KB v2 layout tokens are fixed in:
+  - `docs/kb_v2_layout_tokens_2026-04-01.md`

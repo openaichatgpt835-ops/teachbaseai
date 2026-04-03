@@ -15,10 +15,8 @@ Already account-wide:
 
 Still using `primary portal` as a technical carrier in some runtime paths:
 - web auth bridge
-- KB settings reads/writes
-- ask/runtime model settings fallback
-- media/transcript settings checks
-- some dialog summary / owner portal reads
+- KB storage owner for uploaded files / URL sources
+- settings payload still exposes `settings_portal_id` as a bridge/storage reference, but runtime source of truth is `settings_scope=account` + `settings_account_id`
 
 ## Inventory of remaining `primary portal` usages
 
@@ -46,11 +44,11 @@ Files:
 
 Current pattern:
 - account scope is used for dialog set
-- primary portal may still be used as summary carrier
+- no primary portal carrier remains in the summary path
 
 Target:
-- make summaries natively account-scoped
-- remove need for primary portal in summary selection
+- done for runtime selection
+- keep only account summary storage and direct portal fallback for non-account installs
 
 ### 3. KB settings runtime carrier
 
@@ -58,11 +56,11 @@ Files:
 - `apps/backend/routers/bitrix.py`
 
 Current pattern:
-- `settings_portal_id = _primary_account_portal_id(...)`
-- settings reads/writes still flow through a portal-owned record
+- account-native settings storage already exists
+- primary portal is no longer used as a runtime settings carrier
 
 Target:
-- move KB settings storage and retrieval to native `account_id`
+- done for storage/retrieval
 
 Priority:
 - high
@@ -74,12 +72,11 @@ Files:
 
 Current pattern:
 - account scope is already used for retrieval
-- model/runtime settings may still be loaded through primary portal
-- fallback to current portal was added as safety net
+- model/runtime settings no longer depend on primary portal
+- fallback to current portal remains only as resilience logic
 
 Target:
-- remove portal-carrier dependency for ask runtime config
-- use account-native KB settings directly
+- done for runtime config
 
 Priority:
 - high
@@ -90,12 +87,11 @@ Files:
 - `apps/backend/routers/bitrix.py`
 
 Current pattern:
-- write paths are account-aware
-- but owner/settings/media checks still route through primary portal in parts of the stack
+- runtime checks are account/current-portal aware
+- primary portal remains only as storage carrier for some KB artifacts
 
 Target:
-- keep file ownership semantics account-native
-- remove portal-carrier requirement from media/transcript checks
+- keep carrier usage explicit as storage-only
 
 Priority:
 - high
@@ -106,10 +102,10 @@ Files:
 - `apps/backend/routers/bitrix.py`
 
 Current pattern:
-- some runtime helper branches still resolve `owner_portal_id`
+- some write paths still resolve `owner_portal_id`
 
 Target:
-- replace with explicit account-owned metadata or account-owned record lookups
+- rename and isolate these branches as storage-only carrier logic
 
 Priority:
 - medium
@@ -139,3 +135,29 @@ Do not remove `primary portal` from the web compatibility bridge until:
 - embedded/web parity is stable
 - account-native KB/settings runtime is complete
 - legacy portal-based auth dependencies are isolated
+
+### 6. KB file/source ownership carrier
+
+Files:
+- `apps/backend/models/kb.py`
+- `apps/backend/routers/bitrix.py`
+- `apps/backend/services/kb_sources.py`
+- `apps/backend/services/telegram_events.py`
+
+Current pattern:
+- `KBFile` and `KBSource` now store `account_id` for attached accounts
+- `portal_id` remains as storage carrier and legacy fallback
+
+Target:
+- keep `portal_id` only for physical storage / legacy compatibility
+- continue moving read paths to prefer `account_id` semantics
+
+Priority:
+- high
+
+- chunk read paths no longer rely on `KBChunk.portal_id` when the file is already resolved in account scope
+- retrieval internals (`kb_rag`, `kb_pgvector`) no longer rely on `KBChunk.portal_id` when filtering by current portal
+- `KBJob` now stores `account_id`; portal id remains a processing/storage carrier for workers and legacy queries
+- `KBChunk` now stores `account_id`; chunk rows remain file-bound processing records, but account semantics are available without relying on chunk portal ownership
+- worker job lifecycle now preserves `KBJob.account_id`; portal id remains only as queue/processing bridge
+- legacy `PortalLinkRequest` approve/pending merge flow is removed from mainline; login now returns `link_required` instead of creating merge requests

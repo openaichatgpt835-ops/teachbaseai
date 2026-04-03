@@ -1018,6 +1018,7 @@ def ingest_file(db: Session, file_id: int, trace_id: str | None = None) -> dict:
                 end_ms = None
                 page_num = None
             new_rows.append(KBChunk(
+                account_id=rec.account_id,
                 portal_id=rec.portal_id,
                 file_id=rec.id,
                 chunk_index=idx,

@@ -24,6 +24,7 @@ from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse, Plai
 from pydantic import BaseModel, EmailStr
 
 from sqlalchemy.orm import Session
+import sqlalchemy as sa
 from sqlalchemy import select, delete, func
 
 from apps.backend.deps import get_db
@@ -40,6 +41,9 @@ from apps.backend.models.kb import (
     KBCollection,
     KBCollectionFile,
     KBSmartFolder,
+    KBFolder,
+    KBFolderAccess,
+    KBFileAccess,
 )
 from apps.backend.auth import (
     create_portal_token_with_user,
@@ -67,6 +71,13 @@ from apps.backend.services.kb_settings import (
     is_speaker_diarization_enabled,
 )
 from apps.backend.services.kb_sources import create_url_source
+from apps.backend.services.kb_acl import (
+    KB_ACCESS_LEVELS,
+    default_kb_access_for_role,
+    kb_acl_principals_for_membership,
+    normalize_kb_principal,
+    resolve_kb_acl_access,
+)
 from apps.backend.services.kb_rag import answer_from_kb
 from apps.backend.services.gigachat_client import list_models, DEFAULT_API_BASE
 from apps.backend.services.kb_settings import get_valid_gigachat_access_token
@@ -85,8 +96,17 @@ from apps.backend.services.telegram_settings import (
     get_portal_telegram_token_plain,
 )
 from apps.backend.models.web_user import WebUser, WebSession
-from apps.backend.models.account import Account, AccountIntegration, AccountMembership, AccountPermission, AppUserWebCredential, AppSession
-from apps.backend.models.portal_link_request import PortalLinkRequest
+from apps.backend.models.account import (
+    Account,
+    AccountIntegration,
+    AccountMembership,
+    AccountPermission,
+    AccountUserGroup,
+    AccountUserGroupMember,
+    AppUserIdentity,
+    AppUserWebCredential,
+    AppSession,
+)
 from apps.backend.services.activity import log_activity
 from apps.backend.clients.telegram import telegram_get_me, telegram_set_webhook
 from apps.backend.services.web_email import create_email_token, send_registration_email
@@ -188,11 +208,77 @@ def _portal_account_membership_ctx(db: Session, portal_id: int, web_user: WebUse
     membership, perm = row
     return {
         "account_id": int(portal.account_id),
+        "membership_id": int(membership.id),
         "role": str(membership.role or "member"),
         "can_manage_integrations": str(membership.role or "member") in {"owner", "admin"} or bool(
             perm.can_manage_settings if perm else False
         ),
     }
+
+
+def _portal_acl_subject_ctx(
+    db: Session,
+    *,
+    portal_id: int,
+    request: Request,
+    audience: str,
+) -> dict[str, Any]:
+    portal = db.get(Portal, int(portal_id))
+    uid = _portal_user_id_from_token(request)
+    role = "client" if str(audience or "").strip().lower() == "client" else "member"
+    membership_id: int | None = None
+    if uid and portal and portal.admin_user_id and int(portal.admin_user_id) == int(uid):
+        role = "admin"
+    if not portal or not portal.account_id or not uid:
+        return {"membership_id": membership_id, "group_ids": [], "role": role, "audience": audience, "portal_user_id": uid}
+    integ = db.execute(
+        select(AccountIntegration)
+        .where(
+            AccountIntegration.provider == "bitrix",
+            AccountIntegration.portal_id == int(portal_id),
+        )
+        .order_by(AccountIntegration.id.asc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if not integ:
+        return {"membership_id": membership_id, "group_ids": [], "role": role, "audience": audience, "portal_user_id": uid}
+    ident = db.execute(
+        select(AppUserIdentity)
+        .where(
+            AppUserIdentity.provider == "bitrix",
+            AppUserIdentity.integration_id == int(integ.id),
+            AppUserIdentity.external_id == str(uid),
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    if not ident:
+        return {"membership_id": membership_id, "group_ids": [], "role": role, "audience": audience, "portal_user_id": uid}
+    membership = db.execute(
+        select(AccountMembership)
+        .where(
+            AccountMembership.account_id == int(portal.account_id),
+            AccountMembership.user_id == int(ident.user_id),
+            AccountMembership.status == "active",
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    if membership:
+        membership_id = int(membership.id)
+        role = str(membership.role or role)
+    group_ids = _kb_group_ids_for_membership(db, membership_id)
+    return {"membership_id": membership_id, "group_ids": group_ids, "role": role, "audience": audience, "portal_user_id": uid}
+
+
+def _kb_group_ids_for_membership(db: Session, membership_id: int | None) -> list[int]:
+    if not membership_id:
+        return []
+    return [
+        int(x)
+        for x in db.execute(
+            select(AccountUserGroupMember.group_id).where(AccountUserGroupMember.membership_id == int(membership_id))
+        ).scalars().all()
+        if x is not None
+    ]
 
 
 def _next_account_no(db: Session) -> int:
@@ -314,7 +400,7 @@ def _account_scope_portal_ids(db: Session, portal_id: int) -> list[int]:
     return ids or [int(portal_id)]
 
 
-def _primary_account_portal_id(db: Session, portal_id: int) -> int:
+def _kb_storage_portal_id(db: Session, portal_id: int) -> int:
     portal = db.get(Portal, int(portal_id))
     if not portal or not portal.account_id:
         return int(portal_id)
@@ -334,6 +420,17 @@ def _primary_account_portal_id(db: Session, portal_id: int) -> int:
 
 
 def _account_scoped_file(db: Session, portal_id: int, file_id: int) -> KBFile | None:
+    portal = db.get(Portal, int(portal_id))
+    if portal and portal.account_id:
+        return db.execute(
+            select(KBFile).where(
+                KBFile.id == int(file_id),
+                sa.or_(
+                    KBFile.account_id == int(portal.account_id),
+                    sa.and_(KBFile.account_id.is_(None), KBFile.portal_id.in_(_account_scope_portal_ids(db, portal_id))),
+                ),
+            )
+        ).scalar_one_or_none()
     scope_portal_ids = _account_scope_portal_ids(db, portal_id)
     return db.execute(
         select(KBFile).where(KBFile.id == int(file_id), KBFile.portal_id.in_(scope_portal_ids))
@@ -341,17 +438,98 @@ def _account_scoped_file(db: Session, portal_id: int, file_id: int) -> KBFile | 
 
 
 def _account_scoped_collection(db: Session, portal_id: int, collection_id: int) -> KBCollection | None:
+    portal = db.get(Portal, int(portal_id))
+    if portal and portal.account_id:
+        return db.execute(
+            select(KBCollection).where(
+                KBCollection.id == int(collection_id),
+                sa.or_(
+                    KBCollection.account_id == int(portal.account_id),
+                    sa.and_(KBCollection.account_id.is_(None), KBCollection.portal_id.in_(_account_scope_portal_ids(db, portal_id))),
+                ),
+            )
+        ).scalar_one_or_none()
     scope_portal_ids = _account_scope_portal_ids(db, portal_id)
-    return db.execute(
-        select(KBCollection).where(KBCollection.id == int(collection_id), KBCollection.portal_id.in_(scope_portal_ids))
-    ).scalar_one_or_none()
+    return db.execute(select(KBCollection).where(KBCollection.id == int(collection_id), KBCollection.portal_id.in_(scope_portal_ids))).scalar_one_or_none()
 
 
 def _account_scoped_smart_folder(db: Session, portal_id: int, folder_id: int) -> KBSmartFolder | None:
+    portal = db.get(Portal, int(portal_id))
+    if portal and portal.account_id:
+        return db.execute(
+            select(KBSmartFolder).where(
+                KBSmartFolder.id == int(folder_id),
+                sa.or_(
+                    KBSmartFolder.account_id == int(portal.account_id),
+                    sa.and_(KBSmartFolder.account_id.is_(None), KBSmartFolder.portal_id.in_(_account_scope_portal_ids(db, portal_id))),
+                ),
+            )
+        ).scalar_one_or_none()
     scope_portal_ids = _account_scope_portal_ids(db, portal_id)
-    return db.execute(
-        select(KBSmartFolder).where(KBSmartFolder.id == int(folder_id), KBSmartFolder.portal_id.in_(scope_portal_ids))
-    ).scalar_one_or_none()
+    return db.execute(select(KBSmartFolder).where(KBSmartFolder.id == int(folder_id), KBSmartFolder.portal_id.in_(scope_portal_ids))).scalar_one_or_none()
+
+
+def _account_scoped_kb_folder(db: Session, portal_id: int, folder_id: int) -> KBFolder | None:
+    portal = db.get(Portal, int(portal_id))
+    if portal and portal.account_id:
+        return db.execute(
+            select(KBFolder).where(
+                KBFolder.id == int(folder_id),
+                sa.or_(
+                    KBFolder.account_id == int(portal.account_id),
+                    sa.and_(KBFolder.account_id.is_(None), KBFolder.portal_id.in_(_account_scope_portal_ids(db, portal_id))),
+                ),
+            )
+        ).scalar_one_or_none()
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+    return db.execute(select(KBFolder).where(KBFolder.id == int(folder_id), KBFolder.portal_id.in_(scope_portal_ids))).scalar_one_or_none()
+
+
+def _acl_items_payload(rows: list[Any]) -> list[dict[str, str]]:
+    return [
+        {
+            "principal_type": str(getattr(row, "principal_type", "") or ""),
+            "principal_id": str(getattr(row, "principal_id", "") or ""),
+            "access_level": str(getattr(row, "access_level", "none") or "none"),
+        }
+        for row in rows
+    ]
+
+
+def _replace_folder_acl(db: Session, folder_id: int, items: list[ACLItemBody]) -> list[dict[str, str]]:
+    db.execute(delete(KBFolderAccess).where(KBFolderAccess.folder_id == int(folder_id)))
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        ptype, pid = normalize_kb_principal(item.principal_type, item.principal_id)
+        level = str(item.access_level or "read").strip().lower()
+        if level not in KB_ACCESS_LEVELS:
+            raise ValueError("invalid_access_level")
+        key = (ptype, pid)
+        if key in seen:
+            continue
+        seen.add(key)
+        db.add(KBFolderAccess(folder_id=int(folder_id), principal_type=ptype, principal_id=pid, access_level=level))
+        out.append({"principal_type": ptype, "principal_id": pid, "access_level": level})
+    return out
+
+
+def _replace_file_acl(db: Session, file_id: int, items: list[ACLItemBody]) -> list[dict[str, str]]:
+    db.execute(delete(KBFileAccess).where(KBFileAccess.file_id == int(file_id)))
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        ptype, pid = normalize_kb_principal(item.principal_type, item.principal_id)
+        level = str(item.access_level or "read").strip().lower()
+        if level not in KB_ACCESS_LEVELS:
+            raise ValueError("invalid_access_level")
+        key = (ptype, pid)
+        if key in seen:
+            continue
+        seen.add(key)
+        db.add(KBFileAccess(file_id=int(file_id), principal_type=ptype, principal_id=pid, access_level=level))
+        out.append({"principal_type": ptype, "principal_id": pid, "access_level": level})
+    return out
 
 
 def _build_bitrix_attachable_accounts(db: Session, web_user: WebUser) -> list[BitrixPortalAttachAccountItem]:
@@ -484,7 +662,7 @@ def _backfill_chunk_pages_from_preview(db: Session, rec: KBFile, preview_pdf_pat
         return
     rows = db.execute(
         select(KBChunk)
-        .where(KBChunk.portal_id == rec.portal_id, KBChunk.file_id == rec.id)
+        .where(KBChunk.file_id == rec.id)
         .order_by(KBChunk.chunk_index.asc())
     ).scalars().all()
     if not rows:
@@ -553,7 +731,10 @@ def _portal_user_id_from_token(request: Request) -> int | None:
     if not auth.lower().startswith("bearer "):
         return None
     token = auth.split(" ", 1)[1].strip()
-    payload = decode_token(token)
+    try:
+        payload = decode_token(token)
+    except Exception:
+        return None
     if not payload:
         return None
     uid = payload.get("uid")
@@ -1316,6 +1497,25 @@ class SmartFolderBody(BaseModel):
     rules_json: dict | None = None
 
 
+class FolderBody(BaseModel):
+    name: str
+    parent_id: int | None = None
+
+
+class FileFolderBody(BaseModel):
+    folder_id: int | None = None
+
+
+class ACLItemBody(BaseModel):
+    principal_type: str
+    principal_id: str
+    access_level: str = "read"
+
+
+class ACLListBody(BaseModel):
+    items: list[ACLItemBody] = []
+
+
 class KBAskBody(BaseModel):
     query: str
     audience: str | None = None
@@ -1524,13 +1724,30 @@ def _resolve_scope_file_ids(
 ) -> set[int] | None:
     scope_portal_ids = _account_scope_portal_ids(db, portal_id)
     scopes: list[set[int]] = []
+    portal = db.get(Portal, int(portal_id))
+    file_scope_predicate = (
+        sa.or_(
+            KBFile.account_id == int(portal.account_id),
+            sa.and_(KBFile.account_id.is_(None), KBFile.portal_id.in_(scope_portal_ids)),
+        )
+        if portal and portal.account_id
+        else KBFile.portal_id.in_(scope_portal_ids)
+    )
+    folder_scope_predicate = (
+        sa.or_(
+            KBSmartFolder.account_id == int(portal.account_id),
+            sa.and_(KBSmartFolder.account_id.is_(None), KBSmartFolder.portal_id.in_(scope_portal_ids)),
+        )
+        if portal and portal.account_id
+        else KBSmartFolder.portal_id.in_(scope_portal_ids)
+    )
     ids_file = {int(x) for x in (file_ids or []) if int(x) > 0}
     if ids_file:
         allowed = {
             int(x)
             for x in db.execute(
                 select(KBFile.id).where(
-                    KBFile.portal_id.in_(scope_portal_ids),
+                    file_scope_predicate,
                     KBFile.audience == audience,
                     KBFile.id.in_(sorted(ids_file)),
                 )
@@ -1546,7 +1763,7 @@ def _resolve_scope_file_ids(
                 .join(KBFile, KBFile.id == KBCollectionFile.file_id)
                 .where(
                     KBCollectionFile.collection_id.in_(col_ids),
-                    KBFile.portal_id.in_(scope_portal_ids),
+                    file_scope_predicate,
                     KBFile.audience == audience,
                 )
             ).scalars().all()
@@ -1556,7 +1773,7 @@ def _resolve_scope_file_ids(
     if smart_ids:
         rows = db.execute(
             select(KBSmartFolder.id, KBSmartFolder.name, KBSmartFolder.system_tag, KBSmartFolder.rules_json)
-            .where(KBSmartFolder.portal_id.in_(scope_portal_ids), KBSmartFolder.id.in_(smart_ids))
+            .where(folder_scope_predicate, KBSmartFolder.id.in_(smart_ids))
         ).all()
         topic_keys: set[str] = set()
         for _sid, name, system_tag, rules_json in rows:
@@ -1573,7 +1790,7 @@ def _resolve_scope_file_ids(
             trows = db.execute(
                 select(KBFile.id, KBFile.filename, KBChunk.text)
                 .join(KBChunk, KBChunk.file_id == KBFile.id)
-                .where(KBFile.portal_id.in_(scope_portal_ids), KBFile.audience == audience, KBChunk.portal_id.in_(scope_portal_ids))
+                .where(file_scope_predicate, KBFile.audience == audience)
                 .limit(8000)
             ).all()
             hit_ids: set[int] = set()
@@ -1600,7 +1817,7 @@ def _resolve_scope_file_ids(
         trows = db.execute(
             select(KBFile.id, KBFile.filename, KBChunk.text)
             .join(KBChunk, KBChunk.file_id == KBFile.id)
-            .where(KBFile.portal_id.in_(scope_portal_ids), KBFile.audience == audience, KBChunk.portal_id.in_(scope_portal_ids))
+            .where(file_scope_predicate, KBFile.audience == audience)
             .limit(8000)
         ).all()
         hit_ids: set[int] = set()
@@ -1636,14 +1853,332 @@ def _all_account_scope_file_ids(
     portal_id: int,
     audience: str,
 ) -> set[int]:
-    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
-    rows = db.execute(
-        select(KBFile.id)
-        .where(KBFile.portal_id.in_(scope_portal_ids))
-        .where(KBFile.audience == audience)
-        .where(KBFile.status == "ready")
-    ).scalars().all()
+    portal = db.get(Portal, int(portal_id))
+    if portal and portal.account_id:
+        rows = db.execute(
+            select(KBFile.id)
+            .where(
+                sa.or_(
+                    KBFile.account_id == int(portal.account_id),
+                    sa.and_(KBFile.account_id.is_(None), KBFile.portal_id.in_(_account_scope_portal_ids(db, portal_id))),
+                )
+            )
+            .where(KBFile.audience == audience)
+            .where(KBFile.status == "ready")
+        ).scalars().all()
+    else:
+        scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+        rows = db.execute(
+            select(KBFile.id)
+            .where(KBFile.portal_id.in_(scope_portal_ids))
+            .where(KBFile.audience == audience)
+            .where(KBFile.status == "ready")
+        ).scalars().all()
     return {int(x) for x in rows if x is not None}
+
+
+def _filter_file_ids_by_kb_acl(
+    db: Session,
+    *,
+    file_ids: set[int],
+    membership_id: int | None,
+    group_ids: list[int] | None,
+    role: str | None,
+    audience: str | None,
+) -> set[int]:
+    if not file_ids:
+        return set()
+    rows = db.execute(
+        select(KBFile.id, KBFile.folder_id).where(KBFile.id.in_(sorted(file_ids)))
+    ).all()
+    folder_ids = sorted({int(folder_id) for _fid, folder_id in rows if folder_id is not None})
+    file_acl_rows = db.execute(
+        select(KBFileAccess.file_id, KBFileAccess.principal_type, KBFileAccess.principal_id, KBFileAccess.access_level)
+        .where(KBFileAccess.file_id.in_(sorted(file_ids)))
+    ).all()
+    folder_acl_rows = []
+    if folder_ids:
+        folder_acl_rows = db.execute(
+            select(KBFolderAccess.folder_id, KBFolderAccess.principal_type, KBFolderAccess.principal_id, KBFolderAccess.access_level)
+            .where(KBFolderAccess.folder_id.in_(folder_ids))
+        ).all()
+    principals = kb_acl_principals_for_membership(membership_id, role, audience, group_ids)
+    file_acl_map: dict[int, list[tuple[str, str, str]]] = {}
+    for file_id, principal_type, principal_id, access_level in file_acl_rows:
+        file_acl_map.setdefault(int(file_id), []).append(
+            (str(principal_type), str(principal_id), str(access_level))
+        )
+    folder_acl_map: dict[int, list[tuple[str, str, str]]] = {}
+    for folder_id, principal_type, principal_id, access_level in folder_acl_rows:
+        folder_acl_map.setdefault(int(folder_id), []).append(
+            (str(principal_type), str(principal_id), str(access_level))
+        )
+    allowed: set[int] = set()
+    for file_id, folder_id in rows:
+        inherited = default_kb_access_for_role(role)
+        if folder_id is not None:
+            inherited = resolve_kb_acl_access(
+                folder_acl_map.get(int(folder_id), []),
+                principals,
+                inherited,
+            )
+        effective = resolve_kb_acl_access(
+            file_acl_map.get(int(file_id), []),
+            principals,
+            inherited,
+        )
+        if effective in {"read", "write", "admin"}:
+            allowed.add(int(file_id))
+    return allowed
+
+
+def _file_has_kb_acl_access(
+    db: Session,
+    *,
+    file_rec: KBFile,
+    membership_id: int | None,
+    group_ids: list[int] | None,
+    role: str | None,
+    audience: str | None,
+) -> bool:
+    return int(file_rec.id) in _filter_file_ids_by_kb_acl(
+        db,
+        file_ids={int(file_rec.id)},
+        membership_id=membership_id,
+        group_ids=group_ids,
+        role=role,
+        audience=audience or str(file_rec.audience or "staff"),
+    )
+
+
+def _kb_folder_subtree_ids(db: Session, portal_id: int, folder_id: int) -> set[int]:
+    portal = db.get(Portal, int(portal_id))
+    if portal and portal.account_id:
+        folder_rows = db.execute(
+            select(KBFolder.id, KBFolder.parent_id).where(
+                sa.or_(
+                    KBFolder.account_id == int(portal.account_id),
+                    sa.and_(KBFolder.account_id.is_(None), KBFolder.portal_id.in_(_account_scope_portal_ids(db, portal_id))),
+                )
+            )
+        ).all()
+    else:
+        folder_rows = db.execute(
+            select(KBFolder.id, KBFolder.parent_id).where(KBFolder.portal_id.in_(_account_scope_portal_ids(db, portal_id)))
+        ).all()
+    children: dict[int, list[int]] = {}
+    ids_present = {int(fid) for fid, _pid in folder_rows if fid is not None}
+    for fid, parent_id in folder_rows:
+        if parent_id is None:
+            continue
+        children.setdefault(int(parent_id), []).append(int(fid))
+    if int(folder_id) not in ids_present:
+        return set()
+    out: set[int] = set()
+    stack = [int(folder_id)]
+    while stack:
+        current = stack.pop()
+        if current in out:
+            continue
+        out.add(current)
+        stack.extend(children.get(current, []))
+    return out
+
+
+def _kb_client_access_summary(db: Session, portal_id: int, folder_id: int | None = None) -> dict[str, int]:
+    portal = db.get(Portal, int(portal_id))
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+    if portal and portal.account_id:
+        file_rows = db.execute(
+            select(KBFile.id, KBFile.folder_id).where(
+                sa.or_(
+                    KBFile.account_id == int(portal.account_id),
+                    sa.and_(KBFile.account_id.is_(None), KBFile.portal_id.in_(scope_portal_ids)),
+                ),
+                KBFile.status == "ready",
+            )
+        ).all()
+        client_group_ids = db.execute(
+            select(AccountUserGroup.id).where(
+                AccountUserGroup.account_id == int(portal.account_id),
+                AccountUserGroup.kind == "client",
+            )
+        ).scalars().all()
+    else:
+        file_rows = db.execute(
+            select(KBFile.id, KBFile.folder_id).where(
+                KBFile.portal_id.in_(scope_portal_ids),
+                KBFile.status == "ready",
+            )
+        ).all()
+        client_group_ids = []
+
+    if folder_id is not None:
+        subtree_ids = _kb_folder_subtree_ids(db, portal_id, int(folder_id))
+        file_rows = [(file_id, current_folder_id) for file_id, current_folder_id in file_rows if current_folder_id is not None and int(current_folder_id) in subtree_ids]
+
+    file_ids = [int(file_id) for file_id, _folder_id in file_rows]
+    folder_ids = sorted({int(folder_id) for _file_id, folder_id in file_rows if folder_id is not None})
+    file_acl_rows = db.execute(
+        select(KBFileAccess.file_id, KBFileAccess.principal_type, KBFileAccess.principal_id, KBFileAccess.access_level)
+        .where(KBFileAccess.file_id.in_(file_ids))
+    ).all() if file_ids else []
+    folder_acl_rows = db.execute(
+        select(KBFolderAccess.folder_id, KBFolderAccess.principal_type, KBFolderAccess.principal_id, KBFolderAccess.access_level)
+        .where(KBFolderAccess.folder_id.in_(folder_ids))
+    ).all() if folder_ids else []
+
+    file_acl_map: dict[int, list[tuple[str, str, str]]] = {}
+    for file_id, principal_type, principal_id, access_level in file_acl_rows:
+        file_acl_map.setdefault(int(file_id), []).append((str(principal_type), str(principal_id), str(access_level or "none")))
+    folder_acl_map: dict[int, list[tuple[str, str, str]]] = {}
+    for folder_id, principal_type, principal_id, access_level in folder_acl_rows:
+        folder_acl_map.setdefault(int(folder_id), []).append((str(principal_type), str(principal_id), str(access_level or "none")))
+
+    allowed_levels = {"read", "write", "admin"}
+    generic_principals = kb_acl_principals_for_membership(None, "client", "client", [])
+    open_all_clients = 0
+    open_client_groups = 0
+    closed_for_clients = 0
+
+    for file_id, folder_id in file_rows:
+        inherited_generic = default_kb_access_for_role("client")
+        if folder_id is not None:
+            inherited_generic = resolve_kb_acl_access(folder_acl_map.get(int(folder_id), []), generic_principals, inherited_generic)
+        generic_effective = resolve_kb_acl_access(file_acl_map.get(int(file_id), []), generic_principals, inherited_generic)
+        if generic_effective in allowed_levels:
+            open_all_clients += 1
+            continue
+
+        group_allowed = False
+        for group_id in client_group_ids:
+            group_principals = kb_acl_principals_for_membership(None, "client", "client", [int(group_id)])
+            inherited_group = default_kb_access_for_role("client")
+            if folder_id is not None:
+                inherited_group = resolve_kb_acl_access(folder_acl_map.get(int(folder_id), []), group_principals, inherited_group)
+            group_effective = resolve_kb_acl_access(file_acl_map.get(int(file_id), []), group_principals, inherited_group)
+            if group_effective in allowed_levels:
+                group_allowed = True
+                break
+
+        if group_allowed:
+            open_client_groups += 1
+        else:
+            closed_for_clients += 1
+
+    return {
+        "total_ready_files": len(file_rows),
+        "open_all_clients": open_all_clients,
+        "open_client_groups": open_client_groups,
+        "closed_for_clients": closed_for_clients,
+    }
+
+
+def _kb_file_access_badges(db: Session, file_rec: KBFile) -> dict[str, str]:
+    folder_access_rows = []
+    if file_rec.folder_id:
+        folder_access_rows = db.execute(
+            select(KBFolderAccess.principal_type, KBFolderAccess.principal_id, KBFolderAccess.access_level)
+            .where(KBFolderAccess.folder_id == int(file_rec.folder_id))
+        ).all()
+    file_access_rows = db.execute(
+        select(KBFileAccess.principal_type, KBFileAccess.principal_id, KBFileAccess.access_level)
+        .where(KBFileAccess.file_id == int(file_rec.id))
+    ).all()
+    folder_rules = [(str(pt), str(pid), str(level or "none")) for pt, pid, level in folder_access_rows]
+    file_rules = [(str(pt), str(pid), str(level or "none")) for pt, pid, level in file_access_rows]
+
+    staff_principals = kb_acl_principals_for_membership(None, "member", "staff", [])
+    client_principals = kb_acl_principals_for_membership(None, "client", "client", [])
+    staff_base = default_kb_access_for_role("member")
+    client_base = default_kb_access_for_role("client")
+    if file_rec.folder_id:
+        staff_base = resolve_kb_acl_access(folder_rules, staff_principals, staff_base)
+        client_base = resolve_kb_acl_access(folder_rules, client_principals, client_base)
+    staff_effective = resolve_kb_acl_access(file_rules, staff_principals, staff_base)
+    client_effective = resolve_kb_acl_access(file_rules, client_principals, client_base)
+
+    client_group_only = False
+    if client_effective not in {"read", "write", "admin"}:
+        has_client_group_rule = any(
+            principal_type == "group" and access_level in {"read", "write", "admin"}
+            for principal_type, _principal_id, access_level in (folder_rules + file_rules)
+        )
+        if has_client_group_rule:
+            client_group_only = True
+
+    if staff_effective in {"write", "admin"}:
+        staff_badge = "staff_admin"
+    elif staff_effective == "read":
+        staff_badge = "staff_read"
+    else:
+        staff_badge = "staff_none"
+
+    if client_effective in {"read", "write", "admin"}:
+        client_badge = "client_all"
+    elif client_group_only:
+        client_badge = "client_groups"
+    else:
+        client_badge = "client_none"
+
+    return {"staff": staff_badge, "client": client_badge}
+
+
+def _kb_folder_access_badges(db: Session, folder_id: int) -> dict[str, str]:
+    folder_access_rows = db.execute(
+        select(KBFolderAccess.principal_type, KBFolderAccess.principal_id, KBFolderAccess.access_level)
+        .where(KBFolderAccess.folder_id == int(folder_id))
+    ).all()
+    rules = [(str(pt), str(pid), str(level or "none")) for pt, pid, level in folder_access_rows]
+    staff_principals = kb_acl_principals_for_membership(None, "member", "staff", [])
+    client_principals = kb_acl_principals_for_membership(None, "client", "client", [])
+    staff_effective = resolve_kb_acl_access(rules, staff_principals, default_kb_access_for_role("member"))
+    client_effective = resolve_kb_acl_access(rules, client_principals, default_kb_access_for_role("client"))
+    client_group_only = (
+        client_effective not in {"read", "write", "admin"}
+        and any(principal_type == "group" and access_level in {"read", "write", "admin"} for principal_type, _pid, access_level in rules)
+    )
+    if staff_effective in {"write", "admin"}:
+        staff_badge = "staff_admin"
+    elif staff_effective == "read":
+        staff_badge = "staff_read"
+    else:
+        staff_badge = "staff_none"
+    if client_effective in {"read", "write", "admin"}:
+        client_badge = "client_all"
+    elif client_group_only:
+        client_badge = "client_groups"
+    else:
+        client_badge = "client_none"
+    return {"staff": staff_badge, "client": client_badge}
+
+
+def _acl_guard_file(
+    db: Session,
+    *,
+    file_rec: KBFile | None,
+    portal_id: int,
+    request: Request,
+    fallback_audience: str = "staff",
+) -> KBFile | None:
+    if not file_rec:
+        return None
+    acl_ctx = _portal_acl_subject_ctx(
+        db,
+        portal_id=portal_id,
+        request=request,
+        audience=str(file_rec.audience or fallback_audience or "staff"),
+    )
+    if not _file_has_kb_acl_access(
+        db,
+        file_rec=file_rec,
+        membership_id=acl_ctx.get("membership_id"),
+        group_ids=acl_ctx.get("group_ids"),
+        role=acl_ctx.get("role"),
+        audience=acl_ctx.get("audience"),
+    ):
+        return None
+    return file_rec
 
 def _is_two_part_topic_name(name: str) -> bool:
     n = (name or "").strip().lower()
@@ -1754,36 +2289,7 @@ async def request_web_link(
     if pid != portal_id:
         raise HTTPException(status_code=403, detail="portal_id mismatch")
     _require_portal_admin(db, portal_id, request)
-    email = body.email.lower().strip()
-    web_user = db.execute(select(WebUser).where(WebUser.email == email)).scalar_one_or_none()
-    if not web_user:
-        raise HTTPException(status_code=404, detail="web_user_not_found")
-    membership_ctx = _portal_account_membership_ctx(db, portal_id, web_user)
-    if membership_ctx:
-        return {"status": "already_linked"}
-    if web_user.portal_id == portal_id:
-        return {"status": "already_linked"}
-    if not web_user.portal_id:
-        raise HTTPException(status_code=400, detail="web_user_missing_portal")
-    existing = db.execute(
-        select(PortalLinkRequest).where(
-            PortalLinkRequest.portal_id == portal_id,
-            PortalLinkRequest.web_user_id == web_user.id,
-            PortalLinkRequest.status == "pending",
-        )
-    ).scalar_one_or_none()
-    if existing:
-        return {"status": "pending", "request_id": existing.id}
-    req = PortalLinkRequest(
-        portal_id=portal_id,
-        web_user_id=web_user.id,
-        source_portal_id=web_user.portal_id,
-        status="pending",
-        created_at=datetime.utcnow(),
-    )
-    db.add(req)
-    db.commit()
-    return {"status": "pending", "request_id": req.id}
+    raise HTTPException(status_code=410, detail="legacy_link_flow_removed")
 
 
 @router.get("/portals/{portal_id}/web/status")
@@ -2024,30 +2530,23 @@ async def login_web_from_bitrix(
     if membership_ctx:
         demo_until = (user.created_at + timedelta(days=7)).date().isoformat()
         return {"status": "linked", "email": user.email, "demo_until": demo_until}
-    if not user.portal_id:
-        raise HTTPException(status_code=400, detail="missing_portal")
-    if int(user.portal_id) == int(portal_id):
+    if user.portal_id and int(user.portal_id) == int(portal_id):
         demo_until = (user.created_at + timedelta(days=7)).date().isoformat()
         return {"status": "linked", "email": user.email, "demo_until": demo_until}
-    existing = db.execute(
-        select(PortalLinkRequest).where(
-            PortalLinkRequest.portal_id == portal_id,
-            PortalLinkRequest.web_user_id == user.id,
-            PortalLinkRequest.status == "pending",
-        )
-    ).scalar_one_or_none()
-    if existing:
-        return {"status": "pending", "request_id": existing.id}
-    req = PortalLinkRequest(
-        portal_id=portal_id,
-        web_user_id=user.id,
-        source_portal_id=user.portal_id,
-        status="pending",
-        created_at=datetime.utcnow(),
-    )
-    db.add(req)
-    db.commit()
-    return {"status": "pending", "request_id": req.id}
+    attachable_accounts = _build_bitrix_attachable_accounts(db, user)
+    recommended_action = "create_account"
+    if any(item.attach_allowed for item in attachable_accounts):
+        recommended_action = "attach_existing"
+    elif attachable_accounts:
+        recommended_action = "upgrade_or_create"
+    return {
+        "status": "link_required",
+        "email": user.email,
+        "portal_id": int(portal_id),
+        "recommended_action": recommended_action,
+        "can_create_new_account": True,
+        "attachable_accounts": [item.model_dump() for item in attachable_accounts],
+    }
 
 
 def _telegram_webhook_url(kind: str, portal_id: int, secret: str) -> str | None:
@@ -2091,26 +2590,34 @@ async def get_portal_kb_files(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
-    q = (
-        select(KBFile, KBSource.source_type, KBSource.url)
-        .join(KBSource, KBSource.id == KBFile.source_id, isouter=True)
-        .where(KBFile.portal_id.in_(scope_portal_ids))
-        .order_by(KBFile.id.desc())
-        .limit(200)
-    )
+    portal = db.get(Portal, int(portal_id))
+    q = select(KBFile, KBSource.source_type, KBSource.url).join(KBSource, KBSource.id == KBFile.source_id, isouter=True)
+    if portal and portal.account_id:
+        q = q.where(
+            sa.or_(
+                KBFile.account_id == int(portal.account_id),
+                sa.and_(KBFile.account_id.is_(None), KBFile.portal_id.in_(_account_scope_portal_ids(db, portal_id))),
+            )
+        )
+    else:
+        q = q.where(KBFile.portal_id.in_(_account_scope_portal_ids(db, portal_id)))
+    q = q.order_by(KBFile.id.desc()).limit(200)
     rows = db.execute(q).all()
     # show only the latest entry per filename to hide stale errors
     seen: set[str] = set()
     items = []
     for f, source_type, source_url in rows:
+        if not _acl_guard_file(db, file_rec=f, portal_id=portal_id, request=request):
+            continue
         key = (f.filename or f.storage_path or str(f.id)).lower()
         if key in seen:
             continue
         seen.add(key)
+        badges = _kb_file_access_badges(db, f)
         items.append({
             "id": f.id,
             "filename": f.filename,
+            "folder_id": f.folder_id,
             "mime_type": f.mime_type,
             "source_type": source_type,
             "source_url": source_url,
@@ -2124,9 +2631,28 @@ async def get_portal_kb_files(
             "query_count": int(f.query_count or 0),
             "transcript_status": f.transcript_status,
             "transcript_error": f.transcript_error,
+            "access_badges": badges,
             "created_at": f.created_at.isoformat() if f.created_at else None,
         })
     return JSONResponse({"items": items})
+
+
+@router.get("/portals/{portal_id}/kb/access-summary")
+async def get_portal_kb_access_summary(
+    portal_id: int,
+    request: Request,
+    folder_id: int | None = None,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    _require_portal_admin(db, portal_id, request)
+    if folder_id is not None:
+        rec = _account_scoped_kb_folder(db, portal_id, int(folder_id))
+        if not rec:
+            return _err(request, "not_found", "Folder not found", 404)
+    return JSONResponse(_kb_client_access_summary(db, portal_id, folder_id=folder_id))
 
 
 @router.get("/portals/{portal_id}/kb/search")
@@ -2156,7 +2682,16 @@ async def search_portal_kb(
     aud = (audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
+    acl_ctx = _portal_acl_subject_ctx(db, portal_id=portal_id, request=request, audience=aud)
     account_scope_ids = _all_account_scope_file_ids(db, portal_id=portal_id, audience=aud)
+    account_scope_ids = _filter_file_ids_by_kb_acl(
+        db,
+        file_ids=account_scope_ids,
+        membership_id=acl_ctx.get("membership_id"),
+        group_ids=acl_ctx.get("group_ids"),
+        role=acl_ctx.get("role"),
+        audience=acl_ctx.get("audience"),
+    )
     scoped_ids = _resolve_scope_file_ids(
         db,
         portal_id=portal_id,
@@ -2168,12 +2703,15 @@ async def search_portal_kb(
     )
     if scoped_ids is None:
         scoped_ids = account_scope_ids
+    else:
+        scoped_ids &= account_scope_ids
     if scoped_ids is not None and not scoped_ids:
         if is_schema_v2(request):
             return JSONResponse({"ok": True, "data": {"file_ids": [], "matches": []}, "meta": {"schema": "v2", "audience": aud}})
         return JSONResponse({"file_ids": [], "matches": []})
     like_q = f"%{q}%"
     scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+    portal = db.get(Portal, int(portal_id))
     q_stmt = (
         select(
             KBFile.id,
@@ -2185,14 +2723,21 @@ async def search_portal_kb(
         )
         .join(KBChunk, KBChunk.file_id == KBFile.id)
         .where(
-            KBFile.portal_id.in_(scope_portal_ids),
             KBFile.audience == aud,
-            KBChunk.portal_id.in_(scope_portal_ids),
             (KBChunk.text.ilike(like_q) | KBFile.filename.ilike(like_q)),
         )
         .order_by(KBFile.id.desc())
         .limit(max(1, min(limit, 200)))
     )
+    if portal and portal.account_id:
+        q_stmt = q_stmt.where(
+            sa.or_(
+                KBFile.account_id == int(portal.account_id),
+                sa.and_(KBFile.account_id.is_(None), KBFile.portal_id.in_(scope_portal_ids)),
+            )
+        )
+    else:
+        q_stmt = q_stmt.where(KBFile.portal_id.in_(scope_portal_ids))
     if scoped_ids is not None:
         q_stmt = q_stmt.where(KBFile.id.in_(sorted(scoped_ids)))
     rows = db.execute(q_stmt).all()
@@ -2252,7 +2797,16 @@ async def ask_portal_kb(
     aud = (body.audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
+    acl_ctx = _portal_acl_subject_ctx(db, portal_id=portal_id, request=request, audience=aud)
     account_scope_ids = _all_account_scope_file_ids(db, portal_id=portal_id, audience=aud)
+    account_scope_ids = _filter_file_ids_by_kb_acl(
+        db,
+        file_ids=account_scope_ids,
+        membership_id=acl_ctx.get("membership_id"),
+        group_ids=acl_ctx.get("group_ids"),
+        role=acl_ctx.get("role"),
+        audience=acl_ctx.get("audience"),
+    )
     scope = body.scope or {}
     scoped_ids = _resolve_scope_file_ids(
         db,
@@ -2265,6 +2819,8 @@ async def ask_portal_kb(
     )
     if scoped_ids is None:
         scoped_ids = account_scope_ids
+    else:
+        scoped_ids &= account_scope_ids
     if scoped_ids is not None and not scoped_ids:
         if is_schema_v2(request):
             return JSONResponse({
@@ -2329,7 +2885,7 @@ async def upload_portal_kb_file(
     _require_portal_admin(db, portal_id, request)
     if not file.filename:
         raise HTTPException(status_code=400, detail="Файл не задан")
-    owner_portal_id = _primary_account_portal_id(db, portal_id)
+    owner_portal_id = _kb_storage_portal_id(db, portal_id)
     portal_dir = ensure_portal_dir(owner_portal_id)
     safe_name = os.path.basename(file.filename)
     suffix = uuid.uuid4().hex[:8]
@@ -2350,7 +2906,9 @@ async def upload_portal_kb_file(
             except Exception:
                 pass
             return _err(request, "media_minutes_limit_reached", "media_minutes_limit_reached", 403)
+    portal = db.get(Portal, int(portal_id))
     rec = KBFile(
+        account_id=int(portal.account_id) if portal and portal.account_id else None,
         portal_id=owner_portal_id,
         filename=safe_name,
         audience=aud,
@@ -2370,6 +2928,7 @@ async def upload_portal_kb_file(
     db.commit()
     db.refresh(rec)
     job = KBJob(
+        account_id=rec.account_id,
         portal_id=rec.portal_id,
         job_type="ingest",
         status="queued",
@@ -2406,13 +2965,25 @@ async def reindex_portal_kb(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    portal = db.get(Portal, int(portal_id))
     scope_portal_ids = _account_scope_portal_ids(db, portal_id)
-    files = db.execute(
-        select(KBFile).where(
-            KBFile.portal_id.in_(scope_portal_ids),
-            KBFile.status.in_(["uploaded", "error", "queued"]),
-        )
-    ).scalars().all()
+    if portal and portal.account_id:
+        files = db.execute(
+            select(KBFile).where(
+                sa.or_(
+                    KBFile.account_id == int(portal.account_id),
+                    sa.and_(KBFile.account_id.is_(None), KBFile.portal_id.in_(scope_portal_ids)),
+                ),
+                KBFile.status.in_(["uploaded", "error", "queued"]),
+            )
+        ).scalars().all()
+    else:
+        files = db.execute(
+            select(KBFile).where(
+                KBFile.portal_id.in_(scope_portal_ids),
+                KBFile.status.in_(["uploaded", "error", "queued"]),
+            )
+        ).scalars().all()
     if not files:
         return JSONResponse({"status": "ok", "queued": 0})
     account_id = db.execute(select(Portal.account_id).where(Portal.id == portal_id)).scalar()
@@ -2438,6 +3009,7 @@ async def reindex_portal_kb(
             f.transcript_status = "queued" if is_media_transcription_enabled(db, portal_id) else "not_enabled"
             f.transcript_error = None
         job = KBJob(
+            account_id=f.account_id,
             portal_id=f.portal_id,
             job_type="ingest",
             status="queued",
@@ -2487,6 +3059,7 @@ async def reindex_kb_file(
         rec.transcript_error = None
     db.add(rec)
     job = KBJob(
+        account_id=rec.account_id,
         portal_id=rec.portal_id,
         job_type="ingest",
         status="queued",
@@ -2531,9 +3104,14 @@ async def delete_kb_file(
     # unlink from collections first (FK safety)
     db.execute(delete(KBCollectionFile).where(KBCollectionFile.file_id == rec.id))
     # drop pending/history jobs for this file
-    jobs = db.execute(
-        select(KBJob).where(KBJob.portal_id == rec.portal_id)
-    ).scalars().all()
+    if rec.account_id:
+        jobs = db.execute(
+            select(KBJob).where(KBJob.account_id == rec.account_id)
+        ).scalars().all()
+    else:
+        jobs = db.execute(
+            select(KBJob).where(KBJob.portal_id == rec.portal_id)
+        ).scalars().all()
     job_ids_to_delete: list[int] = []
     for j in jobs:
         payload = j.payload_json if isinstance(j.payload_json, dict) else {}
@@ -2570,6 +3148,7 @@ async def download_kb_file(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     rec = _account_scoped_file(db, portal_id, file_id)
+    rec = _acl_guard_file(db, file_rec=rec, portal_id=portal_id, request=request)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     if not rec.storage_path or not os.path.exists(rec.storage_path):
@@ -2598,6 +3177,7 @@ async def get_kb_file_signed_url(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     rec = _account_scoped_file(db, portal_id, file_id)
+    rec = _acl_guard_file(db, file_rec=rec, portal_id=portal_id, request=request)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     ttl = max(30, min(int(ttl_seconds or 300), 3600))
@@ -2643,6 +3223,7 @@ async def get_kb_file_content(
     if int(exp) < now or not hmac.compare_digest(expected, str(sig or "")):
         return _err(request, "forbidden", "Forbidden", 403)
     rec = _account_scoped_file(db, portal_id, file_id)
+    rec = _acl_guard_file(db, file_rec=rec, portal_id=portal_id, request=request)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     storage_path = rec.storage_path
@@ -2690,12 +3271,13 @@ async def get_kb_file_chunks(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     rec = _account_scoped_file(db, portal_id, file_id)
+    rec = _acl_guard_file(db, file_rec=rec, portal_id=portal_id, request=request)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     lim = max(1, min(int(limit or 1500), 4000))
     rows = db.execute(
         select(KBChunk)
-        .where(KBChunk.portal_id == rec.portal_id, KBChunk.file_id == file_id)
+        .where(KBChunk.file_id == file_id)
         .order_by(KBChunk.chunk_index.asc())
         .limit(lim)
     ).scalars().all()
@@ -2728,6 +3310,7 @@ async def get_kb_file_transcript_status(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     rec = _account_scoped_file(db, portal_id, file_id)
+    rec = _acl_guard_file(db, file_rec=rec, portal_id=portal_id, request=request)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     is_media = _is_media_file(rec.filename, rec.mime_type)
@@ -2785,6 +3368,7 @@ async def start_kb_file_transcript(
     rec.transcript_error = None
     db.add(rec)
     job = KBJob(
+        account_id=rec.account_id,
         portal_id=rec.portal_id,
         job_type="ingest",
         status="queued",
@@ -2823,6 +3407,7 @@ async def get_kb_file_transcript(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     rec = _account_scoped_file(db, portal_id, file_id)
+    rec = _acl_guard_file(db, file_rec=rec, portal_id=portal_id, request=request)
     if not rec:
         return _err(request, "not_found", "not_found", 404)
     if not _is_media_file(rec.filename, rec.mime_type):
@@ -2894,10 +3479,23 @@ async def list_kb_collections(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
-    rows = db.execute(
-        select(KBCollection).where(KBCollection.portal_id.in_(scope_portal_ids)).order_by(KBCollection.id.desc())
-    ).scalars().all()
+    portal = db.get(Portal, int(portal_id))
+    if portal and portal.account_id:
+        rows = db.execute(
+            select(KBCollection)
+            .where(
+                sa.or_(
+                    KBCollection.account_id == int(portal.account_id),
+                    sa.and_(KBCollection.account_id.is_(None), KBCollection.portal_id.in_(_account_scope_portal_ids(db, portal_id))),
+                )
+            )
+            .order_by(KBCollection.id.desc())
+        ).scalars().all()
+    else:
+        scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+        rows = db.execute(
+            select(KBCollection).where(KBCollection.portal_id.in_(scope_portal_ids)).order_by(KBCollection.id.desc())
+        ).scalars().all()
     if rows:
         counts = dict(db.execute(
             select(KBCollectionFile.collection_id, func.count())
@@ -2934,8 +3532,10 @@ async def create_kb_collection(
     name = (body.name or "").strip()
     if not name:
         return _err(request, "missing_name", "missing_name", 400)
-    owner_portal_id = _primary_account_portal_id(db, portal_id)
+    portal = db.get(Portal, int(portal_id))
+    owner_portal_id = _kb_storage_portal_id(db, portal_id)
     rec = KBCollection(
+        account_id=int(portal.account_id) if portal and portal.account_id else None,
         portal_id=owner_portal_id,
         name=name[:128],
         color=(body.color or "").strip() or None,
@@ -3038,17 +3638,26 @@ async def list_collection_files(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
-    collection = db.execute(
-        select(KBCollection).where(KBCollection.id == collection_id, KBCollection.portal_id.in_(scope_portal_ids))
-    ).scalar_one_or_none()
+    collection = _account_scoped_collection(db, portal_id, collection_id)
     if not collection:
         return _err(request, "not_found", "not_found", 404)
-    rows = db.execute(
+    rows = [
+        int(x)
+        for x in db.execute(
         select(KBCollectionFile.file_id)
         .where(KBCollectionFile.collection_id == collection_id)
-    ).scalars().all()
-    return JSONResponse({"file_ids": [int(x) for x in rows]})
+        ).scalars().all()
+    ]
+    acl_ctx = _portal_acl_subject_ctx(db, portal_id=portal_id, request=request, audience="staff")
+    allowed_ids = _filter_file_ids_by_kb_acl(
+        db,
+        file_ids=set(rows),
+        membership_id=acl_ctx.get("membership_id"),
+        group_ids=acl_ctx.get("group_ids"),
+        role=acl_ctx.get("role"),
+        audience=acl_ctx.get("audience"),
+    )
+    return JSONResponse({"file_ids": [int(x) for x in rows if int(x) in allowed_ids]})
 
 
 @router.delete("/portals/{portal_id}/kb/collections/{collection_id}/files/{file_id}")
@@ -3089,10 +3698,23 @@ async def list_kb_smart_folders(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
-    rows = db.execute(
-        select(KBSmartFolder).where(KBSmartFolder.portal_id.in_(scope_portal_ids)).order_by(KBSmartFolder.id.desc())
-    ).scalars().all()
+    portal = db.get(Portal, int(portal_id))
+    if portal and portal.account_id:
+        rows = db.execute(
+            select(KBSmartFolder)
+            .where(
+                sa.or_(
+                    KBSmartFolder.account_id == int(portal.account_id),
+                    sa.and_(KBSmartFolder.account_id.is_(None), KBSmartFolder.portal_id.in_(_account_scope_portal_ids(db, portal_id))),
+                )
+            )
+            .order_by(KBSmartFolder.id.desc())
+        ).scalars().all()
+    else:
+        scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+        rows = db.execute(
+            select(KBSmartFolder).where(KBSmartFolder.portal_id.in_(scope_portal_ids)).order_by(KBSmartFolder.id.desc())
+        ).scalars().all()
     return JSONResponse({
         "items": [
             {
@@ -3121,8 +3743,10 @@ async def create_kb_smart_folder(
     name = (body.name or "").strip()
     if not name:
         return _err(request, "missing_name", "missing_name", 400)
-    owner_portal_id = _primary_account_portal_id(db, portal_id)
+    portal = db.get(Portal, int(portal_id))
+    owner_portal_id = _kb_storage_portal_id(db, portal_id)
     rec = KBSmartFolder(
+        account_id=int(portal.account_id) if portal and portal.account_id else None,
         portal_id=owner_portal_id,
         name=name[:128],
         system_tag=(body.system_tag or "").strip() or None,
@@ -3133,6 +3757,297 @@ async def create_kb_smart_folder(
     db.commit()
     db.refresh(rec)
     return JSONResponse({"id": rec.id, "name": rec.name})
+
+
+@router.get("/portals/{portal_id}/kb/folders")
+async def list_kb_folders(
+    portal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    _require_portal_admin(db, portal_id, request)
+    portal = db.get(Portal, int(portal_id))
+    scope_portal_ids = _account_scope_portal_ids(db, portal_id)
+    if portal and portal.account_id:
+        rows = db.execute(
+            select(KBFolder)
+            .where(
+                sa.or_(
+                    KBFolder.account_id == int(portal.account_id),
+                    sa.and_(KBFolder.account_id.is_(None), KBFolder.portal_id.in_(scope_portal_ids)),
+                )
+            )
+            .order_by(KBFolder.parent_id.asc().nullsfirst(), KBFolder.id.asc())
+        ).scalars().all()
+    else:
+        rows = db.execute(
+            select(KBFolder).where(KBFolder.portal_id.in_(scope_portal_ids)).order_by(KBFolder.parent_id.asc().nullsfirst(), KBFolder.id.asc())
+        ).scalars().all()
+    return JSONResponse(
+        {
+            "items": [
+                {
+                    "id": row.id,
+                    "name": row.name,
+                    "parent_id": row.parent_id,
+                    "access_badges": _kb_folder_access_badges(db, int(row.id)),
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in rows
+            ]
+        }
+    )
+
+
+@router.post("/portals/{portal_id}/kb/folders")
+async def create_kb_folder(
+    portal_id: int,
+    request: Request,
+    body: FolderBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    _require_portal_admin(db, portal_id, request)
+    name = (body.name or "").strip()
+    if not name:
+        return _err(request, "missing_name", "missing_name", 400)
+    parent = None
+    if body.parent_id:
+        parent = _account_scoped_kb_folder(db, portal_id, int(body.parent_id))
+        if not parent:
+            return _err(request, "parent_not_found", "parent_not_found", 404)
+    portal = db.get(Portal, int(portal_id))
+    owner_portal_id = _kb_storage_portal_id(db, portal_id)
+    rec = KBFolder(
+        account_id=int(portal.account_id) if portal and portal.account_id else None,
+        portal_id=owner_portal_id,
+        parent_id=parent.id if parent else None,
+        name=name[:128],
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return JSONResponse({"id": rec.id, "name": rec.name, "parent_id": rec.parent_id})
+
+
+@router.patch("/portals/{portal_id}/kb/folders/{folder_id}")
+async def update_kb_folder(
+    portal_id: int,
+    folder_id: int,
+    request: Request,
+    body: FolderBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    _require_portal_admin(db, portal_id, request)
+    rec = _account_scoped_kb_folder(db, portal_id, folder_id)
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    name = (body.name or "").strip()
+    if name:
+        rec.name = name[:128]
+    if body.parent_id is not None:
+        if int(body.parent_id or 0) == int(rec.id):
+            return _err(request, "invalid_parent", "invalid_parent", 400)
+        if body.parent_id:
+            parent = _account_scoped_kb_folder(db, portal_id, int(body.parent_id))
+            if not parent:
+                return _err(request, "parent_not_found", "parent_not_found", 404)
+            rec.parent_id = int(parent.id)
+        else:
+            rec.parent_id = None
+    rec.updated_at = datetime.utcnow()
+    db.add(rec)
+    db.commit()
+    return JSONResponse({"status": "ok"})
+
+
+@router.delete("/portals/{portal_id}/kb/folders/{folder_id}")
+async def delete_kb_folder(
+    portal_id: int,
+    folder_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    _require_portal_admin(db, portal_id, request)
+    rec = _account_scoped_kb_folder(db, portal_id, folder_id)
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    has_children = db.execute(select(KBFolder.id).where(KBFolder.parent_id == rec.id).limit(1)).scalar_one_or_none()
+    has_files = db.execute(select(KBFile.id).where(KBFile.folder_id == rec.id).limit(1)).scalar_one_or_none()
+    if has_children or has_files:
+        return _err(request, "folder_not_empty", "folder_not_empty", 409)
+    db.execute(delete(KBFolder).where(KBFolder.id == rec.id))
+    db.commit()
+    return JSONResponse({"status": "ok"})
+
+
+@router.post("/portals/{portal_id}/kb/files/{file_id}/folder")
+async def move_kb_file_to_folder(
+    portal_id: int,
+    file_id: int,
+    request: Request,
+    body: FileFolderBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    _require_portal_admin(db, portal_id, request)
+    rec = _account_scoped_file(db, portal_id, file_id)
+    if not rec:
+        return _err(request, "file_not_found", "file_not_found", 404)
+    folder = None
+    if body.folder_id:
+        folder = _account_scoped_kb_folder(db, portal_id, int(body.folder_id))
+        if not folder:
+            return _err(request, "folder_not_found", "folder_not_found", 404)
+    rec.folder_id = int(folder.id) if folder else None
+    rec.updated_at = datetime.utcnow()
+    db.add(rec)
+    db.commit()
+    return JSONResponse({"status": "ok", "folder_id": rec.folder_id})
+
+
+@router.get("/portals/{portal_id}/kb/folders/{folder_id}/access")
+async def get_kb_folder_access(
+    portal_id: int,
+    folder_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    _require_portal_admin(db, portal_id, request)
+    rec = _account_scoped_kb_folder(db, portal_id, folder_id)
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    rows = db.execute(
+        select(KBFolderAccess)
+        .where(KBFolderAccess.folder_id == rec.id)
+        .order_by(KBFolderAccess.id.asc())
+    ).scalars().all()
+    return JSONResponse({"items": _acl_items_payload(rows)})
+
+
+@router.put("/portals/{portal_id}/kb/folders/{folder_id}/access")
+async def put_kb_folder_access(
+    portal_id: int,
+    folder_id: int,
+    request: Request,
+    body: ACLListBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    _require_portal_admin(db, portal_id, request)
+    rec = _account_scoped_kb_folder(db, portal_id, folder_id)
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    try:
+        items = _replace_folder_acl(db, rec.id, body.items or [])
+    except ValueError as exc:
+        return _err(request, str(exc), str(exc), 400)
+    db.commit()
+    return JSONResponse({"status": "ok", "items": items})
+
+
+@router.get("/portals/{portal_id}/kb/files/{file_id}/access")
+async def get_kb_file_access(
+    portal_id: int,
+    file_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    _require_portal_admin(db, portal_id, request)
+    rec = _account_scoped_file(db, portal_id, file_id)
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    rows = db.execute(
+        select(KBFileAccess)
+        .where(KBFileAccess.file_id == rec.id)
+        .order_by(KBFileAccess.id.asc())
+    ).scalars().all()
+    return JSONResponse({"items": _acl_items_payload(rows)})
+
+
+@router.put("/portals/{portal_id}/kb/files/{file_id}/access")
+async def put_kb_file_access(
+    portal_id: int,
+    file_id: int,
+    request: Request,
+    body: ACLListBody,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    _require_portal_admin(db, portal_id, request)
+    rec = _account_scoped_file(db, portal_id, file_id)
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    try:
+        items = _replace_file_acl(db, rec.id, body.items or [])
+    except ValueError as exc:
+        return _err(request, str(exc), str(exc), 400)
+    db.commit()
+    return JSONResponse({"status": "ok", "items": items})
+
+
+@router.get("/portals/{portal_id}/kb/files/{file_id}/access/effective")
+async def get_kb_file_effective_access_preview(
+    portal_id: int,
+    file_id: int,
+    request: Request,
+    membership_id: int | None = None,
+    role: str | None = None,
+    audience: str | None = None,
+    db: Session = Depends(get_db),
+    pid: int = Depends(require_portal_access),
+):
+    if pid != portal_id:
+        return _err(request, "forbidden", "Forbidden", 403)
+    rec = _account_scoped_file(db, portal_id, file_id)
+    if not rec:
+        return _err(request, "not_found", "not_found", 404)
+    group_ids = _kb_group_ids_for_membership(db, membership_id)
+    folder_access = "none"
+    if rec.folder_id:
+        folder_rows = db.execute(
+            select(KBFolderAccess.principal_type, KBFolderAccess.principal_id, KBFolderAccess.access_level)
+            .where(KBFolderAccess.folder_id == rec.folder_id)
+        ).all()
+        folder_access = resolve_kb_acl_access(
+            [(r[0], r[1], r[2]) for r in folder_rows],
+            kb_acl_principals_for_membership(membership_id, role, audience, group_ids),
+        )
+    file_rows = db.execute(
+        select(KBFileAccess.principal_type, KBFileAccess.principal_id, KBFileAccess.access_level)
+        .where(KBFileAccess.file_id == rec.id)
+    ).all()
+    effective = resolve_kb_acl_access(
+        [(r[0], r[1], r[2]) for r in file_rows],
+        kb_acl_principals_for_membership(membership_id, role, audience, group_ids),
+        inherited_access=folder_access,
+    )
+    return JSONResponse({"folder_access": folder_access, "effective_access": effective})
 
 
 @router.delete("/portals/{portal_id}/kb/smart-folders/{folder_id}")
@@ -3164,18 +4079,41 @@ async def get_kb_topics(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
+    acl_ctx = _portal_acl_subject_ctx(db, portal_id=portal_id, request=request, audience="staff")
+    portal = db.get(Portal, int(portal_id))
     scope_portal_ids = _account_scope_portal_ids(db, portal_id)
-    files = db.execute(
-        select(KBFile.id, KBFile.filename)
-        .where(KBFile.portal_id.in_(scope_portal_ids))
-        .order_by(KBFile.id.desc())
-    ).all()
+    if portal and portal.account_id:
+        files = db.execute(
+            select(KBFile.id, KBFile.filename)
+            .where(
+                sa.or_(
+                    KBFile.account_id == int(portal.account_id),
+                    sa.and_(KBFile.account_id.is_(None), KBFile.portal_id.in_(scope_portal_ids)),
+                )
+            )
+            .order_by(KBFile.id.desc())
+        ).all()
+    else:
+        files = db.execute(
+            select(KBFile.id, KBFile.filename)
+            .where(KBFile.portal_id.in_(scope_portal_ids))
+            .order_by(KBFile.id.desc())
+        ).all()
+    file_ids_allowed = _filter_file_ids_by_kb_acl(
+        db,
+        file_ids={int(file_id) for file_id, _filename in files},
+        membership_id=acl_ctx.get("membership_id"),
+        group_ids=acl_ctx.get("group_ids"),
+        role=acl_ctx.get("role"),
+        audience=acl_ctx.get("audience"),
+    )
+    files = [(file_id, filename) for file_id, filename in files if int(file_id) in file_ids_allowed]
     topic_hits: dict[str, list[int]] = {t["id"]: [] for t in _KB_TOPICS}
     file_texts: list[tuple[int, str]] = []
     for file_id, filename in files:
         chunks = db.execute(
             select(KBChunk.text)
-            .where(KBChunk.portal_id.in_(scope_portal_ids), KBChunk.file_id == file_id)
+            .where(KBChunk.file_id == file_id)
             .limit(20)
         ).scalars().all()
         text = (filename or "") + " " + " ".join(chunks)
@@ -3185,13 +4123,33 @@ async def get_kb_topics(
                 topic_hits[t["id"]].append(int(file_id))
     settings = get_portal_kb_settings(db, portal_id)
     threshold = int(settings.get("smart_folder_threshold") or 5)
-    existing = db.execute(
-        select(KBSmartFolder.system_tag)
-        .where(KBSmartFolder.portal_id.in_(scope_portal_ids), KBSmartFolder.system_tag.isnot(None))
-    ).scalars().all()
-    existing_names = db.execute(
-        select(KBSmartFolder.name).where(KBSmartFolder.portal_id.in_(scope_portal_ids))
-    ).scalars().all()
+    if portal and portal.account_id:
+        existing = db.execute(
+            select(KBSmartFolder.system_tag)
+            .where(
+                sa.or_(
+                    KBSmartFolder.account_id == int(portal.account_id),
+                    sa.and_(KBSmartFolder.account_id.is_(None), KBSmartFolder.portal_id.in_(scope_portal_ids)),
+                ),
+                KBSmartFolder.system_tag.isnot(None),
+            )
+        ).scalars().all()
+        existing_names = db.execute(
+            select(KBSmartFolder.name).where(
+                sa.or_(
+                    KBSmartFolder.account_id == int(portal.account_id),
+                    sa.and_(KBSmartFolder.account_id.is_(None), KBSmartFolder.portal_id.in_(scope_portal_ids)),
+                )
+            )
+        ).scalars().all()
+    else:
+        existing = db.execute(
+            select(KBSmartFolder.system_tag)
+            .where(KBSmartFolder.portal_id.in_(scope_portal_ids), KBSmartFolder.system_tag.isnot(None))
+        ).scalars().all()
+        existing_names = db.execute(
+            select(KBSmartFolder.name).where(KBSmartFolder.portal_id.in_(scope_portal_ids))
+        ).scalars().all()
     existing_tags = {str(x) for x in existing if x}
     existing_name_set = {str(x or "").strip().lower() for x in existing_names if str(x or "").strip()}
     topics_out = []
@@ -3263,6 +4221,7 @@ async def get_portal_kb_settings_api(
     _require_portal_admin(db, portal_id, request)
     out = get_portal_kb_settings(db, portal_id)
     out["settings_portal_id"] = int(out.get("settings_portal_id") or portal_id)
+    out["settings_scope"] = str(out.get("settings_scope") or ("account" if out.get("settings_account_id") else "portal"))
     available, reason = _diarization_runtime_status()
     diar_gate = ((out.get("feature_gates") or {}).get("speaker_diarization") or {})
     media_gate = ((out.get("feature_gates") or {}).get("media_transcription") or {})
@@ -3404,6 +4363,7 @@ async def set_portal_kb_settings_api(
         smart_folder_threshold=body.smart_folder_threshold,
     )
     out["settings_portal_id"] = int(out.get("settings_portal_id") or portal_id)
+    out["settings_scope"] = str(out.get("settings_scope") or ("account" if out.get("settings_account_id") else "portal"))
     return JSONResponse(out)
 
 
@@ -3629,7 +4589,7 @@ async def add_portal_kb_url_source(
     if pid != portal_id:
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
-    owner_portal_id = _primary_account_portal_id(db, portal_id)
+    owner_portal_id = _kb_storage_portal_id(db, portal_id)
     aud = (body.audience or "staff").strip().lower()
     if aud not in ("staff", "client"):
         aud = "staff"
@@ -3669,7 +4629,16 @@ async def list_portal_kb_sources(
         return _err(request, "forbidden", "Forbidden", 403)
     _require_portal_admin(db, portal_id, request)
     scope_portal_ids = _account_scope_portal_ids(db, portal_id)
-    q = select(KBSource).where(KBSource.portal_id.in_(scope_portal_ids)).order_by(KBSource.id.desc()).limit(200)
+    portal = db.get(Portal, int(portal_id))
+    if portal and portal.account_id:
+        q = select(KBSource).where(
+            sa.or_(
+                KBSource.account_id == int(portal.account_id),
+                sa.and_(KBSource.account_id.is_(None), KBSource.portal_id.in_(_account_scope_portal_ids(db, portal_id))),
+            )
+        ).order_by(KBSource.id.desc()).limit(200)
+    else:
+        q = select(KBSource).where(KBSource.portal_id.in_(scope_portal_ids)).order_by(KBSource.id.desc()).limit(200)
     rows = db.execute(q).scalars().all()
     # show only latest entry per URL
     seen: set[str] = set()

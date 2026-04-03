@@ -81,6 +81,29 @@ class AccountMembership(Base):
     )
 
 
+class AccountUserGroup(Base):
+    __tablename__ = "account_user_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    kind = Column(String(32), nullable=False, default="staff")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "name", name="uq_account_user_groups_account_name"),
+    )
+
+
+class AccountUserGroupMember(Base):
+    __tablename__ = "account_user_group_members"
+
+    group_id = Column(Integer, ForeignKey("account_user_groups.id", ondelete="CASCADE"), primary_key=True)
+    membership_id = Column(Integer, ForeignKey("account_memberships.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class AccountPermission(Base):
     __tablename__ = "account_permissions"
 

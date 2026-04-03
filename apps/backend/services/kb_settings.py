@@ -99,7 +99,7 @@ def _resolve_portal_account_id(db: Session, portal_id: int) -> int | None:
     return int(portal.account_id)
 
 
-def _primary_account_portal_id(db: Session, account_id: int) -> int | None:
+def _account_bridge_portal_id(db: Session, account_id: int) -> int | None:
     integrations = (
         db.query(AccountIntegration)
         .filter(AccountIntegration.account_id == int(account_id), AccountIntegration.provider == "bitrix")
@@ -185,9 +185,9 @@ def _get_or_create_account_kb_row(db: Session, account_id: int) -> AccountKBSett
     row = db.get(AccountKBSetting, int(account_id))
     if row:
         return row
-    primary_portal_id = _primary_account_portal_id(db, int(account_id))
-    if primary_portal_id:
-        return _clone_portal_settings_to_account(db, int(account_id), int(primary_portal_id))
+    bridge_portal_id = _account_bridge_portal_id(db, int(account_id))
+    if bridge_portal_id:
+        return _clone_portal_settings_to_account(db, int(account_id), int(bridge_portal_id))
     row = AccountKBSetting(account_id=int(account_id))
     db.add(row)
     db.commit()
@@ -428,10 +428,11 @@ def get_account_kb_settings(db: Session, account_id: int, *, policy_portal_id: i
         "plan_name": (policy.get("plan") or {}).get("name") if policy.get("plan") else None,
         "source": policy.get("source"),
     }
+    out["settings_scope"] = "account"
     out["settings_account_id"] = int(account_id)
-    primary_portal_id = _primary_account_portal_id(db, int(account_id))
-    if primary_portal_id is not None:
-        out["settings_portal_id"] = int(primary_portal_id)
+    bridge_portal_id = _account_bridge_portal_id(db, int(account_id))
+    if bridge_portal_id is not None:
+        out["settings_portal_id"] = int(bridge_portal_id)
     elif policy_portal_id is not None:
         out["settings_portal_id"] = int(policy_portal_id)
     if not gates["media_transcription"]["allowed"]:
@@ -451,6 +452,7 @@ def get_portal_kb_settings(db: Session, portal_id: int) -> dict[str, Any]:
         out = {**_default_kb_settings(), **get_portal_bot_settings(db, portal_id)}
     else:
         out = {**_default_kb_settings(), **_row_to_kb_settings(row), **get_portal_bot_settings(db, portal_id)}
+    out["settings_scope"] = "portal"
     gates, policy = _portal_feature_gates(db, portal_id)
     out["feature_gates"] = gates
     out["billing_policy"] = {

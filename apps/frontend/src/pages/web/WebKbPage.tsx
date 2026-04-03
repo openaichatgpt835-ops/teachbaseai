@@ -1,12 +1,13 @@
 ﻿
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { coreModuleDescription, coreModuleLabel } from "../../../../shared/ui/modules";
-import { fetchPortal, getWebPortalInfo } from "./auth";
+import { fetchPortal, fetchWeb, getActiveAccountId, getWebPortalInfo } from "./auth";
 import { useLocation } from "react-router-dom";
 
 type KbFile = {
   id: number;
   filename: string;
+  folder_id?: number | null;
   mime_type?: string;
   source_type?: string;
   source_url?: string;
@@ -17,11 +18,23 @@ type KbFile = {
   uploaded_by_id?: string;
   uploaded_by_name?: string;
   query_count?: number;
+  access_badges?: { staff?: string; client?: string };
 };
 
-type KbCollection = { id: number; name: string; color?: string; file_count?: number };
+type KbFolder = {
+  id: number;
+  name: string;
+  parent_id?: number | null;
+  access_badges?: { staff?: string; client?: string };
+  created_at?: string | null;
+};
 type KbSmartFolder = { id: number; name: string; system_tag?: string; rules?: any };
 type KbTopic = { id: string; name: string; count: number; file_ids: number[] };
+type KbAclItem = { principal_type: string; principal_id: string; access_level: string };
+type KbAclDraftItem = { principal_type: string; principal_id: string; access_level: string };
+type KbAccountUser = { membership_id: number; display_name: string; role: string };
+type KbAccountGroup = { id: number; name: string; kind: "staff" | "client"; membership_ids: number[] };
+type KbAccessSummary = { total_ready_files: number; open_all_clients: number; open_client_groups: number; closed_for_clients: number };
 type SearchMatch = {
   file_id: number;
   filename?: string;
@@ -30,11 +43,10 @@ type SearchMatch = {
   page_num?: number | null;
   start_ms?: number | null;
 };
-type Filter = { kind: "all" | "collection" | "smart" | "topic"; id?: number | string };
+type Filter = { kind: "all" | "folder" | "smart" | "topic"; id?: number | string };
 type KbPageCacheState = {
   kbFiles: KbFile[];
-  kbCollections: KbCollection[];
-  kbCollectionFiles: Record<number, number[]>;
+  kbFolders: KbFolder[];
   kbSmartFolders: KbSmartFolder[];
   kbTopics: KbTopic[];
   kbTopicSuggestions: { id: string; name: string; count: number }[];
@@ -43,7 +55,7 @@ type KbPageCacheState = {
   kbSort: "new" | "name" | "status";
   kbTypeFilter: string;
   kbPeopleFilter: string;
-  kbLocationFilter: string;
+  kbFolderFilter: string;
   kbViewMode: "table" | "grid";
 };
 
@@ -132,6 +144,71 @@ function isInlinePreviewable(filename: string | undefined) {
   ].includes(ext);
 }
 
+function accessBadgeMeta(kind: "staff" | "client", value?: string) {
+  if (kind === "staff") {
+    if (value === "staff_admin") return { label: "Сотрудники: admin", className: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+    if (value === "staff_read") return { label: "Сотрудники: read", className: "border-sky-200 bg-sky-50 text-sky-700" };
+    return { label: "Сотрудники: нет", className: "border-slate-200 bg-slate-50 text-slate-500" };
+  }
+  if (value === "client_all") return { label: "Клиенты: все", className: "border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700" };
+  if (value === "client_groups") return { label: "Клиенты: группы", className: "border-amber-200 bg-amber-50 text-amber-700" };
+  return { label: "Клиенты: закрыто", className: "border-slate-200 bg-slate-50 text-slate-500" };
+}
+
+function renderAccessBadges(file: KbFile) {
+  const staff = accessBadgeMeta("staff", file.access_badges?.staff);
+  const client = accessBadgeMeta("client", file.access_badges?.client);
+  return (
+    <div className="mt-1 flex flex-wrap gap-1">
+      <span className={`rounded-full border px-2 py-0.5 text-[11px] ${staff.className}`}>{staff.label}</span>
+      <span className={`rounded-full border px-2 py-0.5 text-[11px] ${client.className}`}>{client.label}</span>
+    </div>
+  );
+}
+
+function renderCompactAccessBadges(target: { access_badges?: { staff?: string; client?: string } }) {
+  const staff = accessBadgeMeta("staff", target.access_badges?.staff);
+  const client = accessBadgeMeta("client", target.access_badges?.client);
+  return (
+    <div className="flex flex-wrap justify-end gap-1">
+      <span className={`rounded-full border px-1.5 py-0.5 text-[10px] ${staff.className}`}>{staff.label.replace("Сотрудники: ", "")}</span>
+      <span className={`rounded-full border px-1.5 py-0.5 text-[10px] ${client.className}`}>{client.label.replace("Клиенты: ", "")}</span>
+    </div>
+  );
+}
+
+function clientBadgeCategory(value?: string) {
+  if (value === "client_all") return "all";
+  if (value === "client_groups") return "groups";
+  return "closed";
+}
+
+function projectedClientBadgeForDraft(
+  draft: KbAclDraftItem[],
+  file: KbFile,
+  folderMap: Map<number, KbFolder>,
+  groups: KbAccountGroup[],
+) {
+  if (!draft.length) {
+    if (file.folder_id) return clientBadgeCategory(folderMap.get(Number(file.folder_id))?.access_badges?.client);
+    return "closed";
+  }
+  const allowsAllClients = draft.some(
+    (item) =>
+      item.access_level !== "none" &&
+      ((item.principal_type === "audience" && item.principal_id === "client") ||
+        (item.principal_type === "role" && item.principal_id === "client")),
+  );
+  if (allowsAllClients) return "all";
+  const allowsClientGroups = draft.some((item) => {
+    if (item.principal_type !== "group" || item.access_level === "none") return false;
+    const group = groups.find((candidate) => String(candidate.id) === String(item.principal_id));
+    return group?.kind === "client";
+  });
+  if (allowsClientGroups) return "groups";
+  return "closed";
+}
+
 function buildExternalEmbedUrl(sourceUrl?: string, startMs?: number | null) {
   const raw = (sourceUrl || "").trim();
   if (!raw) return "";
@@ -213,6 +290,157 @@ function fallbackFileIdsByTopic(
   return ids;
 }
 
+function kbAccessLabel(level: string | undefined) {
+  const value = String(level || "none").toLowerCase();
+  if (value === "admin") return "Полный доступ";
+  if (value === "write") return "Редактирование";
+  if (value === "read") return "Чтение и поиск";
+  return "Нет доступа";
+}
+
+function kbPrincipalLabel(item: KbAclItem, accountUsers?: KbAccountUser[], accountGroups?: KbAccountGroup[]) {
+  if (item.principal_type === "role") {
+    if (item.principal_id === "owner") return "Владельцы";
+    if (item.principal_id === "admin") return "Админы";
+    if (item.principal_id === "member") return "Сотрудники";
+    if (item.principal_id === "client") return "Клиентские аккаунты";
+  }
+  if (item.principal_type === "audience") {
+    if (item.principal_id === "staff") return "Все сотрудники";
+    if (item.principal_id === "client") return "Клиентский бот";
+  }
+  if (item.principal_type === "membership") {
+    const match = (accountUsers || []).find((user) => String(user.membership_id) === String(item.principal_id));
+    if (match) return `${match.display_name} (${match.role})`;
+    return `Пользователь ${item.principal_id}`;
+  }
+  if (item.principal_type === "group") {
+    const match = (accountGroups || []).find((group) => String(group.id) === String(item.principal_id));
+    if (match) return `${match.kind === "client" ? "Клиентская группа" : "Группа"}: ${match.name}`;
+    return `Группа ${item.principal_id}`;
+  }
+  return `${item.principal_type}:${item.principal_id}`;
+}
+
+function kbAclTemplate(
+  template: "inherit" | "staff" | "clients" | "staff_clients" | "group" | "client_group",
+  options?: { groupId?: number | null },
+): KbAclDraftItem[] {
+  if (template === "inherit") return [];
+  const base: KbAclDraftItem[] = [
+    { principal_type: "role", principal_id: "owner", access_level: "admin" },
+    { principal_type: "role", principal_id: "admin", access_level: "admin" },
+  ];
+  if (template === "staff") {
+    return [...base, { principal_type: "role", principal_id: "member", access_level: "read" }];
+  }
+  if (template === "clients") {
+    return [
+      ...base,
+      { principal_type: "role", principal_id: "member", access_level: "none" },
+      { principal_type: "audience", principal_id: "client", access_level: "read" },
+    ];
+  }
+  if (template === "group") {
+    const groupId = Number(options?.groupId || 0);
+    return [
+      ...base,
+      { principal_type: "role", principal_id: "member", access_level: "none" },
+      ...(groupId > 0 ? [{ principal_type: "group", principal_id: String(groupId), access_level: "read" } satisfies KbAclDraftItem] : []),
+    ];
+  }
+  if (template === "client_group") {
+    const groupId = Number(options?.groupId || 0);
+    return [
+      ...base,
+      { principal_type: "role", principal_id: "member", access_level: "none" },
+      { principal_type: "role", principal_id: "client", access_level: "none" },
+      ...(groupId > 0 ? [{ principal_type: "group", principal_id: String(groupId), access_level: "read" } satisfies KbAclDraftItem] : []),
+    ];
+  }
+  return [
+    ...base,
+    { principal_type: "role", principal_id: "member", access_level: "read" },
+    { principal_type: "audience", principal_id: "client", access_level: "read" },
+  ];
+}
+
+function renderAccessOriginCard(opts: {
+  title: string;
+  tone?: "blue" | "amber" | "emerald";
+  body: string;
+}) {
+  const tone = opts.tone || "blue";
+  const toneMap = {
+    blue: "border-sky-200 bg-sky-50 text-sky-800",
+    amber: "border-amber-200 bg-amber-50 text-amber-800",
+    emerald: "border-emerald-200 bg-emerald-50 text-emerald-800",
+  } as const;
+  return (
+    <div className={`rounded-xl border px-3 py-3 ${toneMap[tone]}`}>
+      <div className="text-xs font-semibold uppercase tracking-wide">{opts.title}</div>
+      <div className="mt-1 text-sm">{opts.body}</div>
+    </div>
+  );
+}
+
+function summarizeClientVisibility(items: KbAclItem[], accountGroups: KbAccountGroup[]) {
+  if (!items.length) return "Клиентский доступ не задан явно.";
+  const allClients = items.some(
+    (item) =>
+      (item.principal_type === "audience" && item.principal_id === "client" && item.access_level !== "none") ||
+      (item.principal_type === "role" && item.principal_id === "client" && item.access_level !== "none"),
+  );
+  if (allClients) return "Доступно всем клиентам, которые работают через клиентский бот.";
+  const groups = items
+    .filter((item) => item.principal_type === "group" && item.access_level !== "none")
+    .map((item) => accountGroups.find((group) => String(group.id) === String(item.principal_id)))
+    .filter((group): group is KbAccountGroup => !!group && group.kind === "client");
+  if (groups.length) return `Доступно только клиентским группам: ${groups.map((group) => group.name).join(", ")}.`;
+  return "Клиентский доступ ограничен или управляется через другие явные правила.";
+}
+
+function audienceOptionLabel(value: string) {
+  if (value === "staff") return "Все сотрудники";
+  if (value === "client") return "Клиентский бот";
+  return value;
+}
+
+function roleOptionLabel(value: string) {
+  if (value === "owner") return "Владельцы";
+  if (value === "admin") return "Администраторы";
+  if (value === "member") return "Сотрудники";
+  if (value === "client") return "Клиентские аккаунты";
+  return value;
+}
+
+function buildFolderChildrenMap(folders: KbFolder[]) {
+  const map = new Map<number | null, KbFolder[]>();
+  folders.forEach((folder) => {
+    const key = folder.parent_id ?? null;
+    const bucket = map.get(key) || [];
+    bucket.push(folder);
+    map.set(key, bucket);
+  });
+  for (const bucket of map.values()) {
+    bucket.sort((a, b) => a.name.localeCompare(b.name, "ru"));
+  }
+  return map;
+}
+
+function collectFolderSubtreeIds(childrenMap: Map<number | null, KbFolder[]>, folderId: number): number[] {
+  const ids = [folderId];
+  const walk = (parentId: number) => {
+    const children = childrenMap.get(parentId) || [];
+    children.forEach((child) => {
+      ids.push(child.id);
+      walk(child.id);
+    });
+  };
+  walk(folderId);
+  return ids;
+}
+
 export function WebKbPage() {
   const location = useLocation();
   const { portalId, portalToken } = getWebPortalInfo();
@@ -224,15 +452,14 @@ export function WebKbPage() {
   const rowRefs = useRef<Map<number, HTMLDivElement | null>>(new Map());
 
   const [kbFiles, setKbFiles] = useState<KbFile[]>(cached?.kbFiles || []);
-  const [kbCollections, setKbCollections] = useState<KbCollection[]>(cached?.kbCollections || []);
-  const [kbCollectionFiles, setKbCollectionFiles] = useState<Record<number, number[]>>(cached?.kbCollectionFiles || {});
+  const [kbFolders, setKbFolders] = useState<KbFolder[]>(cached?.kbFolders || []);
   const [kbSmartFolders, setKbSmartFolders] = useState<KbSmartFolder[]>(cached?.kbSmartFolders || []);
   const [kbTopics, setKbTopics] = useState<KbTopic[]>(cached?.kbTopics || []);
   const [kbTopicSuggestions, setKbTopicSuggestions] = useState<{ id: string; name: string; count: number }[]>(cached?.kbTopicSuggestions || []);
   const [kbTopicsThreshold, setKbTopicsThreshold] = useState<number>(5);
   const [kbTopicsLoadError, setKbTopicsLoadError] = useState("");
   const [kbFilter, setKbFilter] = useState<Filter>(cached?.kbFilter || { kind: "all" });
-  const [newCollectionName, setNewCollectionName] = useState("");
+  const [newFolderName, setNewFolderName] = useState("");
   const [smartFoldersOpen, setSmartFoldersOpen] = useState(cached?.smartFoldersOpen ?? true);
   const [smartFolderMessage, setSmartFolderMessage] = useState("");
 
@@ -251,11 +478,11 @@ export function WebKbPage() {
   const [kbSort, setKbSort] = useState<"new" | "name" | "status">(cached?.kbSort || "new");
   const [kbTypeFilter, setKbTypeFilter] = useState(cached?.kbTypeFilter || "all");
   const [kbPeopleFilter, setKbPeopleFilter] = useState(cached?.kbPeopleFilter || "all");
-  const [kbLocationFilter, setKbLocationFilter] = useState(cached?.kbLocationFilter || "all");
+  const [kbFolderFilter, setKbFolderFilter] = useState(cached?.kbFolderFilter || "all");
   const [kbViewMode, setKbViewMode] = useState<"table" | "grid">(cached?.kbViewMode || "table");
 
   const [selectedFileIds, setSelectedFileIds] = useState<number[]>([]);
-  const [dragOverCollectionId, setDragOverCollectionId] = useState<number | null>(null);
+  const [dragOverFolderId, setDragOverFolderId] = useState<number | null>(null);
   const [draggedFileId, setDraggedFileId] = useState<number | null>(null);
   const [openFileMenuId, setOpenFileMenuId] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{ id: number; x: number; y: number } | null>(null);
@@ -264,12 +491,40 @@ export function WebKbPage() {
   const [dragSelectBox, setDragSelectBox] = useState<{ x: number; y: number; w: number; h: number; active: boolean } | null>(null);
   const [kbUploadMessage, setKbUploadMessage] = useState("");
   const [focusApplied, setFocusApplied] = useState(false);
+  const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
+  const [detailsTarget, setDetailsTarget] = useState<{ kind: "folder" | "file"; id: number } | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsError, setDetailsError] = useState("");
+  const [detailsSaving, setDetailsSaving] = useState(false);
+  const [detailsSaveMessage, setDetailsSaveMessage] = useState("");
+  const [isEditingAccess, setIsEditingAccess] = useState(false);
+  const [showAdvancedAcl, setShowAdvancedAcl] = useState(false);
+  const [aclDraft, setAclDraft] = useState<KbAclDraftItem[]>([]);
+  const [accountUsers, setAccountUsers] = useState<KbAccountUser[]>([]);
+  const [accountGroups, setAccountGroups] = useState<KbAccountGroup[]>([]);
+  const [templateStaffGroupId, setTemplateStaffGroupId] = useState<number>(0);
+  const [templateClientGroupId, setTemplateClientGroupId] = useState<number>(0);
+  const [selectedFolderAccess, setSelectedFolderAccess] = useState<KbAclItem[]>([]);
+  const [selectedFileAccess, setSelectedFileAccess] = useState<KbAclItem[]>([]);
+  const [selectedFileEffectiveStaff, setSelectedFileEffectiveStaff] = useState<string>("read");
+  const [selectedFileEffectiveClient, setSelectedFileEffectiveClient] = useState<string>("none");
+  const [selectedFolderClientCoverage, setSelectedFolderClientCoverage] = useState<KbAccessSummary>({
+    total_ready_files: 0,
+    open_all_clients: 0,
+    open_client_groups: 0,
+    closed_for_clients: 0,
+  });
+  const [bulkAccessOpen, setBulkAccessOpen] = useState(false);
+  const [bulkAclDraft, setBulkAclDraft] = useState<KbAclDraftItem[]>([]);
+  const [bulkAclSaving, setBulkAclSaving] = useState(false);
+  const [bulkAclMessage, setBulkAclMessage] = useState("");
   const [previewFileId, setPreviewFileId] = useState<number | null>(null);
   const [previewStartMs, setPreviewStartMs] = useState<number | null>(null);
   const [previewPage, setPreviewPage] = useState<number | null>(null);
   const [previewInlineUrl, setPreviewInlineUrl] = useState<string | null>(null);
   const [previewDownloadUrl, setPreviewDownloadUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [kbAccessSummary, setKbAccessSummary] = useState<KbAccessSummary>({ total_ready_files: 0, open_all_clients: 0, open_client_groups: 0, closed_for_clients: 0 });
   const loadFiles = async () => {
     if (!portalId || !portalToken) return;
     const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files`);
@@ -277,22 +532,11 @@ export function WebKbPage() {
     if (res.ok && Array.isArray(data?.items)) setKbFiles(data.items);
   };
 
-  const loadCollections = async () => {
+  const loadFolders = async () => {
     if (!portalId || !portalToken) return;
-    const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/collections`);
+    const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/folders`);
     const data = await res.json().catch(() => null);
-    if (res.ok && Array.isArray(data?.items)) {
-      setKbCollections(data.items);
-      const mapping: Record<number, number[]> = {};
-      for (const c of data.items) {
-        const filesRes = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/collections/${c.id}/files`);
-        const filesData = await filesRes.json().catch(() => null);
-        mapping[c.id] = Array.isArray(filesData?.file_ids)
-          ? filesData.file_ids.map((x: any) => Number(x)).filter((x: number) => Number.isFinite(x))
-          : [];
-      }
-      setKbCollectionFiles(mapping);
-    }
+    if (res.ok && Array.isArray(data?.items)) setKbFolders(data.items);
   };
 
   const loadSmartFolders = async () => {
@@ -329,13 +573,25 @@ export function WebKbPage() {
     }
   };
 
+  const loadAccessSummary = async () => {
+    if (!portalId || !portalToken) return;
+    const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/access-summary`);
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return;
+    setKbAccessSummary({
+      total_ready_files: Number(data?.total_ready_files || 0),
+      open_all_clients: Number(data?.open_all_clients || 0),
+      open_client_groups: Number(data?.open_client_groups || 0),
+      closed_for_clients: Number(data?.closed_for_clients || 0),
+    });
+  };
+
   useEffect(() => {
     if (portalId) {
       const state = kbPageCache.get(portalId);
       if (state) {
         setKbFiles(state.kbFiles || []);
-        setKbCollections(state.kbCollections || []);
-        setKbCollectionFiles(state.kbCollectionFiles || {});
+        setKbFolders(state.kbFolders || []);
         setKbSmartFolders(state.kbSmartFolders || []);
         setKbTopics(state.kbTopics || []);
         setKbTopicSuggestions(state.kbTopicSuggestions || []);
@@ -344,15 +600,80 @@ export function WebKbPage() {
         setKbSort(state.kbSort || "new");
         setKbTypeFilter(state.kbTypeFilter || "all");
         setKbPeopleFilter(state.kbPeopleFilter || "all");
-        setKbLocationFilter(state.kbLocationFilter || "all");
+        setKbFolderFilter(state.kbFolderFilter || "all");
         setKbViewMode(state.kbViewMode || "table");
       }
     }
     loadFiles();
-    loadCollections();
+    loadFolders();
     loadSmartFolders();
     loadTopics();
+    loadAccessSummary();
   }, [portalId, portalToken]);
+
+  useEffect(() => {
+    const loadAccountUsers = async () => {
+        const accountId = getActiveAccountId();
+        if (!accountId) {
+          setAccountUsers([]);
+          setAccountGroups([]);
+          return;
+        }
+        const res = await fetchWeb(`/api/v2/web/accounts/${accountId}/access-center`);
+        const data = await res.json().catch(() => null);
+        if (!res.ok) return;
+      const items = Array.isArray(data?.items) ? data.items : [];
+      setAccountUsers(
+        items.map((item: any) => ({
+          membership_id: Number(item?.membership_id || 0),
+          display_name: String(item?.display_name || item?.web?.email || `Пользователь ${item?.membership_id || ""}`),
+            role: String(item?.role || "member"),
+          })).filter((item: KbAccountUser) => item.membership_id > 0),
+        );
+        setAccountGroups(
+          (Array.isArray(data?.groups) ? data.groups : []).map((group: any) => ({
+            id: Number(group?.id || 0),
+            name: String(group?.name || `Группа ${group?.id || ""}`),
+            kind: String(group?.kind || "staff") === "client" ? "client" : "staff",
+            membership_ids: Array.isArray(group?.membership_ids)
+              ? group.membership_ids.map((value: any) => Number(value)).filter((value: number) => Number.isFinite(value))
+              : [],
+          })).filter((group: KbAccountGroup) => group.id > 0),
+        );
+      };
+      void loadAccountUsers();
+    }, [portalId]);
+
+  const staffGroups = useMemo(() => accountGroups.filter((group) => group.kind !== "client"), [accountGroups]);
+  const clientGroups = useMemo(() => accountGroups.filter((group) => group.kind === "client"), [accountGroups]);
+
+  useEffect(() => {
+    if (!staffGroups.length) {
+      setTemplateStaffGroupId(0);
+      return;
+    }
+    if (!staffGroups.some((group) => group.id === templateStaffGroupId)) {
+      setTemplateStaffGroupId(staffGroups[0].id);
+    }
+  }, [staffGroups, templateStaffGroupId]);
+
+  useEffect(() => {
+    if (!clientGroups.length) {
+      setTemplateClientGroupId(0);
+      return;
+    }
+    if (!clientGroups.some((group) => group.id === templateClientGroupId)) {
+      setTemplateClientGroupId(clientGroups[0].id);
+    }
+  }, [clientGroups, templateClientGroupId]);
+
+  useEffect(() => {
+    if (selectedFileIds.length === 0) {
+      setBulkAccessOpen(false);
+      setBulkAclDraft([]);
+      setBulkAclMessage("");
+    }
+  }, [selectedFileIds]);
 
   useEffect(() => {
     setFocusApplied(false);
@@ -362,8 +683,7 @@ export function WebKbPage() {
     if (!portalId) return;
     kbPageCache.set(portalId, {
       kbFiles,
-      kbCollections,
-      kbCollectionFiles,
+      kbFolders,
       kbSmartFolders,
       kbTopics,
       kbTopicSuggestions,
@@ -372,14 +692,13 @@ export function WebKbPage() {
       kbSort,
       kbTypeFilter,
       kbPeopleFilter,
-      kbLocationFilter,
+      kbFolderFilter,
       kbViewMode,
     });
   }, [
     portalId,
     kbFiles,
-    kbCollections,
-    kbCollectionFiles,
+    kbFolders,
     kbSmartFolders,
     kbTopics,
     kbTopicSuggestions,
@@ -388,9 +707,47 @@ export function WebKbPage() {
     kbSort,
     kbTypeFilter,
     kbPeopleFilter,
-    kbLocationFilter,
+    kbFolderFilter,
     kbViewMode,
   ]);
+
+  const folderChildrenMap = useMemo(() => buildFolderChildrenMap(kbFolders), [kbFolders]);
+
+  const folderIdsInScope = useMemo(() => {
+    if (kbFilter.kind === "folder" && kbFilter.id) {
+      return new Set(collectFolderSubtreeIds(folderChildrenMap, Number(kbFilter.id)));
+    }
+    if (kbFolderFilter !== "all") {
+      return new Set(collectFolderSubtreeIds(folderChildrenMap, Number(kbFolderFilter)));
+    }
+    return null;
+  }, [kbFilter, kbFolderFilter, folderChildrenMap]);
+
+  const folderFileCounts = useMemo(() => {
+    const counts = new Map<number, number>();
+    kbFiles.forEach((file) => {
+      if (file.folder_id == null) return;
+      counts.set(Number(file.folder_id), (counts.get(Number(file.folder_id)) || 0) + 1);
+    });
+    const totals = new Map<number, number>();
+    const visit = (folderId: number): number => {
+      let total = counts.get(folderId) || 0;
+      const children = folderChildrenMap.get(folderId) || [];
+      children.forEach((child) => {
+        total += visit(child.id);
+      });
+      totals.set(folderId, total);
+      return total;
+    };
+    (folderChildrenMap.get(null) || []).forEach((folder) => visit(folder.id));
+    return totals;
+  }, [kbFiles, folderChildrenMap]);
+
+  const folderNameMap = useMemo(() => {
+    const map = new Map<number, string>();
+    kbFolders.forEach((folder) => map.set(folder.id, folder.name));
+    return map;
+  }, [kbFolders]);
 
   const filteredKbFiles = useMemo(() => {
     const query = kbSearch.trim().toLowerCase();
@@ -409,9 +766,11 @@ export function WebKbPage() {
     if (kbPeopleFilter !== "all") {
       items = items.filter((x) => (x.uploaded_by_name || "") === kbPeopleFilter);
     }
-    if (kbLocationFilter !== "all") {
-      const ids = kbCollectionFiles[Number(kbLocationFilter)] || [];
-      items = items.filter((x) => ids.includes(x.id));
+    if (folderIdsInScope) {
+      items = items.filter((x) => {
+        if (x.folder_id == null) return false;
+        return folderIdsInScope.has(Number(x.folder_id));
+      });
     }
     if (hasFullText) {
       const ids = new Set(kbSearchResults || []);
@@ -421,10 +780,6 @@ export function WebKbPage() {
       } else {
         items = items.filter((x) => ids.has(x.id));
       }
-    }
-    if (kbFilter.kind === "collection" && kbFilter.id) {
-      const ids = kbCollectionFiles[Number(kbFilter.id)] || [];
-      items = items.filter((x) => ids.includes(x.id));
     }
     if (kbFilter.kind === "topic" && kbFilter.id) {
       const topic = kbTopics.find((t) => t.id === String(kbFilter.id));
@@ -458,7 +813,7 @@ export function WebKbPage() {
       }
     }
     return items;
-  }, [kbFiles, kbSearch, kbSearchResults, kbTypeFilter, kbPeopleFilter, kbLocationFilter, kbFilter, kbCollectionFiles, kbTopics, kbSmartFolders, selectedFileIds]);
+  }, [kbFiles, kbSearch, kbSearchResults, kbTypeFilter, kbPeopleFilter, folderIdsInScope, kbFilter, kbTopics, kbSmartFolders, selectedFileIds]);
 
   const sortedKbFiles = useMemo(() => {
     const items = filteredKbFiles.slice();
@@ -487,6 +842,27 @@ export function WebKbPage() {
     return Array.from(people).sort();
   }, [kbFiles]);
 
+  const selectedFolderName = useMemo(() => {
+    if (kbFilter.kind !== "folder" || !kbFilter.id) return "";
+    return folderNameMap.get(Number(kbFilter.id)) || "";
+  }, [kbFilter, folderNameMap]);
+
+  const selectedFolder = useMemo(
+    () => (selectedFolderId ? kbFolders.find((folder) => folder.id === selectedFolderId) || null : null),
+    [kbFolders, selectedFolderId],
+  );
+
+  const selectedDetailsFile = useMemo(
+    () => (detailsTarget?.kind === "file" ? kbFiles.find((file) => file.id === detailsTarget.id) || null : null),
+    [detailsTarget, kbFiles],
+  );
+  const selectedDetailsFileFolder = useMemo(
+    () => (selectedDetailsFile?.folder_id ? kbFolders.find((folder) => folder.id === Number(selectedDetailsFile.folder_id)) || null : null),
+    [kbFolders, selectedDetailsFile],
+  );
+  const folderHasExplicitRules = selectedFolderAccess.length > 0;
+  const fileHasExplicitRules = selectedFileAccess.length > 0;
+
   const recommendedKbFiles = useMemo(() => {
     return kbFiles
       .filter((f) => (f.status || "").toLowerCase() === "ready")
@@ -504,6 +880,43 @@ export function WebKbPage() {
     if (!sortedKbFiles.length) return false;
     return sortedKbFiles.every((f) => selectedFileIds.includes(f.id));
   }, [sortedKbFiles, selectedFileIds]);
+
+  const selectedBulkFiles = useMemo(
+    () => kbFiles.filter((file) => selectedFileIds.includes(file.id)),
+    [kbFiles, selectedFileIds],
+  );
+
+  const bulkClientImpact = useMemo(() => {
+    const before = { all: 0, groups: 0, closed: 0 };
+    const after = { all: 0, groups: 0, closed: 0 };
+    selectedBulkFiles.forEach((file) => {
+      const current = clientBadgeCategory(file.access_badges?.client);
+      before[current] += 1;
+      const projected = projectedClientBadgeForDraft(bulkAclDraft, file, new Map(kbFolders.map((folder) => [folder.id, folder])), accountGroups);
+      after[projected] += 1;
+    });
+    return {
+      before,
+      after,
+      opensToAll: Math.max(0, after.all - before.all),
+      opensToGroups: Math.max(0, after.groups - before.groups),
+      closesForClients: Math.max(0, after.closed - before.closed),
+    };
+  }, [selectedBulkFiles, bulkAclDraft, kbFolders, accountGroups]);
+
+  const folderClientImpact = useMemo(() => {
+    if (!selectedFolder) return null;
+    const current = clientBadgeCategory(selectedFolder.access_badges?.client);
+    const projected = projectedClientBadgeForDraft(aclDraft, { id: -1, filename: "", status: "ready" }, new Map(), accountGroups);
+    return {
+      current,
+      projected,
+      totalReady: selectedFolderClientCoverage.total_ready_files,
+      openAll: selectedFolderClientCoverage.open_all_clients,
+      openGroups: selectedFolderClientCoverage.open_client_groups,
+      closed: selectedFolderClientCoverage.closed_for_clients,
+    };
+  }, [selectedFolder, aclDraft, accountGroups, selectedFolderClientCoverage]);
 
   const toggleSelectAllVisible = () => {
     if (allVisibleSelected) {
@@ -705,10 +1118,14 @@ export function WebKbPage() {
     if (selectedFileIds.length > 0) {
       scopeParams.set("file_ids", selectedFileIds.join(","));
     } else {
-      if (kbFilter.kind === "collection" && kbFilter.id) scopeParams.set("collection_ids", String(kbFilter.id));
       if (kbFilter.kind === "smart" && kbFilter.id) scopeParams.set("smart_folder_ids", String(kbFilter.id));
       if (kbFilter.kind === "topic" && kbFilter.id) scopeParams.set("topic_ids", String(kbFilter.id));
-      if (kbLocationFilter !== "all") scopeParams.set("collection_ids", kbLocationFilter);
+      if (folderIdsInScope) {
+        const scopedFileIds = kbFiles
+          .filter((file) => file.folder_id != null && folderIdsInScope.has(Number(file.folder_id)))
+          .map((file) => file.id);
+        if (scopedFileIds.length > 0) scopeParams.set("file_ids", scopedFileIds.join(","));
+      }
     }
     const qs = scopeParams.toString();
     const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/search?q=${encodeURIComponent(q)}&limit=100${qs ? `&${qs}` : ""}`);
@@ -736,16 +1153,18 @@ export function WebKbPage() {
     const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/ask`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Api-Schema": "v2" },
-      body: JSON.stringify({
-        query: q,
-        scope: selectedFileIds.length > 0
-          ? { file_ids: selectedFileIds }
-          : {
-              collection_ids: kbFilter.kind === "collection" && kbFilter.id ? [Number(kbFilter.id)] : (kbLocationFilter !== "all" ? [Number(kbLocationFilter)] : undefined),
+        body: JSON.stringify({
+          query: q,
+          scope: selectedFileIds.length > 0
+            ? { file_ids: selectedFileIds }
+            : {
+              file_ids: folderIdsInScope
+                ? kbFiles.filter((file) => file.folder_id != null && folderIdsInScope.has(Number(file.folder_id))).map((file) => file.id)
+                : undefined,
               smart_folder_ids: kbFilter.kind === "smart" && kbFilter.id ? [Number(kbFilter.id)] : undefined,
               topic_ids: kbFilter.kind === "topic" && kbFilter.id ? [String(kbFilter.id)] : undefined,
             },
-      }),
+        }),
     });
     const data = await res.json().catch(() => null);
     setSmartSearchLoading(false);
@@ -765,8 +1184,8 @@ export function WebKbPage() {
   };
   const selectKbFilter = (kind: Filter["kind"], id?: number | string) => {
     setKbFilter({ kind, id });
-    if (kind === "collection" && id) setKbLocationFilter(String(id));
-    if (kind !== "collection") setKbLocationFilter("all");
+    if (kind === "folder" && id) setKbFolderFilter(String(id));
+    if (kind !== "folder") setKbFolderFilter("all");
   };
 
   const loadPreviewUrls = async (fileId: number) => {
@@ -798,27 +1217,111 @@ export function WebKbPage() {
     await loadPreviewUrls(fileId);
   };
 
-  const createCollection = async () => {
+  const openFolderDetails = (folderId: number) => {
+    setSelectedFolderId(folderId);
+    setDetailsTarget({ kind: "folder", id: folderId });
+    setIsEditingAccess(false);
+    setShowAdvancedAcl(false);
+    setDetailsSaveMessage("");
+  };
+
+  const openFileDetails = (fileId: number) => {
+    setFocusedRowId(fileId);
+    setDetailsTarget({ kind: "file", id: fileId });
+    setIsEditingAccess(false);
+    setShowAdvancedAcl(false);
+    setDetailsSaveMessage("");
+  };
+
+  const openAccessEditor = () => {
+    if (!detailsTarget) return;
+    setIsEditingAccess(true);
+    setShowAdvancedAcl(false);
+    setDetailsSaveMessage("");
+    setAclDraft(detailsTarget.kind === "folder" ? selectedFolderAccess : selectedFileAccess);
+  };
+
+  const closeAccessEditor = () => {
+    setIsEditingAccess(false);
+    setShowAdvancedAcl(false);
+    setDetailsSaveMessage("");
+  };
+
+  const createFolder = async () => {
     if (!portalId || !portalToken) return;
-    const name = newCollectionName.trim();
+    const name = newFolderName.trim();
     if (!name) return;
-    const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/collections`, {
+    const parentId = kbFilter.kind === "folder" && kbFilter.id ? Number(kbFilter.id) : null;
+    const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/folders`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, color: null }),
+      body: JSON.stringify({ name, parent_id: parentId }),
     });
     if (res.ok) {
-      setNewCollectionName("");
-      await loadCollections();
+      setNewFolderName("");
+      await loadFolders();
+      await loadAccessSummary();
     }
   };
 
-  const onDragEnterCollection = (id: number) => setDragOverCollectionId(id);
-  const onDragLeaveCollection = (id: number) => setDragOverCollectionId((prev) => (prev === id ? null : prev));
+  const onDragEnterFolder = (id: number) => setDragOverFolderId(id);
+  const onDragLeaveFolder = (id: number) => setDragOverFolderId((prev) => (prev === id ? null : prev));
 
-  const onDropToCollection = async (collectionId: number, evt: React.DragEvent) => {
+  const moveFilesToFolder = async (folderId: number | null, ids: number[]) => {
+    if (!portalId || !portalToken || !ids.length) return;
+    for (const fileId of ids) {
+      await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${fileId}/folder`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder_id: folderId }),
+      });
+    }
+    await loadFiles();
+    await loadFolders();
+    await loadTopics();
+    await loadAccessSummary();
+  };
+
+  const deleteFolder = async (folderId: number) => {
+    if (!portalId || !portalToken) return;
+    setDetailsSaveMessage("");
+    const folder = kbFolders.find((item) => item.id === folderId) || null;
+    const coverage = selectedFolderId === folderId ? selectedFolderClientCoverage : null;
+    const hasClientExposure = (coverage?.open_all_clients || 0) > 0 || (coverage?.open_client_groups || 0) > 0;
+    const hasReadyMaterials = (coverage?.total_ready_files || 0) > 0;
+    const warning = hasClientExposure || hasReadyMaterials
+      ? [
+          `Удалить папку «${folder?.name || folderId}»?`,
+          hasReadyMaterials ? `В ветке сейчас ${coverage?.total_ready_files || 0} готовых материалов.` : "",
+          hasClientExposure
+            ? `Часть материалов доступна клиентам: всем — ${coverage?.open_all_clients || 0}, клиентским группам — ${coverage?.open_client_groups || 0}.`
+            : "",
+          "Удаление сработает только если папка пуста. Если внутри есть файлы или подпапки, сервер заблокирует операцию.",
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : `Удалить папку «${folder?.name || folderId}»?`;
+    if (!window.confirm(warning)) return;
+    const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/folders/${folderId}`, { method: "DELETE" });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      setDetailsSaveMessage(String(data?.error || data?.detail || "Не удалось удалить папку."));
+      return;
+    }
+    if (selectedFolderId === folderId) {
+      setSelectedFolderId(null);
+      setDetailsTarget(null);
+      setIsEditingAccess(false);
+    }
+    await loadFolders();
+    await loadFiles();
+    await loadTopics();
+    await loadAccessSummary();
+  };
+
+  const onDropToFolder = async (folderId: number | null, evt: React.DragEvent) => {
     evt.preventDefault();
-    setDragOverCollectionId(null);
+    setDragOverFolderId(null);
     const ids: number[] = [];
     if (selectedFileIds.length) {
       ids.push(...selectedFileIds);
@@ -829,23 +1332,7 @@ export function WebKbPage() {
       else if (draggedFileId) ids.push(draggedFileId);
     }
     if (!ids.length) return;
-    for (const fileId of ids) {
-      await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/collections/${collectionId}/files`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_id: fileId }),
-      });
-    }
-    await loadCollections();
-  };
-
-  const fileCollections = (fileId: number) => {
-    const out: { id: number; name: string; color?: string }[] = [];
-    kbCollections.forEach((c) => {
-      const ids = kbCollectionFiles[c.id] || [];
-      if (ids.includes(fileId)) out.push({ id: c.id, name: c.name, color: c.color });
-    });
-    return out;
+    await moveFilesToFolder(folderId, ids);
   };
 
   const reindexFile = async (fileId: number) => {
@@ -858,8 +1345,9 @@ export function WebKbPage() {
     if (!portalId || !portalToken) return;
     await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${fileId}`, { method: "DELETE" });
     await loadFiles();
-    await loadCollections();
+    await loadFolders();
     await loadTopics();
+    await loadAccessSummary();
   };
 
   const bulkReindexFiles = async () => {
@@ -872,20 +1360,57 @@ export function WebKbPage() {
     setSelectedFileIds([]);
   };
 
-  const bulkMoveToCollection = async (evt: React.ChangeEvent<HTMLSelectElement>) => {
+  const bulkMoveToFolder = async (evt: React.ChangeEvent<HTMLSelectElement>) => {
     const value = evt.target.value;
-    if (!value) return;
-    const collectionId = Number(value);
-    for (const id of selectedFileIds) {
-      await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/collections/${collectionId}/files`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_id: id }),
-      });
+    const folderId = value === "root" ? null : Number(value);
+    const targetFolder = folderId ? kbFolders.find((folder) => folder.id === folderId) || null : null;
+    if (targetFolder && selectedFileIds.length > 0) {
+      const targetClientMode = clientBadgeCategory(targetFolder.access_badges?.client);
+      if (targetClientMode !== "closed") {
+        const warning =
+          targetClientMode === "all"
+            ? `Переместить ${selectedFileIds.length} файлов в папку «${targetFolder.name}»?\n\nФайлы без собственных правил могут стать доступны всем клиентам через наследование папки.`
+            : `Переместить ${selectedFileIds.length} файлов в папку «${targetFolder.name}»?\n\nФайлы без собственных правил могут стать доступны клиентским группам через наследование папки.`;
+        if (!window.confirm(warning)) {
+          evt.target.value = "";
+          return;
+        }
+      }
     }
-    await loadCollections();
+    await moveFilesToFolder(folderId, selectedFileIds);
     setSelectedFileIds([]);
     evt.target.value = "";
+  };
+  const openBulkAccessEditor = () => {
+    setBulkAclDraft([]);
+    setBulkAclMessage("");
+    setBulkAccessOpen(true);
+  };
+  const saveBulkAcl = async () => {
+    if (!portalId || !portalToken || selectedFileIds.length === 0) return;
+    setBulkAclSaving(true);
+    setBulkAclMessage("");
+    const payload = { items: bulkAclDraft.map((item) => ({ ...item })) };
+    try {
+      for (const fileId of selectedFileIds) {
+        const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${fileId}/access`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(String(data?.error || data?.detail || "bulk_acl_save_failed"));
+      }
+      if (detailsTarget?.kind === "file" && selectedFileIds.includes(detailsTarget.id)) {
+        setSelectedFileAccess(payload.items);
+      }
+      setBulkAclMessage(`Права обновлены для файлов: ${selectedFileIds.length}`);
+      setBulkAccessOpen(false);
+    } catch (e: any) {
+      setBulkAclMessage(String(e?.message || "Не удалось обновить права."));
+    } finally {
+      setBulkAclSaving(false);
+    }
   };
 
   const openFilePicker = () => fileInputRef.current?.click();
@@ -908,14 +1433,16 @@ export function WebKbPage() {
       const data = await res.json().catch(() => null);
       setKbUploadMessage(data?.error || data?.detail || `Ошибка загрузки: ${f.name}`);
       await loadFiles();
-      await loadCollections();
+      await loadFolders();
       await loadTopics();
+      await loadAccessSummary();
       return;
     }
     setKbUploadMessage(okCount > 0 ? `Файлы загружены: ${okCount}` : "Ошибка загрузки");
     await loadFiles();
-    await loadCollections();
+    await loadFolders();
     await loadTopics();
+    await loadAccessSummary();
   };
 
   const onFilePickerChange = (evt: React.ChangeEvent<HTMLInputElement>) => {
@@ -1016,8 +1543,235 @@ export function WebKbPage() {
     return uiFallbackSuggestions;
   }, [kbTopicSuggestions, smartFolderNameSet, uiFallbackSuggestions]);
 
+  const renderFolderTree = (parentId: number | null = null, depth = 0): ReactNode => {
+    const folders = folderChildrenMap.get(parentId) || [];
+    return folders.map((folder) => (
+      <div key={folder.id}>
+        <button
+          className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm ${
+            kbFilter.kind === "folder" && kbFilter.id === folder.id
+              ? "bg-sky-50 text-sky-700"
+              : "text-slate-600 hover:bg-slate-50"
+          } ${dragOverFolderId === folder.id ? "ring-2 ring-sky-200" : ""}`}
+          style={{ paddingLeft: `${12 + depth * 16}px` }}
+          onClick={() => {
+            selectKbFilter("folder", folder.id);
+            openFolderDetails(folder.id);
+          }}
+          onDragEnter={() => onDragEnterFolder(folder.id)}
+          onDragLeave={() => onDragLeaveFolder(folder.id)}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => onDropToFolder(folder.id, e)}
+        >
+          <div className="min-w-0">
+            <div className="truncate">{folder.name}</div>
+            <div className="mt-1">{renderCompactAccessBadges(folder)}</div>
+          </div>
+          <span className="ml-3 shrink-0 text-xs text-slate-400">{folderFileCounts.get(folder.id) || 0}</span>
+        </button>
+        {renderFolderTree(folder.id, depth + 1)}
+      </div>
+    ));
+  };
+
+  const renderAclSummary = (items: KbAclItem[], emptyText: string) => {
+    if (!items.length) return <div className="text-sm text-slate-500">{emptyText}</div>;
+    return (
+      <div className="space-y-2">
+        {items.map((item) => (
+          <div key={`${item.principal_type}:${item.principal_id}`} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+            <div className="text-sm font-medium text-slate-800">{kbPrincipalLabel(item, accountUsers, accountGroups)}</div>
+            <div className="mt-1 text-xs text-slate-500">{kbAccessLabel(item.access_level)}</div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const applyAclTemplate = (
+    template: "inherit" | "staff" | "clients" | "staff_clients" | "group" | "client_group",
+    groupIdOverride?: number,
+  ) => {
+    const groupId =
+      groupIdOverride ??
+      (template === "client_group" ? templateClientGroupId : template === "group" ? templateStaffGroupId : 0);
+    setAclDraft(kbAclTemplate(template, { groupId }));
+  };
+  const applyBulkAclTemplate = (
+    template: "inherit" | "staff" | "clients" | "staff_clients" | "group" | "client_group",
+    groupIdOverride?: number,
+  ) => {
+    const groupId =
+      groupIdOverride ??
+      (template === "client_group" ? templateClientGroupId : template === "group" ? templateStaffGroupId : 0);
+    setBulkAclDraft(kbAclTemplate(template, { groupId }));
+  };
+
+  const updateAclDraftItem = (index: number, patch: Partial<KbAclDraftItem>) => {
+      setAclDraft((prev) =>
+        prev.map((item, itemIndex) => {
+          if (itemIndex !== index) return item;
+          const next = { ...item, ...patch };
+        if (patch.principal_type === "role" && !["owner", "admin", "member", "client"].includes(next.principal_id)) {
+          next.principal_id = "member";
+        }
+        if (patch.principal_type === "audience" && !["staff", "client"].includes(next.principal_id)) {
+          next.principal_id = "staff";
+        }
+          if (patch.principal_type === "membership" && !next.principal_id) {
+            next.principal_id = String(accountUsers[0]?.membership_id || "");
+          }
+          if (patch.principal_type === "group" && !next.principal_id) {
+            next.principal_id = String(accountGroups[0]?.id || "");
+          }
+          return next;
+        }),
+      );
+    };
+
+  const addAclDraftItem = () => {
+      const defaultPrincipalType = accountGroups.length > 0 ? "group" : accountUsers.length > 0 ? "membership" : "role";
+      const defaultPrincipalId =
+        defaultPrincipalType === "group"
+          ? String(accountGroups[0]?.id || "")
+          : defaultPrincipalType === "membership"
+            ? String(accountUsers[0]?.membership_id || "")
+            : "member";
+      setAclDraft((prev) => [
+        ...prev,
+        {
+          principal_type: defaultPrincipalType,
+          principal_id: defaultPrincipalId,
+          access_level: "read",
+        },
+      ]);
+    };
+  const updateBulkAclDraftItem = (index: number, patch: Partial<KbAclDraftItem>) => {
+    setBulkAclDraft((prev) =>
+      prev.map((item, itemIndex) => {
+        if (itemIndex !== index) return item;
+        const next = { ...item, ...patch };
+        if (patch.principal_type === "role" && !["owner", "admin", "member", "client"].includes(next.principal_id)) next.principal_id = "member";
+        if (patch.principal_type === "audience" && !["staff", "client"].includes(next.principal_id)) next.principal_id = "staff";
+        if (patch.principal_type === "membership" && !next.principal_id) next.principal_id = String(accountUsers[0]?.membership_id || "");
+        if (patch.principal_type === "group" && !next.principal_id) next.principal_id = String(accountGroups[0]?.id || "");
+        return next;
+      }),
+    );
+  };
+  const addBulkAclDraftItem = () => {
+    const defaultPrincipalType = accountGroups.length > 0 ? "group" : accountUsers.length > 0 ? "membership" : "role";
+    const defaultPrincipalId =
+      defaultPrincipalType === "group"
+        ? String(accountGroups[0]?.id || "")
+        : defaultPrincipalType === "membership"
+          ? String(accountUsers[0]?.membership_id || "")
+          : "member";
+    setBulkAclDraft((prev) => [...prev, { principal_type: defaultPrincipalType, principal_id: defaultPrincipalId, access_level: "read" }]);
+  };
+  const removeBulkAclDraftItem = (index: number) => {
+    setBulkAclDraft((prev) => prev.filter((_, itemIndex) => itemIndex !== index));
+  };
+
+  const removeAclDraftItem = (index: number) => {
+    setAclDraft((prev) => prev.filter((_, itemIndex) => itemIndex !== index));
+  };
+
+  const saveAclDraft = async () => {
+    if (!portalId || !portalToken || !detailsTarget) return;
+    setDetailsSaving(true);
+    setDetailsSaveMessage("");
+    try {
+      const payload = { items: aclDraft.map((item) => ({ ...item })) };
+      const url =
+        detailsTarget.kind === "folder"
+          ? `/api/v1/bitrix/portals/${portalId}/kb/folders/${detailsTarget.id}/access`
+          : `/api/v1/bitrix/portals/${portalId}/kb/files/${detailsTarget.id}/access`;
+      const res = await fetchPortal(url, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(String(data?.error || data?.detail || "acl_save_failed"));
+      setDetailsSaveMessage("Доступ сохранён.");
+      setIsEditingAccess(false);
+      if (detailsTarget.kind === "folder") {
+        setSelectedFolderAccess(Array.isArray(data?.items) ? data.items : []);
+      } else {
+        setSelectedFileAccess(Array.isArray(data?.items) ? data.items : []);
+        const [staffRes, clientRes] = await Promise.all([
+          fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${detailsTarget.id}/access/effective?role=member&audience=staff`),
+          fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${detailsTarget.id}/access/effective?role=client&audience=client`),
+        ]);
+        const staffData = await staffRes.json().catch(() => null);
+        const clientData = await clientRes.json().catch(() => null);
+        setSelectedFileEffectiveStaff(String(staffData?.effective_access || "read"));
+        setSelectedFileEffectiveClient(String(clientData?.effective_access || "none"));
+      }
+      await loadAccessSummary();
+    } catch (e: any) {
+      setDetailsSaveMessage(String(e?.message || "acl_save_failed"));
+    } finally {
+      setDetailsSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    const loadDetails = async () => {
+      if (!portalId || !portalToken || !detailsTarget) return;
+      setDetailsLoading(true);
+      setDetailsError("");
+      try {
+        if (detailsTarget.kind === "folder") {
+          const [accessRes, summaryRes] = await Promise.all([
+            fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/folders/${detailsTarget.id}/access`),
+            fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/access-summary?folder_id=${detailsTarget.id}`),
+          ]);
+          const data = await accessRes.json().catch(() => null);
+          const summaryData = await summaryRes.json().catch(() => null);
+          if (!accessRes.ok) throw new Error(String(data?.error || data?.detail || "folder_access_load_failed"));
+          const items = Array.isArray(data?.items) ? data.items : [];
+          setSelectedFolderAccess(items);
+          setAclDraft(items);
+          setSelectedFolderClientCoverage({
+            total_ready_files: Number(summaryData?.total_ready_files || 0),
+            open_all_clients: Number(summaryData?.open_all_clients || 0),
+            open_client_groups: Number(summaryData?.open_client_groups || 0),
+            closed_for_clients: Number(summaryData?.closed_for_clients || 0),
+          });
+          setSelectedFileAccess([]);
+          setSelectedFileEffectiveStaff("read");
+          setSelectedFileEffectiveClient("none");
+          return;
+        }
+        const [accessRes, staffRes, clientRes] = await Promise.all([
+          fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${detailsTarget.id}/access`),
+          fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${detailsTarget.id}/access/effective?role=member&audience=staff`),
+          fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${detailsTarget.id}/access/effective?role=client&audience=client`),
+        ]);
+        const accessData = await accessRes.json().catch(() => null);
+        const staffData = await staffRes.json().catch(() => null);
+        const clientData = await clientRes.json().catch(() => null);
+        if (!accessRes.ok) throw new Error(String(accessData?.error || accessData?.detail || "file_access_load_failed"));
+        const items = Array.isArray(accessData?.items) ? accessData.items : [];
+        setSelectedFileAccess(items);
+        setAclDraft(items);
+        setSelectedFolderClientCoverage({ total_ready_files: 0, open_all_clients: 0, open_client_groups: 0, closed_for_clients: 0 });
+        setSelectedFileEffectiveStaff(String(staffData?.effective_access || "read"));
+        setSelectedFileEffectiveClient(String(clientData?.effective_access || "none"));
+        setSelectedFolderAccess([]);
+      } catch (e: any) {
+        setDetailsError(String(e?.message || "details_load_failed"));
+      } finally {
+        setDetailsLoading(false);
+      }
+    };
+    void loadDetails();
+  }, [portalId, portalToken, detailsTarget]);
+
   return (
-    <div className="grid gap-6 lg:grid-cols-[260px_1fr]">
+    <div className="grid gap-6 xl:grid-cols-[260px_minmax(0,1fr)_320px]">
       <aside className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm">
         <div className="text-sm font-semibold text-slate-900">Структура</div>
         <input ref={fileInputRef} type="file" multiple className="hidden" onChange={onFilePickerChange} />
@@ -1036,12 +1790,12 @@ export function WebKbPage() {
         <button
           className={`mt-4 w-full rounded-xl px-3 py-2 text-sm ${
             kbFilter.kind === "all" ? "bg-sky-50 text-sky-700" : "bg-slate-50 text-slate-600"
-          } ${dragOverCollectionId === 0 ? "ring-2 ring-sky-200" : ""}`}
+          } ${dragOverFolderId === 0 ? "ring-2 ring-sky-200" : ""}`}
           onClick={() => selectKbFilter("all")}
-          onDragEnter={() => onDragEnterCollection(0)}
-          onDragLeave={() => onDragLeaveCollection(0)}
+          onDragEnter={() => onDragEnterFolder(0)}
+          onDragLeave={() => onDragLeaveFolder(0)}
           onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => onDropToCollection(0, e)}
+          onDrop={(e) => onDropToFolder(null, e)}
         >
           Все файлы
         </button>
@@ -1049,39 +1803,20 @@ export function WebKbPage() {
         <div className="mt-5">
           <div className="text-xs uppercase tracking-wide text-slate-400">Папки</div>
           <div className="mt-2 space-y-1">
-            {kbCollections.map((c) => (
-              <button
-                key={c.id}
-                className={`w-full flex items-center justify-between rounded-xl px-3 py-2 text-sm ${
-                  kbFilter.kind === "collection" && kbFilter.id === c.id
-                    ? "bg-sky-50 text-sky-700"
-                    : "text-slate-600 hover:bg-slate-50"
-                } ${dragOverCollectionId === c.id ? "ring-2 ring-sky-200" : ""}`}
-                onClick={() => selectKbFilter("collection", c.id)}
-                onDragEnter={() => onDragEnterCollection(c.id)}
-                onDragLeave={() => onDragLeaveCollection(c.id)}
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => onDropToCollection(c.id, e)}
-              >
-                <span className="flex items-center gap-2">
-                  {c.name}
-                </span>
-                <span className="text-xs text-slate-400">{c.file_count || kbCollectionFiles[c.id]?.length || 0}</span>
-              </button>
-            ))}
-            {kbCollections.length === 0 && <div className="text-xs text-slate-400">Папок пока нет.</div>}
+            {renderFolderTree()}
+            {kbFolders.length === 0 && <div className="text-xs text-slate-400">Папок пока нет.</div>}
           </div>
           <div className="mt-3 space-y-2">
             <input
               className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
               placeholder="Новая папка"
-              value={newCollectionName}
-              onChange={(e) => setNewCollectionName(e.target.value)}
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
             />
-            <button className="w-full rounded-xl bg-sky-600 px-3 py-2 text-sm font-semibold text-white" onClick={createCollection}>
-              Создать
+            <button className="w-full rounded-xl bg-sky-600 px-3 py-2 text-sm font-semibold text-white" onClick={createFolder}>
+              {selectedFolderName ? `Создать в «${selectedFolderName}»` : "Создать в корне"}
             </button>
-            <div className="text-xs text-slate-400">Подпапки пока не поддерживаются.</div>
+            <div className="text-xs text-slate-400">Если папка выбрана слева, новая папка создаётся внутри неё.</div>
           </div>
         </div>
 
@@ -1147,6 +1882,42 @@ export function WebKbPage() {
         <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-semibold text-slate-900">{coreModuleLabel("kb", "База знаний")}</h2>
           <p className="text-sm text-slate-500 mt-1">{coreModuleDescription("kb", "Управляйте документами и доступами в едином пространстве.")}</p>
+          <div className="mt-4 rounded-2xl border border-sky-100 bg-sky-50/70 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Покрытие клиентского бота</div>
+                <p className="mt-1 text-xs text-slate-600">
+                  Сводка считает готовые материалы базы знаний и показывает, какие из них доступны всем клиентам, только
+                  клиентским группам или полностью закрыты для клиентского бота.
+                </p>
+              </div>
+              <a href="/app/users" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 hover:bg-slate-50">
+                Пользователи и доступы
+              </a>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-4">
+              <div className="rounded-xl border border-slate-100 bg-white px-3 py-3">
+                <div className="text-[11px] uppercase tracking-wide text-slate-400">Готовые материалы</div>
+                <div className="mt-1 text-lg font-semibold text-slate-900">{kbAccessSummary.total_ready_files}</div>
+                <div className="mt-1 text-xs text-slate-500">Все файлы со статусом `ready`.</div>
+              </div>
+              <div className="rounded-xl border border-slate-100 bg-white px-3 py-3">
+                <div className="text-[11px] uppercase tracking-wide text-slate-400">Всем клиентам</div>
+                <div className="mt-1 text-lg font-semibold text-slate-900">{kbAccessSummary.open_all_clients}</div>
+                <div className="mt-1 text-xs text-slate-500">Клиентский бот отвечает по этим материалам без привязки к группе.</div>
+              </div>
+              <div className="rounded-xl border border-slate-100 bg-white px-3 py-3">
+                <div className="text-[11px] uppercase tracking-wide text-slate-400">Клиентским группам</div>
+                <div className="mt-1 text-lg font-semibold text-slate-900">{kbAccessSummary.open_client_groups}</div>
+                <div className="mt-1 text-xs text-slate-500">Материалы видны только выбранным клиентским группам.</div>
+              </div>
+              <div className="rounded-xl border border-slate-100 bg-white px-3 py-3">
+                <div className="text-[11px] uppercase tracking-wide text-slate-400">Закрыты для клиентов</div>
+                <div className="mt-1 text-lg font-semibold text-slate-900">{kbAccessSummary.closed_for_clients}</div>
+                <div className="mt-1 text-xs text-slate-500">Эти материалы не попадут в ответы клиентского бота.</div>
+              </div>
+            </div>
+          </div>
           <div className="mt-4 flex flex-wrap gap-3">
             <div className="flex-1 min-w-[240px]">
               <input
@@ -1233,9 +2004,9 @@ export function WebKbPage() {
               <option value="all">Люди: все</option>
               {kbPeopleOptions.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
-            <select className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm" value={kbLocationFilter} onChange={(e) => setKbLocationFilter(e.target.value)}>
+            <select className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm" value={kbFolderFilter} onChange={(e) => setKbFolderFilter(e.target.value)}>
               <option value="all">Местоположение: все</option>
-              {kbCollections.map((c) => <option key={c.id} value={String(c.id)}>{c.name}</option>)}
+              {kbFolders.map((folder) => <option key={folder.id} value={String(folder.id)}>{folder.name}</option>)}
             </select>
             <select className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm" value={kbSort} onChange={(e) => setKbSort(e.target.value as any)}>
               <option value="new">Сначала новые</option>
@@ -1264,7 +2035,7 @@ export function WebKbPage() {
                   </div>
                   <div>{(f.query_count || 0) > 0 ? `${f.query_count} запросов` : "Новый файл"}</div>
                   <div>{fileOwnerLabel(f)}</div>
-                  <div>{fileCollections(f.id)[0]?.name || "Корень"}</div>
+                  <div>{f.folder_id ? folderNameMap.get(Number(f.folder_id)) || "Корень" : "Корень"}</div>
                 </div>
               ))}
             </div>
@@ -1275,21 +2046,133 @@ export function WebKbPage() {
           <div className="h-[56px]">
             <div className="flex h-full items-center rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-sm">
               {selectedFileIds.length > 0 ? (
-                <div className="flex min-w-0 flex-nowrap items-center gap-2">
-                  <div className="shrink-0">Выбрано: {selectedFileIds.length}</div>
-                  <select className="shrink-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" onChange={bulkMoveToCollection}>
-                    <option value="">Переместить в папку</option>
-                    {kbCollections.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
-                  <button className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" onClick={bulkReindexFiles}>Переиндексировать</button>
-                  <button className="shrink-0 rounded-xl border border-rose-200 px-3 py-2 text-sm text-rose-600" onClick={bulkDeleteFiles}>Удалить</button>
-                  <button className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" onClick={() => setSelectedFileIds([])}>Снять выделение</button>
-                </div>
-              ) : (
+                  <div className="flex min-w-0 flex-nowrap items-center gap-2">
+                    <div className="shrink-0">Выбрано: {selectedFileIds.length}</div>
+                    <select className="shrink-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" onChange={bulkMoveToFolder}>
+                      <option value="">Переместить в папку</option>
+                      <option value="root">В корень</option>
+                      {kbFolders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+                    </select>
+                    <button className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" onClick={openBulkAccessEditor}>Доступ</button>
+                    <button className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" onClick={bulkReindexFiles}>Переиндексировать</button>
+                    <button className="shrink-0 rounded-xl border border-rose-200 px-3 py-2 text-sm text-rose-600" onClick={bulkDeleteFiles}>Удалить</button>
+                    <button className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" onClick={() => setSelectedFileIds([])}>Снять выделение</button>
+                  </div>
+                ) : (
                 <div className="text-sm font-semibold text-slate-900">Файлы</div>
               )}
             </div>
           </div>
+          {bulkAccessOpen && selectedFileIds.length > 0 && (
+            <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900">Массовое изменение доступа</div>
+                  <div className="mt-1 text-xs text-slate-500">Изменения применятся ко всем выбранным файлам: {selectedFileIds.length}</div>
+                </div>
+                <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600" onClick={() => setBulkAccessOpen(false)}>Закрыть</button>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyBulkAclTemplate("inherit")}>Наследовать от папки</button>
+                <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyBulkAclTemplate("staff")}>Общие материалы</button>
+                    {staffGroups.length > 0 && (
+                      <>
+                        <select
+                          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
+                          value={String(templateStaffGroupId || staffGroups[0]?.id || "")}
+                          onChange={(e) => setTemplateStaffGroupId(Number(e.target.value) || 0)}
+                        >
+                          {staffGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                        </select>
+                        <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyBulkAclTemplate("group", templateStaffGroupId || staffGroups[0]?.id || 0)}>Отдел / группа</button>
+                      </>
+                    )}
+                    {clientGroups.length > 0 && (
+                      <>
+                        <select
+                          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
+                          value={String(templateClientGroupId || clientGroups[0]?.id || "")}
+                          onChange={(e) => setTemplateClientGroupId(Number(e.target.value) || 0)}
+                        >
+                          {clientGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                        </select>
+                        <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyBulkAclTemplate("client_group", templateClientGroupId || clientGroups[0]?.id || 0)}>Клиенты / группа</button>
+                      </>
+                    )}
+                <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyBulkAclTemplate("clients")}>Только клиенты</button>
+                <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyBulkAclTemplate("staff_clients")}>Сотрудники и клиенты</button>
+              </div>
+              <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                <div className="font-semibold">Предварительное влияние на клиентский бот</div>
+                <div className="mt-2 grid gap-2 md:grid-cols-2">
+                  <div className="rounded-xl bg-white/70 px-3 py-2">
+                    <div className="font-medium">Сейчас</div>
+                    <div className="mt-1 text-amber-800">
+                      Всем клиентам: {bulkClientImpact.before.all} · Группам: {bulkClientImpact.before.groups} · Закрыто: {bulkClientImpact.before.closed}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-white/70 px-3 py-2">
+                    <div className="font-medium">После сохранения</div>
+                    <div className="mt-1 text-amber-800">
+                      Всем клиентам: {bulkClientImpact.after.all} · Группам: {bulkClientImpact.after.groups} · Закрыто: {bulkClientImpact.after.closed}
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-2 text-amber-800">
+                  Откроется всем клиентам: {bulkClientImpact.opensToAll} · Откроется клиентским группам: {bulkClientImpact.opensToGroups} · Закроется для клиентов: {bulkClientImpact.closesForClients}
+                </div>
+              </div>
+              <div className="mt-3 space-y-2">
+                {bulkAclDraft.map((item, index) => (
+                  <div key={`${item.principal_type}:${item.principal_id}:${index}`} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2">
+                    <select className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" value={item.principal_type} onChange={(e) => updateBulkAclDraftItem(index, { principal_type: e.target.value, principal_id: e.target.value === "audience" ? "staff" : e.target.value === "membership" ? String(accountUsers[0]?.membership_id || "") : e.target.value === "group" ? String(accountGroups[0]?.id || "") : "member" })}>
+                      <option value="role">Роль</option>
+                      <option value="audience">Аудитория</option>
+                      {accountGroups.length > 0 && <option value="group">Группа</option>}
+                      {accountUsers.length > 0 && <option value="membership">Конкретный пользователь</option>}
+                    </select>
+                    <select className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" value={item.principal_id} onChange={(e) => updateBulkAclDraftItem(index, { principal_id: e.target.value })}>
+                      {item.principal_type === "audience" ? (
+                        <>
+                          <option value="staff">{audienceOptionLabel("staff")}</option>
+                          <option value="client">{audienceOptionLabel("client")}</option>
+                        </>
+                      ) : item.principal_type === "group" ? (
+                        <>
+                          {accountGroups.map((group) => <option key={group.id} value={String(group.id)}>{group.name}</option>)}
+                        </>
+                      ) : item.principal_type === "membership" ? (
+                        <>
+                          {accountUsers.map((user) => <option key={user.membership_id} value={String(user.membership_id)}>{user.display_name}</option>)}
+                        </>
+                      ) : (
+                        <>
+                          <option value="owner">{roleOptionLabel("owner")}</option>
+                          <option value="admin">{roleOptionLabel("admin")}</option>
+                          <option value="member">{roleOptionLabel("member")}</option>
+                          <option value="client">{roleOptionLabel("client")}</option>
+                        </>
+                      )}
+                    </select>
+                    <select className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" value={item.access_level} onChange={(e) => updateBulkAclDraftItem(index, { access_level: e.target.value })}>
+                      <option value="none">Нет доступа</option>
+                      <option value="read">Чтение</option>
+                      <option value="write">Редактирование</option>
+                      <option value="admin">Администрирование</option>
+                    </select>
+                    <button className="rounded-xl border border-rose-200 bg-white px-3 py-2 text-xs text-rose-600" onClick={() => removeBulkAclDraftItem(index)}>Убрать</button>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" onClick={addBulkAclDraftItem}>Добавить правило</button>
+                <button className="rounded-xl bg-sky-600 px-3 py-2 text-sm font-semibold text-white" onClick={saveBulkAcl}>
+                  {bulkAclSaving ? "Сохраняем..." : "Применить ко всем"}
+                </button>
+                {bulkAclMessage && <div className="self-center text-xs text-slate-500">{bulkAclMessage}</div>}
+              </div>
+            </div>
+          )}
 
           {kbViewMode === "table" && (
             <div className="mt-4 rounded-xl border border-slate-100" onMouseDown={startDragSelect}>
@@ -1340,7 +2223,7 @@ export function WebKbPage() {
                     data-row="kb"
                     onClick={(e) => {
                       if ((e.target as HTMLElement).closest("button") || (e.target as HTMLElement).closest("input")) return;
-                      setFocusedRowId(f.id);
+                      openFileDetails(f.id);
                       if (e.shiftKey && lastSelectedId) {
                         selectRange(lastSelectedId, f.id);
                       }
@@ -1367,23 +2250,21 @@ export function WebKbPage() {
                           e.stopPropagation();
                           void openPreview(f.id);
                         }}
-                      >
-                        {f.filename}
-                      </button>
+                        >
+                          {f.filename}
+                        </button>
+                      <div className="min-w-0">{renderAccessBadges(f)}</div>
                     </label>
                     <div className="truncate text-slate-600">{fileOwnerLabel(f)}</div>
-                    <div className="truncate text-slate-600">{fileCollections(f.id)[0]?.name || "Корень"}</div>
+                    <div className="truncate text-slate-600">{f.folder_id ? folderNameMap.get(Number(f.folder_id)) || "Корень" : "Корень"}</div>
                     <div className="text-[11px] rounded-full px-2 py-0.5 bg-slate-100 text-slate-600 w-fit">{fileStatusLabel(f.status)}</div>
                     <div className="relative flex items-center justify-end gap-2">
-                      <button className="opacity-0 group-hover:opacity-100 text-xs text-slate-500 hover:text-slate-900" title="Поделиться">
-                        Поделиться
-                      </button>
                       <button
                         className="opacity-0 group-hover:opacity-100 text-xs text-slate-500 hover:text-slate-900"
                         title="Переместить"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setFocusedRowId(f.id);
+                          openFileDetails(f.id);
                         }}
                       >
                         Переместить
@@ -1402,6 +2283,7 @@ export function WebKbPage() {
                         className="text-slate-400 opacity-0 group-hover:opacity-100"
                         onClick={(e) => {
                           e.stopPropagation();
+                          openFileDetails(f.id);
                           toggleFileMenu(f.id);
                         }}
                       >
@@ -1447,7 +2329,7 @@ export function WebKbPage() {
                 >
                   <div className="flex items-center justify-between">
                     <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-xs text-white" style={{ backgroundColor: fileTypeIcon(f.filename, f.mime_type, f.source_type).color }}>{fileTypeIcon(f.filename, f.mime_type, f.source_type).label}</span>
-                    <button className="text-slate-400" onClick={(e) => { e.stopPropagation(); toggleFileMenu(f.id); }}>⋮</button>
+                    <button className="text-slate-400" onClick={(e) => { e.stopPropagation(); openFileDetails(f.id); toggleFileMenu(f.id); }}>⋮</button>
                   </div>
                   <button
                     type="button"
@@ -1458,7 +2340,9 @@ export function WebKbPage() {
                   >
                     {f.filename}
                   </button>
+                  {renderAccessBadges(f)}
                   <div className="mt-1 text-xs text-slate-500">{fileOwnerLabel(f)}</div>
+                  <div className="mt-1 text-xs text-slate-400">{f.folder_id ? folderNameMap.get(Number(f.folder_id)) || "Корень" : "Корень"}</div>
                   <div className="mt-2 text-xs rounded-full px-2 py-1 bg-slate-100 w-fit">{fileStatusLabel(f.status)}</div>
                   {openFileMenuId === f.id && (
                     <div className="mt-2 rounded-xl border border-slate-200 bg-white shadow-lg">
@@ -1617,6 +2501,497 @@ export function WebKbPage() {
           );
         })()}
       </section>
+
+      <aside className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-slate-900">Свойства и доступ</div>
+            <div className="mt-1 text-xs text-slate-500">Показываем, кто сможет искать и открывать материалы.</div>
+          </div>
+          <div className="flex items-center gap-2">
+            {detailsTarget && !detailsLoading && !detailsError && (
+              <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 p-1">
+                <button
+                  className={`rounded-lg px-3 py-1.5 text-xs ${!isEditingAccess ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"}`}
+                  onClick={closeAccessEditor}
+                >
+                  Обзор
+                </button>
+                <button
+                  className={`rounded-lg px-3 py-1.5 text-xs ${isEditingAccess ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"}`}
+                  onClick={openAccessEditor}
+                >
+                  Настроить доступ
+                </button>
+              </div>
+            )}
+            {detailsTarget && (
+              <button
+                className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs text-slate-600"
+                onClick={() => {
+                  setDetailsTarget(null);
+                  setSelectedFolderId(null);
+                  setDetailsError("");
+                  setDetailsSaveMessage("");
+                  setIsEditingAccess(false);
+                  setShowAdvancedAcl(false);
+                }}
+              >
+                Очистить
+              </button>
+            )}
+          </div>
+        </div>
+
+        {!detailsTarget && (
+          <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+            Выбери папку слева или файл в списке. Здесь будет видно, кто имеет доступ к поиску и просмотру.
+          </div>
+        )}
+
+        {detailsTarget && detailsLoading && (
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+            Загружаем свойства и доступ...
+          </div>
+        )}
+
+        {detailsTarget && !detailsLoading && detailsError && (
+          <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-600">
+            {detailsError}
+          </div>
+        )}
+
+        {detailsTarget?.kind === "folder" && selectedFolder && !detailsLoading && !detailsError && (
+          <div className="mt-4 space-y-4">
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-slate-400">Папка</div>
+                  <div className="mt-2 text-base font-semibold text-slate-900">{selectedFolder.name}</div>
+                </div>
+                <button
+                  className="rounded-xl border border-rose-200 px-3 py-2 text-xs font-medium text-rose-600"
+                  onClick={() => {
+                    void deleteFolder(selectedFolder.id);
+                  }}
+                >
+                  Удалить папку
+                </button>
+              </div>
+              <div className="mt-2 text-sm text-slate-500">
+                {selectedFolder.parent_id ? `Внутри: ${folderNameMap.get(Number(selectedFolder.parent_id)) || "—"}` : "Корень базы знаний"}
+              </div>
+              <div className="mt-1 text-sm text-slate-500">
+                Файлов в ветке: {folderFileCounts.get(selectedFolder.id) || 0}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="text-sm font-semibold text-slate-900">Покрытие клиентского бота в папке</div>
+              <div className="mt-2 grid gap-2">
+                <div className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
+                  <span className="text-slate-600">Готовые материалы</span>
+                  <span className="font-medium text-slate-900">{selectedFolderClientCoverage.total_ready_files}</span>
+                </div>
+                <div className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
+                  <span className="text-slate-600">Всем клиентам</span>
+                  <span className="font-medium text-slate-900">{selectedFolderClientCoverage.open_all_clients}</span>
+                </div>
+                <div className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
+                  <span className="text-slate-600">Клиентским группам</span>
+                  <span className="font-medium text-slate-900">{selectedFolderClientCoverage.open_client_groups}</span>
+                </div>
+                <div className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
+                  <span className="text-slate-600">Закрыты для клиентов</span>
+                  <span className="font-medium text-slate-900">{selectedFolderClientCoverage.closed_for_clients}</span>
+                </div>
+              </div>
+              <div className="mt-3 text-xs text-slate-500">
+                Сводка учитывает всю ветку папки, включая подпапки. После изменения правил цифры обновляются сразу.
+              </div>
+              {(selectedFolderClientCoverage.open_all_clients > 0 || selectedFolderClientCoverage.open_client_groups > 0) && (
+                <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  Внимание: в этой ветке есть материалы, доступные клиентам. Удаление папки или перенос файлов в другие папки может изменить доступ клиентского бота.
+                </div>
+              )}
+            </div>
+
+            {!isEditingAccess ? (
+              <div className="rounded-2xl border border-slate-200 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Доступ</div>
+                    <div className="mt-2 text-xs text-slate-500">
+                      Если правил нет, папка доступна сотрудникам аккаунта по умолчанию. Клиенты по умолчанию не ищут по этим материалам.
+                    </div>
+                  </div>
+                  <button className="rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700" onClick={openAccessEditor}>
+                    Настроить доступ
+                  </button>
+                </div>
+                <div className="mt-3">
+                  {folderHasExplicitRules
+                    ? renderAccessOriginCard({
+                        title: "Явные правила на папке",
+                        tone: "emerald",
+                        body: "Для этой папки заданы собственные правила. Они определяют, кто может искать и открывать материалы в этой ветке.",
+                      })
+                    : renderAccessOriginCard({
+                        title: "Наследование по умолчанию",
+                        tone: "blue",
+                        body: "На папке нет собственных правил. Сейчас действует базовый доступ аккаунта: сотрудники видят материалы, клиенты — нет.",
+                      })}
+                </div>
+                {detailsSaveMessage && <div className={`mt-3 text-xs ${detailsSaveMessage.includes("сохран") ? "text-emerald-600" : "text-rose-600"}`}>{detailsSaveMessage}</div>}
+                <div className="mt-3">
+                  {renderAclSummary(selectedFolderAccess, "Явных правил нет. Сейчас действует доступ по умолчанию для сотрудников аккаунта.")}
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-slate-200 p-4">
+                <div className="mb-4 flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Настроить доступ к папке</div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      Сначала выбери подходящий сценарий. Тонкую настройку используй только если шаблоны не подходят.
+                    </div>
+                  </div>
+                  <button className="rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700" onClick={closeAccessEditor}>
+                    Вернуться к обзору
+                  </button>
+                </div>
+                <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-sm font-semibold text-slate-900">Выбери сценарий доступа</div>
+                  <div className="text-xs text-slate-500">
+                    Для большинства случаев достаточно выбрать один шаблон для всей папки. Индивидуальные правила нужны только для редких исключений.
+                  </div>
+                    {folderClientImpact && (
+                      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                        <div className="font-semibold">Предварительное влияние на клиентский бот</div>
+                        <div className="mt-2 text-xs text-amber-800">
+                          Изменение правил папки влияет на всю ветку, включая подпапки. Явные правила на вложенных папках и файлах могут сохранить свои ограничения.
+                        </div>
+                        <div className="mt-3 grid gap-2">
+                          <div className="flex items-center justify-between rounded-xl bg-white/70 px-3 py-2">
+                            <span>Текущий режим ветки</span>
+                            <span className="font-medium">
+                              {folderClientImpact.current === "all"
+                                ? "Всем клиентам"
+                                : folderClientImpact.current === "groups"
+                                  ? "Клиентским группам"
+                                  : "Закрыто для клиентов"}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between rounded-xl bg-white/70 px-3 py-2">
+                            <span>После сохранения</span>
+                            <span className="font-medium">
+                              {folderClientImpact.projected === "all"
+                                ? "Всем клиентам"
+                                : folderClientImpact.projected === "groups"
+                                  ? "Клиентским группам"
+                                  : "Закрыто для клиентов"}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="mt-3 text-xs text-amber-800">
+                          В этой ветке сейчас: готовых материалов — {folderClientImpact.totalReady}, всем клиентам — {folderClientImpact.openAll}, клиентским группам — {folderClientImpact.openGroups}, закрыто — {folderClientImpact.closed}.
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex flex-wrap gap-2">
+                      <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyAclTemplate("inherit")}>Наследовать по умолчанию</button>
+                      <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyAclTemplate("staff")}>Общие материалы</button>
+                      {staffGroups.length > 0 && (
+                        <>
+                          <select
+                            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
+                            value={String(templateStaffGroupId || staffGroups[0]?.id || "")}
+                            onChange={(e) => setTemplateStaffGroupId(Number(e.target.value) || 0)}
+                          >
+                            {staffGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                          </select>
+                          <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyAclTemplate("group", templateStaffGroupId || staffGroups[0]?.id || 0)}>Отдел / группа</button>
+                        </>
+                      )}
+                      {clientGroups.length > 0 && (
+                        <>
+                          <select
+                            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
+                            value={String(templateClientGroupId || clientGroups[0]?.id || "")}
+                            onChange={(e) => setTemplateClientGroupId(Number(e.target.value) || 0)}
+                          >
+                            {clientGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                          </select>
+                          <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyAclTemplate("client_group", templateClientGroupId || clientGroups[0]?.id || 0)}>Клиенты / группа</button>
+                        </>
+                      )}
+                      <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyAclTemplate("clients")}>Только клиенты</button>
+                      <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyAclTemplate("staff_clients")}>Сотрудники и клиенты</button>
+                    </div>
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-slate-200 bg-white px-3 py-3">
+                    <div>
+                      <div className="text-sm font-medium text-slate-800">Тонкая настройка</div>
+                      <div className="mt-1 text-xs text-slate-500">Используй только если шаблоны выше не подходят под сценарий.</div>
+                    </div>
+                    <button
+                      className="rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700"
+                      onClick={() => setShowAdvancedAcl((prev) => !prev)}
+                    >
+                      {showAdvancedAcl ? "Скрыть правила" : "Показать правила"}
+                    </button>
+                  </div>
+                  {showAdvancedAcl && (
+                    <>
+                      <div className="space-y-2">
+                        {aclDraft.map((item, index) => (
+                          <div key={`${item.principal_type}:${item.principal_id}:${index}`} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2">
+                            <select className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" value={item.principal_type} onChange={(e) => updateAclDraftItem(index, { principal_type: e.target.value, principal_id: e.target.value === "audience" ? "staff" : e.target.value === "membership" ? String(accountUsers[0]?.membership_id || "") : e.target.value === "group" ? String(accountGroups[0]?.id || "") : "member" })}>
+                              <option value="role">Роль</option>
+                              <option value="audience">Аудитория</option>
+                              {accountGroups.length > 0 && <option value="group">Группа</option>}
+                              {accountUsers.length > 0 && <option value="membership">Конкретный пользователь</option>}
+                            </select>
+                            <select className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" value={item.principal_id} onChange={(e) => updateAclDraftItem(index, { principal_id: e.target.value })}>
+                              {item.principal_type === "audience" ? (
+                                <>
+                                  <option value="staff">{audienceOptionLabel("staff")}</option>
+                                  <option value="client">{audienceOptionLabel("client")}</option>
+                                </>
+                              ) : item.principal_type === "group" ? (
+                                <>
+                                  {accountGroups.map((group) => <option key={group.id} value={String(group.id)}>{group.name}</option>)}
+                                </>
+                              ) : item.principal_type === "membership" ? (
+                                <>
+                                  {accountUsers.map((user) => <option key={user.membership_id} value={String(user.membership_id)}>{user.display_name}</option>)}
+                                </>
+                              ) : (
+                                <>
+                                  <option value="owner">{roleOptionLabel("owner")}</option>
+                                  <option value="admin">{roleOptionLabel("admin")}</option>
+                                  <option value="member">{roleOptionLabel("member")}</option>
+                                  <option value="client">{roleOptionLabel("client")}</option>
+                                </>
+                              )}
+                            </select>
+                            <select className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" value={item.access_level} onChange={(e) => updateAclDraftItem(index, { access_level: e.target.value })}>
+                              <option value="none">Нет доступа</option>
+                              <option value="read">Чтение</option>
+                              <option value="write">Редактирование</option>
+                              <option value="admin">Администрирование</option>
+                            </select>
+                            <button className="rounded-xl border border-rose-200 bg-white px-3 py-2 text-xs text-rose-600" onClick={() => removeAclDraftItem(index)}>Убрать</button>
+                          </div>
+                        ))}
+                      </div>
+                      <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" onClick={addAclDraftItem}>Добавить правило</button>
+                    </>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <button className="rounded-xl bg-sky-600 px-3 py-2 text-sm font-semibold text-white" onClick={saveAclDraft}>{detailsSaving ? "Сохраняем..." : "Сохранить доступ"}</button>
+                  </div>
+                  {detailsSaveMessage && <div className={`text-xs ${detailsSaveMessage.includes("сохран") ? "text-emerald-600" : "text-rose-600"}`}>{detailsSaveMessage}</div>}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {detailsTarget?.kind === "file" && selectedDetailsFile && !detailsLoading && !detailsError && (
+          <div className="mt-4 space-y-4">
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="text-xs uppercase tracking-wide text-slate-400">Файл</div>
+              <div className="mt-2 text-base font-semibold text-slate-900">{selectedDetailsFile.filename}</div>
+              <div className="mt-2 text-sm text-slate-500">
+                Папка: {selectedDetailsFile.folder_id ? folderNameMap.get(Number(selectedDetailsFile.folder_id)) || "Корень" : "Корень"}
+              </div>
+              <div className="mt-1 text-sm text-slate-500">Владелец: {fileOwnerLabel(selectedDetailsFile)}</div>
+              <div className="mt-1 text-sm text-slate-500">Статус: {fileStatusLabel(selectedDetailsFile.status)}</div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="text-sm font-semibold text-slate-900">Кто сможет искать по этому файлу</div>
+              <div className="mt-3">
+                {fileHasExplicitRules
+                  ? renderAccessOriginCard({
+                      title: "Явные правила на файле",
+                      tone: "emerald",
+                      body: "У файла есть собственные правила. Они важнее наследования от папки и сразу влияют на поиск и ответы модели.",
+                    })
+                  : selectedDetailsFileFolder
+                    ? renderAccessOriginCard({
+                        title: "Наследование от папки",
+                        tone: "amber",
+                        body: `Файл сейчас наследует доступ от папки «${selectedDetailsFileFolder.name}». Изменение правил папки сразу изменит доступ к этому файлу.`,
+                      })
+                    : renderAccessOriginCard({
+                        title: "Общие правила аккаунта",
+                        tone: "blue",
+                        body: "Файл лежит в корне без собственных правил. Сейчас действует базовый доступ аккаунта.",
+                      })}
+              </div>
+              <div className="mt-3 grid gap-3">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="text-xs uppercase tracking-wide text-slate-400">Сотрудники</div>
+                  <div className="mt-1 text-sm text-slate-800">{kbAccessLabel(selectedFileEffectiveStaff)}</div>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="text-xs uppercase tracking-wide text-slate-400">Клиенты</div>
+                  <div className="mt-1 text-sm text-slate-800">{kbAccessLabel(selectedFileEffectiveClient)}</div>
+                  <div className="mt-1 text-xs text-slate-500">
+                    {summarizeClientVisibility(selectedFileAccess, accountGroups)}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {!isEditingAccess ? (
+              <div className="rounded-2xl border border-slate-200 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Явные правила</div>
+                    <div className="mt-2 text-xs text-slate-500">
+                      Если правил нет, файл наследует доступ от папки или общие правила роли.
+                    </div>
+                  </div>
+                  <button className="rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700" onClick={openAccessEditor}>
+                    Настроить доступ
+                  </button>
+                </div>
+                {detailsSaveMessage && <div className={`mt-3 text-xs ${detailsSaveMessage.includes("сохран") ? "text-emerald-600" : "text-rose-600"}`}>{detailsSaveMessage}</div>}
+                <div className="mt-3">
+                  {renderAclSummary(selectedFileAccess, "Явных правил на файл нет. Сейчас действует наследование от папки или правила роли.")}
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-slate-200 p-4">
+                <div className="mb-4 flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">Настроить доступ к файлу</div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      По умолчанию файл должен наследовать доступ от папки. Исключения настраивай только для отдельных случаев.
+                    </div>
+                  </div>
+                  <button className="rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700" onClick={closeAccessEditor}>
+                    Вернуться к обзору
+                  </button>
+                </div>
+                <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-sm font-semibold text-slate-900">Как управлять этим файлом</div>
+                  {!fileHasExplicitRules ? (
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                      <div className="font-medium text-amber-900">Сейчас файл наследует доступ</div>
+                      <div className="mt-1 text-xs text-amber-800">
+                        Это рекомендуемый режим. Меняй правила на файле только если нужно сделать исключение из правил папки.
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                      <div className="font-medium text-emerald-900">На файле есть исключение</div>
+                      <div className="mt-1 text-xs text-emerald-800">
+                        У файла заданы собственные правила. Они важнее правил папки и сразу влияют на поиск и ответы модели.
+                      </div>
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyAclTemplate("inherit")}>Оставить наследование</button>
+                    <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyAclTemplate("staff")}>Сделать общим</button>
+                    {staffGroups.length > 0 && (
+                      <>
+                        <select
+                          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
+                          value={String(templateStaffGroupId || staffGroups[0]?.id || "")}
+                          onChange={(e) => setTemplateStaffGroupId(Number(e.target.value) || 0)}
+                        >
+                          {staffGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                        </select>
+                        <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyAclTemplate("group", templateStaffGroupId || staffGroups[0]?.id || 0)}>Исключение для отдела</button>
+                      </>
+                    )}
+                    {clientGroups.length > 0 && (
+                      <>
+                        <select
+                          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs"
+                          value={String(templateClientGroupId || clientGroups[0]?.id || "")}
+                          onChange={(e) => setTemplateClientGroupId(Number(e.target.value) || 0)}
+                        >
+                          {clientGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                        </select>
+                        <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyAclTemplate("client_group", templateClientGroupId || clientGroups[0]?.id || 0)}>Исключение для клиентской группы</button>
+                      </>
+                    )}
+                    <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyAclTemplate("clients")}>Открыть клиентам</button>
+                    <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs" onClick={() => applyAclTemplate("staff_clients")}>Сотрудники и клиенты</button>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-slate-200 bg-white px-3 py-3">
+                    <div>
+                      <div className="text-sm font-medium text-slate-800">Тонкая настройка</div>
+                      <div className="mt-1 text-xs text-slate-500">Используй только для редких исключений, когда шаблоны не подходят.</div>
+                    </div>
+                    <button
+                      className="rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700"
+                      onClick={() => setShowAdvancedAcl((prev) => !prev)}
+                    >
+                      {showAdvancedAcl ? "Скрыть правила" : "Показать правила"}
+                    </button>
+                  </div>
+                  {showAdvancedAcl && (
+                    <>
+                      <div className="space-y-2">
+                        {aclDraft.map((item, index) => (
+                          <div key={`${item.principal_type}:${item.principal_id}:${index}`} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2">
+                            <select className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" value={item.principal_type} onChange={(e) => updateAclDraftItem(index, { principal_type: e.target.value, principal_id: e.target.value === "audience" ? "staff" : e.target.value === "membership" ? String(accountUsers[0]?.membership_id || "") : e.target.value === "group" ? String(accountGroups[0]?.id || "") : "member" })}>
+                              <option value="role">Роль</option>
+                              <option value="audience">Аудитория</option>
+                              {accountGroups.length > 0 && <option value="group">Группа</option>}
+                              {accountUsers.length > 0 && <option value="membership">Конкретный пользователь</option>}
+                            </select>
+                            <select className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" value={item.principal_id} onChange={(e) => updateAclDraftItem(index, { principal_id: e.target.value })}>
+                              {item.principal_type === "audience" ? (
+                                <>
+                                  <option value="staff">{audienceOptionLabel("staff")}</option>
+                                  <option value="client">{audienceOptionLabel("client")}</option>
+                                </>
+                              ) : item.principal_type === "group" ? (
+                                <>
+                                  {accountGroups.map((group) => <option key={group.id} value={String(group.id)}>{group.name}</option>)}
+                                </>
+                              ) : item.principal_type === "membership" ? (
+                                <>
+                                  {accountUsers.map((user) => <option key={user.membership_id} value={String(user.membership_id)}>{user.display_name}</option>)}
+                                </>
+                              ) : (
+                                <>
+                                  <option value="owner">{roleOptionLabel("owner")}</option>
+                                  <option value="admin">{roleOptionLabel("admin")}</option>
+                                  <option value="member">{roleOptionLabel("member")}</option>
+                                  <option value="client">{roleOptionLabel("client")}</option>
+                                </>
+                              )}
+                            </select>
+                            <select className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" value={item.access_level} onChange={(e) => updateAclDraftItem(index, { access_level: e.target.value })}>
+                              <option value="none">Нет доступа</option>
+                              <option value="read">Чтение</option>
+                              <option value="write">Редактирование</option>
+                              <option value="admin">Администрирование</option>
+                            </select>
+                            <button className="rounded-xl border border-rose-200 bg-white px-3 py-2 text-xs text-rose-600" onClick={() => removeAclDraftItem(index)}>Убрать</button>
+                          </div>
+                        ))}
+                      </div>
+                      <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" onClick={addAclDraftItem}>Добавить правило</button>
+                    </>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <button className="rounded-xl bg-sky-600 px-3 py-2 text-sm font-semibold text-white" onClick={saveAclDraft}>{detailsSaving ? "Сохраняем..." : "Сохранить доступ"}</button>
+                  </div>
+                  {detailsSaveMessage && <div className={`text-xs ${detailsSaveMessage.includes("сохран") ? "text-emerald-600" : "text-rose-600"}`}>{detailsSaveMessage}</div>}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </aside>
     </div>
   );
 }

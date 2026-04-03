@@ -12,11 +12,19 @@ from sqlalchemy.orm import sessionmaker
 from apps.backend.database import Base, get_test_engine
 from apps.backend.deps import get_db
 from apps.backend.main import app
-from apps.backend.models.account import Account, AccountIntegration
+from apps.backend.models.account import (
+    Account,
+    AccountIntegration,
+    AccountMembership,
+    AccountUserGroup,
+    AccountUserGroupMember,
+    AppUser,
+    AppUserIdentity,
+)
 from apps.backend.models.account_kb_setting import AccountKBSetting
 from apps.backend.models.bitrix_inbound_event import BitrixInboundEvent
 from apps.backend.models.dialog import Dialog, Message
-from apps.backend.models.kb import KBCollection, KBFile, KBSmartFolder, KBSource
+from apps.backend.models.kb import KBChunk, KBCollection, KBCollectionFile, KBFile, KBFileAccess, KBFolder, KBFolderAccess, KBJob, KBSmartFolder, KBSource
 from apps.backend.models.portal import Portal
 from apps.backend.models.portal_kb_setting import PortalKBSetting
 from apps.backend.models.topic_summary import PortalTopicSummary, AccountTopicSummary
@@ -152,6 +160,7 @@ def test_bitrix_iframe_reads_account_scoped_files_sources_and_settings(test_db_s
 
     assert settings_resp.status_code == 200
     assert settings_resp.json()["chat_model"] == "GigaChat-2-Max"
+    assert settings_resp.json()["settings_scope"] == "account"
     assert settings_resp.json()["settings_portal_id"] == portal_a.id
     assert settings_resp.json()["settings_account_id"] == account.id
 
@@ -197,6 +206,7 @@ def test_bitrix_kb_settings_save_into_account_scope_and_read_from_second_portal(
 
     assert read_resp.status_code == 200
     assert read_resp.json()["chat_model"] == "GigaChat-2-Max"
+    assert read_resp.json()["settings_scope"] == "account"
     assert read_resp.json()["settings_account_id"] == account.id
 
     row = test_db_session.get(AccountKBSetting, account.id)
@@ -206,6 +216,42 @@ def test_bitrix_kb_settings_save_into_account_scope_and_read_from_second_portal(
 
 
 @pytest.mark.timeout(10)
+def test_bitrix_iframe_can_read_chunks_from_account_scoped_file(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    source = KBSource(account_id=account.id, portal_id=portal_a.id, source_type="file", audience="staff", title="Doc", status="ready")
+    test_db_session.add(source)
+    test_db_session.flush()
+    file_row = KBFile(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        source_id=source.id,
+        filename="doc.txt",
+        audience="staff",
+        mime_type="text/plain",
+        size_bytes=10,
+        storage_path="/tmp/doc.txt",
+        status="ready",
+    )
+    test_db_session.add(file_row)
+    test_db_session.flush()
+    test_db_session.add(KBChunk(portal_id=portal_a.id, file_id=file_row.id, source_id=source.id, audience="staff", chunk_index=0, text="alpha beta"))
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    try:
+        resp = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/files/{file_row.id}/chunks",
+            headers={"Authorization": "Bearer tok"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["text"] == "alpha beta"
+
 def test_bitrix_iframe_reads_account_scoped_dialogs_and_user_stats(test_db_session):
     account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
     dialog = Dialog(portal_id=portal_a.id, provider_dialog_id="dlg-1")
@@ -567,23 +613,838 @@ def test_bitrix_iframe_writes_new_entities_to_primary_account_portal(test_db_ses
     assert upload_resp.status_code == 200
     uploaded = test_db_session.get(KBFile, int(upload_resp.json()["id"]))
     assert uploaded is not None
+    assert uploaded.account_id == account.id
     assert uploaded.portal_id == portal_a.id
     assert Path(uploaded.storage_path).name.endswith("new.txt")
 
     assert source_resp.status_code == 200
     source = test_db_session.get(KBSource, int(source_resp.json()["source_id"]))
     assert source is not None
+    assert source.account_id == account.id
     assert source.portal_id == portal_a.id
+    upload_job = test_db_session.get(KBJob, int(upload_resp.json()["job_id"]))
+    assert upload_job is not None
+    assert upload_job.account_id == account.id
+    source_job = test_db_session.get(KBJob, int(source_resp.json()["job_id"]))
+    assert source_job is not None
+    assert source_job.account_id == account.id
 
     assert collection_resp.status_code == 200
     collection = test_db_session.get(KBCollection, int(collection_resp.json()["id"]))
     assert collection is not None
     assert collection.portal_id == portal_a.id
+    assert collection.account_id == account.id
 
     assert folder_resp.status_code == 200
     folder = test_db_session.get(KBSmartFolder, int(folder_resp.json()["id"]))
     assert folder is not None
     assert folder.portal_id == portal_a.id
+    assert folder.account_id == account.id
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_topics_are_account_scoped_from_second_portal(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+
+    file_rec = KBFile(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        filename="vacation-policy.pdf",
+        storage_path="/tmp/vacation-policy.pdf",
+        mime_type="application/pdf",
+        status="ready",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    folder = KBSmartFolder(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        name="Отпуска",
+        system_tag="hr_docs",
+        rules_json={"topic": "hr"},
+        created_at=datetime.utcnow(),
+    )
+    test_db_session.add_all([file_rec, folder])
+    test_db_session.flush()
+    test_db_session.add(
+        KBChunk(
+            account_id=account.id,
+            portal_id=portal_a.id,
+            file_id=file_rec.id,
+            chunk_index=0,
+            text="Онбординг сотрудника и обучение команды в компании",
+            page_num=1,
+            created_at=datetime.utcnow(),
+        )
+    )
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    original_require_admin = bitrix_router._require_portal_admin
+    bitrix_router._require_portal_admin = lambda db, portal_id, request: None
+    try:
+        resp = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/topics",
+            headers={"Authorization": "Bearer tok"},
+        )
+    finally:
+        bitrix_router._require_portal_admin = original_require_admin
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert any(int(item["count"]) >= 1 for item in payload.get("topics", []))
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_reindex_all_is_account_scoped_from_second_portal(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    file_rec = KBFile(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        filename="shared.txt",
+        audience="staff",
+        mime_type="text/plain",
+        size_bytes=10,
+        storage_path="/tmp/shared.txt",
+        status="uploaded",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db_session.add(file_rec)
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    original_require_admin = bitrix_router._require_portal_admin
+    bitrix_router._require_portal_admin = lambda db, portal_id, request: None
+    try:
+        resp = client.post(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/reindex",
+            headers={"Authorization": "Bearer tok"},
+        )
+    finally:
+        bitrix_router._require_portal_admin = original_require_admin
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+    assert resp.status_code == 200
+    assert int(resp.json()["queued"]) == 1
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_folder_crud_and_file_move_work_across_account_scope(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    file_rec = KBFile(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        filename="shared.txt",
+        audience="staff",
+        mime_type="text/plain",
+        size_bytes=10,
+        storage_path="/tmp/shared.txt",
+        status="ready",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db_session.add(file_rec)
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    original_require_admin = bitrix_router._require_portal_admin
+    bitrix_router._require_portal_admin = lambda db, portal_id, request: None
+    try:
+        create_root = client.post(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/folders",
+            headers={"Authorization": "Bearer tok"},
+            json={"name": "Dept"},
+        )
+        root_id = int(create_root.json()["id"])
+        create_child = client.post(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/folders",
+            headers={"Authorization": "Bearer tok"},
+            json={"name": "Policies", "parent_id": root_id},
+        )
+        child_id = int(create_child.json()["id"])
+        move_resp = client.post(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/files/{file_rec.id}/folder",
+            headers={"Authorization": "Bearer tok"},
+            json={"folder_id": child_id},
+        )
+        list_resp = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/folders",
+            headers={"Authorization": "Bearer tok"},
+        )
+    finally:
+        bitrix_router._require_portal_admin = original_require_admin
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+    assert create_root.status_code == 200
+    assert create_child.status_code == 200
+    assert move_resp.status_code == 200
+    assert list_resp.status_code == 200
+
+    root = test_db_session.get(KBFolder, root_id)
+    child = test_db_session.get(KBFolder, child_id)
+    moved_file = test_db_session.get(KBFile, file_rec.id)
+    assert root is not None and child is not None and moved_file is not None
+    assert root.account_id == account.id
+    assert child.account_id == account.id
+    assert root.portal_id == portal_a.id
+    assert child.portal_id == portal_a.id
+    assert child.parent_id == root.id
+    assert moved_file.folder_id == child.id
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_folder_delete_blocks_non_empty_folder(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    folder = KBFolder(account_id=account.id, portal_id=portal_a.id, name="Dept", created_at=datetime.utcnow(), updated_at=datetime.utcnow())
+    test_db_session.add(folder)
+    test_db_session.flush()
+    test_db_session.add(
+        KBFile(
+            account_id=account.id,
+            portal_id=portal_a.id,
+            folder_id=folder.id,
+            filename="shared.txt",
+            audience="staff",
+            mime_type="text/plain",
+            size_bytes=10,
+            storage_path="/tmp/shared.txt",
+            status="ready",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+    )
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    original_require_admin = bitrix_router._require_portal_admin
+    bitrix_router._require_portal_admin = lambda db, portal_id, request: None
+    try:
+        resp = client.delete(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/folders/{folder.id}",
+            headers={"Authorization": "Bearer tok"},
+        )
+    finally:
+        bitrix_router._require_portal_admin = original_require_admin
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+    assert resp.status_code == 409
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_folder_and_file_acl_api_and_effective_preview(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    folder = KBFolder(account_id=account.id, portal_id=portal_a.id, name="Dept", created_at=datetime.utcnow(), updated_at=datetime.utcnow())
+    test_db_session.add(folder)
+    test_db_session.flush()
+    file_rec = KBFile(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        folder_id=folder.id,
+        filename="shared.txt",
+        audience="staff",
+        mime_type="text/plain",
+        size_bytes=10,
+        storage_path="/tmp/shared.txt",
+        status="ready",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db_session.add(file_rec)
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    original_require_admin = bitrix_router._require_portal_admin
+    bitrix_router._require_portal_admin = lambda db, portal_id, request: None
+    try:
+        put_folder = client.put(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/folders/{folder.id}/access",
+            headers={"Authorization": "Bearer tok"},
+            json={"items": [{"principal_type": "role", "principal_id": "member", "access_level": "read"}]},
+        )
+        put_file = client.put(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/files/{file_rec.id}/access",
+            headers={"Authorization": "Bearer tok"},
+            json={"items": [{"principal_type": "membership", "principal_id": "42", "access_level": "write"}]},
+        )
+        get_folder = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/folders/{folder.id}/access",
+            headers={"Authorization": "Bearer tok"},
+        )
+        get_file = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/files/{file_rec.id}/access",
+            headers={"Authorization": "Bearer tok"},
+        )
+        preview = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/files/{file_rec.id}/access/effective?membership_id=42&role=member&audience=client",
+            headers={"Authorization": "Bearer tok"},
+        )
+    finally:
+        bitrix_router._require_portal_admin = original_require_admin
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+    assert put_folder.status_code == 200
+    assert put_file.status_code == 200
+    assert get_folder.status_code == 200
+    assert get_file.status_code == 200
+    assert preview.status_code == 200
+    assert test_db_session.query(KBFolderAccess).filter(KBFolderAccess.folder_id == folder.id).count() == 1
+    assert test_db_session.query(KBFileAccess).filter(KBFileAccess.file_id == file_rec.id).count() == 1
+    assert preview.json()["folder_access"] == "read"
+    assert preview.json()["effective_access"] == "write"
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_search_respects_file_acl_and_revoke(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    file_rec = KBFile(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        filename="restricted.txt",
+        audience="staff",
+        mime_type="text/plain",
+        size_bytes=10,
+        storage_path="/tmp/restricted.txt",
+        status="ready",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db_session.add(file_rec)
+    test_db_session.flush()
+    test_db_session.add(
+        KBChunk(
+            account_id=account.id,
+            portal_id=portal_a.id,
+            file_id=file_rec.id,
+            audience="staff",
+            chunk_index=0,
+            text="restricted handbook document",
+        )
+    )
+    test_db_session.add(
+        KBFileAccess(file_id=file_rec.id, principal_type="membership", principal_id="99", access_level="read")
+    )
+    test_db_session.commit()
+
+    original_acl_ctx = bitrix_router._portal_acl_subject_ctx
+    bitrix_router._portal_acl_subject_ctx = lambda db, portal_id, request, audience: {
+        "membership_id": 42,
+        "role": "member",
+        "audience": audience,
+    }
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    try:
+        denied = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/search?q=restricted&limit=20",
+            headers={"Authorization": "Bearer tok"},
+        )
+        assert denied.status_code == 200
+        assert denied.json()["file_ids"] == []
+
+        test_db_session.add(
+            KBFileAccess(file_id=file_rec.id, principal_type="membership", principal_id="42", access_level="read")
+        )
+        test_db_session.commit()
+
+        allowed = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/search?q=restricted&limit=20",
+            headers={"Authorization": "Bearer tok"},
+        )
+        assert allowed.status_code == 200
+        assert allowed.json()["file_ids"] == [file_rec.id]
+
+        test_db_session.query(KBFileAccess).filter(
+            KBFileAccess.file_id == file_rec.id,
+            KBFileAccess.principal_id == "42",
+        ).delete()
+        test_db_session.commit()
+
+        revoked = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/search?q=restricted&limit=20",
+            headers={"Authorization": "Bearer tok"},
+        )
+        assert revoked.status_code == 200
+        assert revoked.json()["file_ids"] == []
+    finally:
+        bitrix_router._portal_acl_subject_ctx = original_acl_ctx
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_search_respects_group_acl(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    app_user = AppUser(display_name="Sales User", status="active")
+    test_db_session.add(app_user)
+    test_db_session.flush()
+    membership = AccountMembership(account_id=account.id, user_id=app_user.id, role="member", status="active")
+    test_db_session.add(membership)
+    test_db_session.flush()
+
+    group = AccountUserGroup(account_id=account.id, name="Sales")
+    test_db_session.add(group)
+    test_db_session.flush()
+    test_db_session.add(AccountUserGroupMember(group_id=group.id, membership_id=membership.id))
+
+    integration = test_db_session.execute(
+        select(AccountIntegration).where(
+            AccountIntegration.account_id == account.id,
+            AccountIntegration.provider == "bitrix",
+            AccountIntegration.portal_id == portal_b.id,
+        )
+    ).scalar_one()
+    test_db_session.add(
+        AppUserIdentity(
+            user_id=app_user.id,
+            provider="bitrix",
+            integration_id=integration.id,
+            external_id="77",
+            display_value="Sales User",
+            created_at=datetime.utcnow(),
+        )
+    )
+
+    file_rec = KBFile(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        filename="sales.txt",
+        audience="staff",
+        mime_type="text/plain",
+        size_bytes=10,
+        storage_path="/tmp/sales.txt",
+        status="ready",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db_session.add(file_rec)
+    test_db_session.flush()
+    test_db_session.add(
+        KBChunk(
+            account_id=account.id,
+            portal_id=portal_a.id,
+            file_id=file_rec.id,
+            audience="staff",
+            chunk_index=0,
+            text="sales handbook document",
+        )
+    )
+    test_db_session.add(
+        KBFileAccess(file_id=file_rec.id, principal_type="group", principal_id=str(group.id), access_level="read")
+    )
+    test_db_session.commit()
+
+    original_decode = bitrix_router.decode_token
+    bitrix_router.decode_token = lambda token: {"uid": 77}
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    try:
+        allowed = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/search?q=sales&limit=20",
+            headers={"Authorization": "Bearer group-token"},
+        )
+        assert allowed.status_code == 200
+        assert allowed.json()["file_ids"] == [file_rec.id]
+
+        test_db_session.query(AccountUserGroupMember).filter(
+            AccountUserGroupMember.group_id == group.id,
+            AccountUserGroupMember.membership_id == membership.id,
+        ).delete()
+        test_db_session.commit()
+
+        revoked = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/search?q=sales&limit=20",
+            headers={"Authorization": "Bearer group-token"},
+        )
+        assert revoked.status_code == 200
+        assert revoked.json()["file_ids"] == []
+    finally:
+        bitrix_router.decode_token = original_decode
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_client_search_respects_client_group_acl(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    app_user = AppUser(display_name="Client User", status="active")
+    test_db_session.add(app_user)
+    test_db_session.flush()
+    membership = AccountMembership(account_id=account.id, user_id=app_user.id, role="client", status="active")
+    test_db_session.add(membership)
+    test_db_session.flush()
+
+    group = AccountUserGroup(account_id=account.id, name="Acme Clients", kind="client")
+    test_db_session.add(group)
+    test_db_session.flush()
+    test_db_session.add(AccountUserGroupMember(group_id=group.id, membership_id=membership.id))
+
+    integration = test_db_session.execute(
+        select(AccountIntegration).where(
+            AccountIntegration.account_id == account.id,
+            AccountIntegration.provider == "bitrix",
+            AccountIntegration.portal_id == portal_b.id,
+        )
+    ).scalar_one()
+    test_db_session.add(
+        AppUserIdentity(
+            user_id=app_user.id,
+            provider="bitrix",
+            integration_id=integration.id,
+            external_id="701",
+            display_value="Client User",
+            created_at=datetime.utcnow(),
+        )
+    )
+
+    file_rec = KBFile(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        filename="client-group.txt",
+        audience="client",
+        mime_type="text/plain",
+        size_bytes=10,
+        storage_path="/tmp/client-group.txt",
+        status="ready",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db_session.add(file_rec)
+    test_db_session.flush()
+    test_db_session.add(
+        KBChunk(
+            account_id=account.id,
+            portal_id=portal_a.id,
+            file_id=file_rec.id,
+            audience="client",
+            chunk_index=0,
+            text="client contract handbook",
+        )
+    )
+    test_db_session.add(
+        KBFileAccess(file_id=file_rec.id, principal_type="group", principal_id=str(group.id), access_level="read")
+    )
+    test_db_session.commit()
+
+    original_decode = bitrix_router.decode_token
+    bitrix_router.decode_token = lambda token: {"uid": 701}
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    try:
+        allowed = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/search?q=client&limit=20&audience=client",
+            headers={"Authorization": "Bearer client-group-token"},
+        )
+        assert allowed.status_code == 200
+        assert allowed.json()["file_ids"] == [file_rec.id]
+
+        test_db_session.query(AccountUserGroupMember).filter(
+            AccountUserGroupMember.group_id == group.id,
+            AccountUserGroupMember.membership_id == membership.id,
+        ).delete()
+        test_db_session.commit()
+
+        revoked = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/search?q=client&limit=20&audience=client",
+            headers={"Authorization": "Bearer client-group-token"},
+        )
+        assert revoked.status_code == 200
+        assert revoked.json()["file_ids"] == []
+    finally:
+        bitrix_router.decode_token = original_decode
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_ask_respects_file_acl_scope(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    file_rec = KBFile(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        filename="client-only.txt",
+        audience="staff",
+        mime_type="text/plain",
+        size_bytes=10,
+        storage_path="/tmp/client-only.txt",
+        status="ready",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db_session.add(file_rec)
+    test_db_session.commit()
+    test_db_session.add(
+        KBFileAccess(file_id=file_rec.id, principal_type="membership", principal_id="99", access_level="read")
+    )
+    test_db_session.commit()
+
+    captured: dict[str, object] = {}
+    original_answer_from_kb = bitrix_router.answer_from_kb
+    original_acl_ctx = bitrix_router._portal_acl_subject_ctx
+
+    def _fake_answer_from_kb(db, portal_id, query, **kwargs):
+        captured["file_ids_filter"] = kwargs.get("file_ids_filter")
+        return "ok", None, {}
+
+    bitrix_router.answer_from_kb = _fake_answer_from_kb
+    bitrix_router._portal_acl_subject_ctx = lambda db, portal_id, request, audience: {
+        "membership_id": 42,
+        "role": "member",
+        "audience": audience,
+    }
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    try:
+        denied = client.post(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/ask",
+            headers={"Authorization": "Bearer tok"},
+            json={"query": "test"},
+        )
+        assert denied.status_code == 200
+        assert "file_ids_filter" not in captured
+        assert "материал" in denied.json()["answer"].lower()
+
+        test_db_session.add(
+            KBFileAccess(file_id=file_rec.id, principal_type="membership", principal_id="42", access_level="read")
+        )
+        test_db_session.commit()
+
+        allowed = client.post(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/ask",
+            headers={"Authorization": "Bearer tok"},
+            json={"query": "test"},
+        )
+        assert allowed.status_code == 200
+        assert captured["file_ids_filter"] == [file_rec.id]
+    finally:
+        bitrix_router.answer_from_kb = original_answer_from_kb
+        bitrix_router._portal_acl_subject_ctx = original_acl_ctx
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_client_ask_respects_client_group_acl_scope(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    app_user = AppUser(display_name="Client Ask", status="active")
+    test_db_session.add(app_user)
+    test_db_session.flush()
+    membership = AccountMembership(account_id=account.id, user_id=app_user.id, role="client", status="active")
+    test_db_session.add(membership)
+    test_db_session.flush()
+    group = AccountUserGroup(account_id=account.id, name="Client Ask Group", kind="client")
+    test_db_session.add(group)
+    test_db_session.flush()
+    test_db_session.add(AccountUserGroupMember(group_id=group.id, membership_id=membership.id))
+
+    integration = test_db_session.execute(
+        select(AccountIntegration).where(
+            AccountIntegration.account_id == account.id,
+            AccountIntegration.provider == "bitrix",
+            AccountIntegration.portal_id == portal_b.id,
+        )
+    ).scalar_one()
+    test_db_session.add(
+        AppUserIdentity(
+            user_id=app_user.id,
+            provider="bitrix",
+            integration_id=integration.id,
+            external_id="702",
+            display_value="Client Ask",
+            created_at=datetime.utcnow(),
+        )
+    )
+
+    file_rec = KBFile(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        filename="client-scope.txt",
+        audience="client",
+        mime_type="text/plain",
+        size_bytes=10,
+        storage_path="/tmp/client-scope.txt",
+        status="ready",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db_session.add(file_rec)
+    test_db_session.flush()
+    test_db_session.add(
+        KBFileAccess(file_id=file_rec.id, principal_type="group", principal_id=str(group.id), access_level="read")
+    )
+    test_db_session.commit()
+
+    captured: dict[str, object] = {}
+    original_answer_from_kb = bitrix_router.answer_from_kb
+    original_acl_ctx = bitrix_router._portal_acl_subject_ctx
+
+    def _fake_answer_from_kb(db, portal_id, query, **kwargs):
+        captured["file_ids_filter"] = kwargs.get("file_ids_filter")
+        return "ok", None, {}
+
+    bitrix_router.answer_from_kb = _fake_answer_from_kb
+    bitrix_router._portal_acl_subject_ctx = lambda db, portal_id, request, audience: {
+        "membership_id": membership.id,
+        "group_ids": [group.id],
+        "role": "client",
+        "audience": audience,
+        "portal_user_id": 702,
+    }
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    try:
+        allowed = client.post(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/ask",
+            headers={"Authorization": "Bearer client-ask-token"},
+            json={"query": "client", "audience": "client"},
+        )
+        assert allowed.status_code == 200
+        assert captured["file_ids_filter"] == [file_rec.id]
+
+        test_db_session.query(AccountUserGroupMember).filter(
+            AccountUserGroupMember.group_id == group.id,
+            AccountUserGroupMember.membership_id == membership.id,
+        ).delete()
+        test_db_session.commit()
+        captured.clear()
+        bitrix_router._portal_acl_subject_ctx = lambda db, portal_id, request, audience: {
+            "membership_id": membership.id,
+            "group_ids": [],
+            "role": "client",
+            "audience": audience,
+            "portal_user_id": 702,
+        }
+
+        denied = client.post(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/ask",
+            headers={"Authorization": "Bearer client-ask-token"},
+            json={"query": "client", "audience": "client"},
+        )
+        assert denied.status_code == 200
+        assert "file_ids_filter" not in captured
+    finally:
+        bitrix_router.answer_from_kb = original_answer_from_kb
+        bitrix_router._portal_acl_subject_ctx = original_acl_ctx
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_file_browsing_surfaces_respect_acl(test_db_session):
+    account, portal_a, portal_b = _seed_account_with_two_portals(test_db_session)
+    collection = KBCollection(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        name="Restricted set",
+        created_at=datetime.utcnow(),
+    )
+    test_db_session.add(collection)
+    test_db_session.flush()
+    file_rec = KBFile(
+        account_id=account.id,
+        portal_id=portal_a.id,
+        filename="topic-policy.txt",
+        audience="staff",
+        mime_type="text/plain",
+        size_bytes=10,
+        storage_path=__file__,
+        status="ready",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    test_db_session.add(file_rec)
+    test_db_session.flush()
+    test_db_session.add(KBCollectionFile(collection_id=collection.id, file_id=file_rec.id, created_at=datetime.utcnow()))
+    test_db_session.add(
+        KBChunk(
+            account_id=account.id,
+            portal_id=portal_a.id,
+            file_id=file_rec.id,
+            audience="staff",
+            chunk_index=0,
+            text="billing contract pricing access",
+        )
+    )
+    test_db_session.add(
+        KBFileAccess(file_id=file_rec.id, principal_type="membership", principal_id="99", access_level="read")
+    )
+    test_db_session.commit()
+
+    original_acl_ctx = bitrix_router._portal_acl_subject_ctx
+    original_require_admin = bitrix_router._require_portal_admin
+    bitrix_router._portal_acl_subject_ctx = lambda db, portal_id, request, audience: {
+        "membership_id": 42,
+        "role": "member",
+        "audience": audience,
+    }
+    bitrix_router._require_portal_admin = lambda db, portal_id, request: None
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    try:
+        files_denied = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/files",
+            headers={"Authorization": "Bearer tok"},
+        )
+        collection_denied = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/collections/{collection.id}/files",
+            headers={"Authorization": "Bearer tok"},
+        )
+        topics_denied = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/topics",
+            headers={"Authorization": "Bearer tok"},
+        )
+        download_denied = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/files/{file_rec.id}/download",
+            headers={"Authorization": "Bearer tok"},
+        )
+
+        assert files_denied.status_code == 200
+        assert files_denied.json()["items"] == []
+        assert collection_denied.status_code == 200
+        assert collection_denied.json()["file_ids"] == []
+        assert download_denied.status_code == 404
+        denied_topic_ids = {item["id"] for item in topics_denied.json()["topics"] if item["count"] > 0}
+        assert denied_topic_ids == set()
+
+        test_db_session.add(
+            KBFileAccess(file_id=file_rec.id, principal_type="membership", principal_id="42", access_level="read")
+        )
+        test_db_session.commit()
+
+        files_allowed = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/files",
+            headers={"Authorization": "Bearer tok"},
+        )
+        collection_allowed = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/collections/{collection.id}/files",
+            headers={"Authorization": "Bearer tok"},
+        )
+        download_allowed = client.get(
+            f"/v1/bitrix/portals/{portal_b.id}/kb/files/{file_rec.id}/download",
+            headers={"Authorization": "Bearer tok"},
+        )
+
+        assert files_allowed.status_code == 200
+        assert [item["id"] for item in files_allowed.json()["items"]] == [file_rec.id]
+        assert collection_allowed.status_code == 200
+        assert collection_allowed.json()["file_ids"] == [file_rec.id]
+        assert download_allowed.status_code == 200
+    finally:
+        bitrix_router._portal_acl_subject_ctx = original_acl_ctx
+        bitrix_router._require_portal_admin = original_require_admin
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
 
 
 @pytest.mark.timeout(10)

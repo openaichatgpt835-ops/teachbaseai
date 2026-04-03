@@ -8,7 +8,7 @@ import bcrypt
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from apps.backend.deps import get_db
@@ -18,6 +18,8 @@ from apps.backend.models.account import (
     AccountIntegration,
     AccountMembership,
     AccountPermission,
+    AccountUserGroup,
+    AccountUserGroupMember,
     AppSession,
     AppUser,
     AppUserIdentity,
@@ -26,6 +28,7 @@ from apps.backend.models.account import (
 from apps.backend.models.web_user import WebSession, WebUser
 from apps.backend.models.portal import Portal, PortalUsersAccess
 from apps.backend.services.web_email import build_invite_accept_url, send_account_invite_email
+from apps.backend.services.telegram_settings import normalize_telegram_username
 from apps.backend.services.billing import (
     get_account_effective_policy,
     get_account_subscription_payload,
@@ -59,6 +62,12 @@ _ROLE_DEFAULTS: dict[str, dict[str, object]] = {
     },
     "member": {
         "kb_access": "read",
+        "can_invite_users": False,
+        "can_manage_settings": False,
+        "can_view_finance": False,
+    },
+    "client": {
+        "kb_access": "none",
         "can_invite_users": False,
         "can_manage_settings": False,
         "can_view_finance": False,
@@ -112,7 +121,7 @@ def _get_current_web_session(
 
 class InviteEmailBody(BaseModel):
     email: EmailStr
-    role: str = "member"  # owner|admin|member
+    role: str = "member"  # owner|admin|member|client
     kb_access: str | None = None  # none|read|write
     can_invite_users: bool | None = None
     can_manage_settings: bool | None = None
@@ -151,6 +160,10 @@ class UpdateMembershipPermissionsBody(BaseModel):
     can_view_finance: bool | None = None
 
 
+class UpdateTelegramIdentityBody(BaseModel):
+    telegram_username: str | None = None
+
+
 class AcceptInviteBody(BaseModel):
     login: str
     password: str
@@ -158,9 +171,15 @@ class AcceptInviteBody(BaseModel):
     email: EmailStr | None = None
 
 
+class AccountUserGroupBody(BaseModel):
+    name: str
+    kind: str = "staff"
+    membership_ids: list[int] = []
+
+
 def _normalize_role(role: str | None, *, allow_owner: bool = False) -> str:
     value = (role or "member").strip().lower()
-    allowed = {"admin", "member"} | ({"owner"} if allow_owner else set())
+    allowed = {"admin", "member", "client"} | ({"owner"} if allow_owner else set())
     if value not in allowed:
         raise HTTPException(status_code=400, detail="invalid_role")
     return value
@@ -182,6 +201,13 @@ def _normalize_membership_status(v: str | None) -> str | None:
     if vv not in {"active", "invited", "blocked", "deleted"}:
         raise HTTPException(status_code=400, detail="invalid_membership_status")
     return vv
+
+
+def _normalize_group_kind(v: str | None) -> str:
+    value = str(v or "staff").strip().lower()
+    if value not in {"staff", "client"}:
+        raise HTTPException(status_code=400, detail="invalid_group_kind")
+    return value
 
 
 def _build_permissions(role: str, body: object) -> dict[str, object]:
@@ -366,6 +392,8 @@ def _build_account_users_items(db: Session, account_id: int) -> list[dict]:
             scoped = integration_ids_by_provider.get(provider, set())
             if x.integration_id is not None:
                 return int(x.integration_id) in scoped
+            if provider == "telegram":
+                return True
             if provider == "bitrix":
                 return str(x.external_id or "").strip() in portal_bitrix_external_ids
             return False
@@ -413,6 +441,83 @@ def _build_account_users_items(db: Session, account_id: int) -> list[dict]:
             }
         )
     return items
+
+
+def _build_account_user_groups_items(db: Session, account_id: int) -> list[dict]:
+    groups = db.execute(
+        select(AccountUserGroup)
+        .where(AccountUserGroup.account_id == int(account_id))
+        .order_by(AccountUserGroup.name.asc(), AccountUserGroup.id.asc())
+    ).scalars().all()
+    if not groups:
+        return []
+    group_ids = [int(g.id) for g in groups]
+    member_rows = db.execute(
+        select(AccountUserGroupMember.group_id, AccountUserGroupMember.membership_id)
+        .where(AccountUserGroupMember.group_id.in_(group_ids))
+    ).all()
+    membership_ids = sorted({int(row[1]) for row in member_rows if row[1] is not None})
+    memberships = []
+    if membership_ids:
+        memberships = db.execute(
+            select(AccountMembership).where(
+                AccountMembership.account_id == int(account_id),
+                AccountMembership.id.in_(membership_ids),
+            )
+        ).scalars().all()
+    membership_map = {int(m.id): m for m in memberships}
+    members_by_group: dict[int, list[dict[str, object]]] = {int(g.id): [] for g in groups}
+    for group_id, membership_id in member_rows:
+        membership = membership_map.get(int(membership_id))
+        if not membership:
+            continue
+        members_by_group.setdefault(int(group_id), []).append(
+            {
+                "membership_id": int(membership.id),
+                "user_id": int(membership.user_id),
+                "role": str(membership.role or "member"),
+                "status": str(membership.status or "active"),
+            }
+        )
+    items: list[dict] = []
+    for group in groups:
+        members = sorted(members_by_group.get(int(group.id), []), key=lambda item: int(item["membership_id"]))
+        items.append(
+            {
+                "id": int(group.id),
+                "name": str(group.name or ""),
+                "kind": str(group.kind or "staff"),
+                "membership_ids": [int(item["membership_id"]) for item in members],
+                "members": members,
+            }
+        )
+    return items
+
+
+def _validate_group_memberships_for_kind(
+    db: Session,
+    *,
+    account_id: int,
+    membership_ids: list[int],
+    kind: str,
+) -> None:
+    if not membership_ids:
+        return
+    rows = db.execute(
+        select(AccountMembership.id, AccountMembership.role).where(
+            AccountMembership.account_id == int(account_id),
+            AccountMembership.id.in_(membership_ids),
+            AccountMembership.status.in_(["active", "invited"]),
+        )
+    ).all()
+    if len({int(row[0]) for row in rows}) != len(membership_ids):
+        raise HTTPException(status_code=400, detail="invalid_membership_ids")
+    if kind == "client":
+        invalid = [int(row[0]) for row in rows if str(row[1] or "").lower() != "client"]
+    else:
+        invalid = [int(row[0]) for row in rows if str(row[1] or "").lower() == "client"]
+    if invalid:
+        raise HTTPException(status_code=400, detail="group_members_kind_mismatch")
 
 
 def _ensure_legacy_web_user(
@@ -490,7 +595,7 @@ def web_v2_permissions_schema(
 ):
     require_membership_ctx(db, account_id, user)
     return {
-        "role": ["owner", "admin", "member"],
+        "role": ["owner", "admin", "member", "client"],
         "kb_access": ["none", "read", "write"],
         "flags": ["can_invite_users", "can_manage_settings", "can_view_finance"],
     }
@@ -549,6 +654,12 @@ def web_v2_access_center(
 ):
     require_membership_ctx(db, account_id, user)
     items = _build_account_users_items(db, account_id)
+    user_groups = _build_account_user_groups_items(db, account_id)
+    groups_by_membership: dict[int, list[dict[str, object]]] = {}
+    for group in user_groups:
+        ref = {"id": int(group["id"]), "name": str(group["name"]), "kind": str(group.get("kind") or "staff")}
+        for membership_id in group.get("membership_ids", []):
+            groups_by_membership.setdefault(int(membership_id), []).append(ref)
     portal_id = _resolve_account_portal_id(db, account_id)
     access_rows = []
     if portal_id:
@@ -569,6 +680,10 @@ def web_v2_access_center(
             "bitrix_user_ids": bitrix_ids,
             "telegram_username": next((r.telegram_username for r in matched_rows if r.telegram_username), None),
         }
+        item["groups"] = sorted(
+            groups_by_membership.get(int(item["membership_id"]), []),
+            key=lambda group: (str(group["name"]).lower(), int(group["id"])),
+        )
 
     extras = [
         {
@@ -580,7 +695,134 @@ def web_v2_access_center(
         }
         for r in legacy_web
     ]
-    return {"portal_id": portal_id, "items": items, "legacy_web_users": extras}
+    return {
+        "portal_id": portal_id,
+        "items": items,
+        "groups": user_groups,
+        "legacy_web_users": extras,
+    }
+
+
+@router.get("/accounts/{account_id}/user-groups")
+def web_v2_list_user_groups(
+    account_id: int,
+    user: WebUser = Depends(_get_current_web_user),
+    db: Session = Depends(get_db),
+):
+    require_membership_ctx(db, account_id, user)
+    return {"account_id": account_id, "items": _build_account_user_groups_items(db, account_id)}
+
+
+@router.post("/accounts/{account_id}/user-groups")
+def web_v2_create_user_group(
+    account_id: int,
+    body: AccountUserGroupBody,
+    user: WebUser = Depends(_get_current_web_user),
+    db: Session = Depends(get_db),
+):
+    ctx = require_membership_ctx(db, account_id, user)
+    require_settings_permission(ctx)
+    name = str(body.name or "").strip()
+    kind = _normalize_group_kind(body.kind)
+    if not name:
+        raise HTTPException(status_code=400, detail="invalid_group_name")
+    existing = db.execute(
+        select(AccountUserGroup.id).where(
+            AccountUserGroup.account_id == int(account_id),
+            AccountUserGroup.name == name,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=400, detail="group_name_taken")
+    membership_ids = sorted({int(x) for x in body.membership_ids if int(x) > 0})
+    _validate_group_memberships_for_kind(
+        db,
+        account_id=int(account_id),
+        membership_ids=membership_ids,
+        kind=kind,
+    )
+    group = AccountUserGroup(account_id=int(account_id), name=name, kind=kind)
+    db.add(group)
+    db.flush()
+    for membership_id in membership_ids:
+        db.add(AccountUserGroupMember(group_id=int(group.id), membership_id=int(membership_id)))
+    db.commit()
+    items = _build_account_user_groups_items(db, account_id)
+    payload = next((item for item in items if int(item["id"]) == int(group.id)), None)
+    return {"status": "ok", "group": payload}
+
+
+@router.patch("/accounts/{account_id}/user-groups/{group_id}")
+def web_v2_update_user_group(
+    account_id: int,
+    group_id: int,
+    body: AccountUserGroupBody,
+    user: WebUser = Depends(_get_current_web_user),
+    db: Session = Depends(get_db),
+):
+    ctx = require_membership_ctx(db, account_id, user)
+    require_settings_permission(ctx)
+    group = db.execute(
+        select(AccountUserGroup).where(
+            AccountUserGroup.id == int(group_id),
+            AccountUserGroup.account_id == int(account_id),
+        )
+    ).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="group_not_found")
+    name = str(body.name or "").strip()
+    kind = _normalize_group_kind(body.kind)
+    if not name:
+        raise HTTPException(status_code=400, detail="invalid_group_name")
+    existing = db.execute(
+        select(AccountUserGroup.id).where(
+            AccountUserGroup.account_id == int(account_id),
+            AccountUserGroup.name == name,
+            AccountUserGroup.id != int(group.id),
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=400, detail="group_name_taken")
+    membership_ids = sorted({int(x) for x in body.membership_ids if int(x) > 0})
+    _validate_group_memberships_for_kind(
+        db,
+        account_id=int(account_id),
+        membership_ids=membership_ids,
+        kind=kind,
+    )
+    group.name = name
+    group.kind = kind
+    group.updated_at = datetime.utcnow()
+    db.add(group)
+    db.execute(delete(AccountUserGroupMember).where(AccountUserGroupMember.group_id == int(group.id)))
+    for membership_id in membership_ids:
+        db.add(AccountUserGroupMember(group_id=int(group.id), membership_id=int(membership_id)))
+    db.commit()
+    items = _build_account_user_groups_items(db, account_id)
+    payload = next((item for item in items if int(item["id"]) == int(group.id)), None)
+    return {"status": "ok", "group": payload}
+
+
+@router.delete("/accounts/{account_id}/user-groups/{group_id}")
+def web_v2_delete_user_group(
+    account_id: int,
+    group_id: int,
+    user: WebUser = Depends(_get_current_web_user),
+    db: Session = Depends(get_db),
+):
+    ctx = require_membership_ctx(db, account_id, user)
+    require_settings_permission(ctx)
+    group = db.execute(
+        select(AccountUserGroup).where(
+            AccountUserGroup.id == int(group_id),
+            AccountUserGroup.account_id == int(account_id),
+        )
+    ).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="group_not_found")
+    db.delete(group)
+    db.commit()
+    return {"status": "ok", "group_id": int(group_id)}
 
 
 @router.get("/accounts/{account_id}/integrations/bitrix")
@@ -855,6 +1097,66 @@ def web_v2_update_membership_permissions(
     return {"status": "ok"}
 
 
+@router.patch("/accounts/{account_id}/memberships/{membership_id}/telegram")
+def web_v2_update_membership_telegram_identity(
+    account_id: int,
+    membership_id: int,
+    body: UpdateTelegramIdentityBody,
+    user: WebUser = Depends(_get_current_web_user),
+    db: Session = Depends(get_db),
+):
+    ctx = require_membership_ctx(db, account_id, user)
+    require_invite_permission(ctx)
+
+    membership = db.execute(
+        select(AccountMembership).where(
+            AccountMembership.id == membership_id,
+            AccountMembership.account_id == account_id,
+        )
+    ).scalar_one_or_none()
+    if not membership:
+        raise HTTPException(status_code=404, detail="membership_not_found")
+
+    uname = normalize_telegram_username(body.telegram_username)
+    existing = db.execute(
+        select(AppUserIdentity).where(
+            AppUserIdentity.user_id == membership.user_id,
+            AppUserIdentity.provider == "telegram",
+            AppUserIdentity.integration_id.is_(None),
+        )
+    ).scalar_one_or_none()
+
+    if uname:
+        duplicate = db.execute(
+            select(AppUserIdentity).where(
+                AppUserIdentity.provider == "telegram",
+                AppUserIdentity.integration_id.is_(None),
+                AppUserIdentity.external_id == uname,
+                AppUserIdentity.user_id != membership.user_id,
+            )
+        ).scalar_one_or_none()
+        if duplicate:
+            raise HTTPException(status_code=400, detail="duplicate_telegram_username")
+        if not existing:
+            existing = AppUserIdentity(
+                user_id=membership.user_id,
+                provider="telegram",
+                integration_id=None,
+                external_id=uname,
+                display_value=f"@{uname}",
+                created_at=datetime.utcnow(),
+            )
+        else:
+            existing.external_id = uname
+            existing.display_value = f"@{uname}"
+        db.add(existing)
+    elif existing:
+        db.delete(existing)
+
+    db.commit()
+    return {"status": "ok", "telegram_username": uname}
+
+
 @router.delete("/accounts/{account_id}/users/{user_id}")
 def web_v2_delete_user(
     account_id: int,
@@ -917,10 +1219,7 @@ def web_v2_invite_by_email(
     ctx = require_membership_ctx(db, account_id, user)
     require_invite_permission(ctx)
 
-    role = (body.role or "member").strip().lower()
-    if role not in ("admin", "member"):
-        # owner cannot be invited via endpoint
-        raise HTTPException(status_code=400, detail="invalid_role")
+    role = _normalize_role(body.role, allow_owner=False)
     expires_days = max(1, min(int(body.expires_days or 7), 30))
     invite = AccountInvite(
         account_id=account_id,

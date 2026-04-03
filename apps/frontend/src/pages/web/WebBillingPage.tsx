@@ -95,6 +95,7 @@ function UsageCard({
   const usedNum = Number(used || 0);
   const limitNum = Number(limit || 0);
   const pct = percentOf(usedNum, limitNum);
+
   return (
     <div className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm">
       <div className="text-sm text-slate-500">{title}</div>
@@ -124,6 +125,7 @@ export function WebBillingPage() {
   useEffect(() => {
     if (!accountId) return;
     let cancelled = false;
+
     const load = async () => {
       setLoading(true);
       setError("");
@@ -135,10 +137,12 @@ export function WebBillingPage() {
         const plansData = await plansRes.json().catch(() => null);
         const overviewData = await overviewRes.json().catch(() => null);
         if (cancelled) return;
+
         if (!plansRes.ok || !overviewRes.ok) {
           setError((overviewData && (overviewData.error || overviewData.detail)) || "Не удалось загрузить тарифы.");
           return;
         }
+
         setPlans(Array.isArray(plansData?.items) ? plansData.items : []);
         setOverview(overviewData as BillingOverview);
       } catch {
@@ -147,6 +151,7 @@ export function WebBillingPage() {
         if (!cancelled) setLoading(false);
       }
     };
+
     void load();
     return () => {
       cancelled = true;
@@ -209,7 +214,12 @@ export function WebBillingPage() {
                 {Object.entries(FEATURE_LABELS).map(([key, label]) => {
                   const enabled = !!overview.effective_policy.features?.[key];
                   return (
-                    <div key={key} className={`rounded-xl border px-4 py-3 text-sm ${enabled ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-slate-50 text-slate-500"}`}>
+                    <div
+                      key={key}
+                      className={`rounded-xl border px-4 py-3 text-sm ${
+                        enabled ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-slate-50 text-slate-500"
+                      }`}
+                    >
                       <div className="font-medium">{label}</div>
                       <div className="mt-1 text-xs">{enabled ? "Доступно" : "Недоступно на текущем тарифе"}</div>
                     </div>
@@ -231,7 +241,8 @@ export function WebBillingPage() {
                 ))}
               </div>
               <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
-                За текущий период: {overview.usage.tokens_total.toLocaleString("ru-RU")} токенов, {Number(overview.usage.cost_rub || 0).toLocaleString("ru-RU")} ₽ расходов.
+                За текущий период: {overview.usage.tokens_total.toLocaleString("ru-RU")} токенов,{" "}
+                {Number(overview.usage.cost_rub || 0).toLocaleString("ru-RU")} ₽ расходов.
               </div>
             </div>
           </section>

@@ -25,7 +25,6 @@ import { WebLayout } from "./pages/web/WebLayout";
 import { WebOverviewPage } from "./pages/web/WebOverviewPage";
 import { WebStubPage } from "./pages/web/WebStubPage";
 import { WebKbPage } from "./pages/web/WebKbPage";
-import { WebSourcesPage } from "./pages/web/WebSourcesPage";
 import { WebUsersPage } from "./pages/web/WebUsersPage";
 import { WebSettingsPage } from "./pages/web/WebSettingsPage";
 import { WebBillingPage } from "./pages/web/WebBillingPage";
@@ -37,6 +36,7 @@ import { WebResetPasswordPage } from "./pages/web/WebResetPasswordPage";
 import { WebAiRopPage } from "./pages/web/WebAiRopPage";
 import { WebAiRopAccessPage } from "./pages/web/WebAiRopAccessPage";
 import { WebChatPage } from "./pages/web/WebChatPage";
+import { WebKbPageV2 } from "./pages/web/WebKbPageV2";
 import { EmbeddedBitrixGate } from "./pages/embedded/EmbeddedBitrixGate";
 import { EmbeddedBitrixLayout } from "./pages/embedded/EmbeddedBitrixLayout";
 import { EmbeddedBitrixUsersPage } from "./pages/embedded/EmbeddedBitrixUsersPage";
@@ -56,8 +56,9 @@ export default function App() {
         <Route index element={<Navigate to="/app/overview" replace />} />
         <Route path="overview" element={<WebOverviewPage />} />
         <Route path="chat" element={<WebChatPage />} />
-        <Route path="kb" element={<WebKbPage />} />
-        <Route path="sources" element={<WebSourcesPage />} />
+        <Route path="kb" element={<WebKbPageV2 />} />
+        <Route path="kb-v2" element={<WebKbPageV2 />} />
+        <Route path="sources" element={<Navigate to="/app/kb" replace />} />
         <Route path="users" element={<WebUsersPage />} />
         <Route path="analytics" element={<WebStubPage title="Аналитика" />} />
         <Route path="settings" element={<WebSettingsPage />} />
@@ -74,7 +75,7 @@ export default function App() {
           <Route path="overview" element={<WebOverviewPage />} />
           <Route path="chat" element={<WebChatPage />} />
           <Route path="kb" element={<WebKbPage />} />
-          <Route path="sources" element={<WebSourcesPage />} />
+          <Route path="sources" element={<Navigate to="/embedded/bitrix/kb" replace />} />
           <Route path="users" element={<EmbeddedBitrixUsersPage />} />
           <Route path="settings" element={<WebSettingsPage />} />
           <Route path="billing" element={<WebBillingPage />} />

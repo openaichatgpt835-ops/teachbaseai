@@ -65,7 +65,7 @@ def query_top_chunks_by_pgvector(
         return []
     ids = [int(x) for x in (file_ids or []) if int(x) > 0]
     extra_file_filter = " AND f.id = ANY(:file_ids) " if ids else ""
-    portal_filter = "" if ids else " AND c.portal_id = :portal_id "
+    portal_filter = "" if ids else " AND f.portal_id = :portal_id "
     sql = text(
         """
         SELECT

@@ -31,7 +31,7 @@ const LABELS = {
   logout: "\u0412\u044b\u0439\u0442\u0438",
 } as const;
 
-const primaryModules = coreModulesByGroup("web", "primary");
+const primaryModules = coreModulesByGroup("web", "primary").filter((item) => item.id !== "sources");
 const settingsModules = coreModulesByGroup("web", "settings");
 
 const userFacingPathMatch = (pathname: string, modulePath?: string) => {

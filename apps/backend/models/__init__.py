@@ -27,6 +27,9 @@ from apps.backend.models.kb import (
     KBCollection,
     KBCollectionFile,
     KBSmartFolder,
+    KBFolder,
+    KBFolderAccess,
+    KBFileAccess,
 )
 from apps.backend.models.portal_kb_setting import PortalKBSetting
 from apps.backend.models.account_kb_setting import AccountKBSetting
@@ -35,13 +38,14 @@ from apps.backend.models.portal_bot_flow import PortalBotFlow
 from apps.backend.models.topic_summary import PortalTopicSummary, AccountTopicSummary
 from apps.backend.models.web_user import WebUser, WebSession
 from apps.backend.models.activity_event import ActivityEvent
-from apps.backend.models.portal_link_request import PortalLinkRequest
 from apps.backend.models.account import (
     Account,
     AppUser,
     AppUserWebCredential,
     AppSession,
     AccountMembership,
+    AccountUserGroup,
+    AccountUserGroupMember,
     AccountPermission,
     AccountIntegration,
     AppUserIdentity,
@@ -82,17 +86,21 @@ __all__ = [
     "KBCollection",
     "KBCollectionFile",
     "KBSmartFolder",
+    "KBFolder",
+    "KBFolderAccess",
+    "KBFileAccess",
     "PortalTopicSummary",
     "AccountTopicSummary",
     "WebUser",
     "WebSession",
     "ActivityEvent",
-    "PortalLinkRequest",
     "Account",
     "AppUser",
     "AppUserWebCredential",
     "AppSession",
     "AccountMembership",
+    "AccountUserGroup",
+    "AccountUserGroupMember",
     "AccountPermission",
     "AccountIntegration",
     "AppUserIdentity",

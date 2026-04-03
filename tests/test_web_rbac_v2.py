@@ -18,6 +18,8 @@ from apps.backend.models.account import (
     AccountInvite,
     AccountMembership,
     AccountPermission,
+    AccountUserGroup,
+    AccountUserGroupMember,
     AppSession,
     AppUser,
     AppUserIdentity,
@@ -168,6 +170,24 @@ def test_web_rbac_me_and_list_users(test_db_session, override_get_db):
 
 
 @pytest.mark.timeout(10)
+def test_web_rbac_permissions_schema_includes_client_role(test_db_session, override_get_db):
+    seeded = _seed_owner(test_db_session)
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        response = client.get(
+            f"/v2/web/accounts/{seeded['account_id']}/permissions/schema",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert "client" in payload["role"]
+
+
+@pytest.mark.timeout(10)
 def test_web_rbac_access_center_merges_bitrix_allowlist_status(test_db_session, override_get_db):
     seeded = _seed_owner(test_db_session)
     account_id = seeded["account_id"]
@@ -295,13 +315,190 @@ def test_web_rbac_access_center_filters_identities_to_current_account(test_db_se
             f"/v2/web/accounts/{account_id}/access-center",
             headers={"Authorization": f"Bearer {seeded['token']}"},
         )
+        assert response.status_code == 200
+        item = response.json()["items"][0]
+        assert [x["external_id"] for x in item["bitrix"]] == ["42"]
+        assert item["access_center"]["telegram_username"] == "owner_tg"
     finally:
         app.dependency_overrides.pop(get_db, None)
 
-    assert response.status_code == 200, response.text
-    item = response.json()["items"][0]
-    assert [entry["external_id"] for entry in item["bitrix"]] == ["42"]
-    assert item["access_center"]["bitrix_user_ids"] == ["42"]
+
+def test_web_rbac_membership_telegram_identity_patch(test_db_session, override_get_db):
+    seeded = _seed_owner(test_db_session)
+    account_id = seeded["account_id"]
+    token = seeded["token"]
+
+    user = AppUser(display_name="Client Tg", status="active")
+    test_db_session.add(user)
+    test_db_session.flush()
+    membership = AccountMembership(account_id=account_id, user_id=user.id, role="client", status="active")
+    test_db_session.add(membership)
+    test_db_session.flush()
+    test_db_session.add(
+        AccountPermission(
+            membership_id=membership.id,
+            kb_access="none",
+            can_invite_users=False,
+            can_manage_settings=False,
+            can_view_finance=False,
+        )
+    )
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        save_resp = client.patch(
+            f"/v2/web/accounts/{account_id}/memberships/{membership.id}/telegram",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"telegram_username": "@client_acme"},
+        )
+        assert save_resp.status_code == 200, save_resp.text
+
+        access_resp = client.get(
+            f"/v2/web/accounts/{account_id}/access-center",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert access_resp.status_code == 200
+        items = access_resp.json()["items"]
+        item = next(x for x in items if int(x["membership_id"]) == int(membership.id))
+        assert item["telegram"][0]["external_id"] == "client_acme"
+
+        clear_resp = client.patch(
+            f"/v2/web/accounts/{account_id}/memberships/{membership.id}/telegram",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"telegram_username": ""},
+        )
+        assert clear_resp.status_code == 200
+
+        access_resp = client.get(
+            f"/v2/web/accounts/{account_id}/access-center",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        item = next(x for x in access_resp.json()["items"] if int(x["membership_id"]) == int(membership.id))
+        assert item["telegram"] == []
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.mark.timeout(10)
+def test_web_rbac_user_groups_crud(test_db_session, override_get_db):
+    seeded = _seed_owner(test_db_session)
+    account_id = seeded["account_id"]
+
+    member_user = AppUser(display_name="Member", status="active")
+    test_db_session.add(member_user)
+    test_db_session.flush()
+    member_membership = AccountMembership(
+        account_id=account_id,
+        user_id=member_user.id,
+        role="member",
+        status="active",
+        invited_by_user_id=seeded["owner_app_user_id"],
+    )
+    test_db_session.add(member_membership)
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        create_resp = client.post(
+            f"/v2/web/accounts/{account_id}/user-groups",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+            json={"name": "Sales", "kind": "staff", "membership_ids": [member_membership.id]},
+        )
+        assert create_resp.status_code == 200, create_resp.text
+        group = create_resp.json()["group"]
+        assert group["name"] == "Sales"
+        assert group["kind"] == "staff"
+        assert group["membership_ids"] == [member_membership.id]
+        group_id = int(group["id"])
+
+        list_resp = client.get(
+            f"/v2/web/accounts/{account_id}/user-groups",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+        )
+        assert list_resp.status_code == 200, list_resp.text
+        items = list_resp.json()["items"]
+        assert len(items) == 1
+        assert items[0]["id"] == group_id
+
+        access_resp = client.get(
+            f"/v2/web/accounts/{account_id}/access-center",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+        )
+        assert access_resp.status_code == 200, access_resp.text
+        payload = access_resp.json()
+        assert len(payload["groups"]) == 1
+        member_item = next(item for item in payload["items"] if item["membership_id"] == member_membership.id)
+        assert member_item["groups"] == [{"id": group_id, "name": "Sales", "kind": "staff"}]
+
+        update_resp = client.patch(
+            f"/v2/web/accounts/{account_id}/user-groups/{group_id}",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+            json={"name": "Shared", "kind": "staff", "membership_ids": []},
+        )
+        assert update_resp.status_code == 200, update_resp.text
+        updated = update_resp.json()["group"]
+        assert updated["name"] == "Shared"
+        assert updated["kind"] == "staff"
+        assert updated["membership_ids"] == []
+
+        delete_resp = client.delete(
+            f"/v2/web/accounts/{account_id}/user-groups/{group_id}",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+        )
+        assert delete_resp.status_code == 200, delete_resp.text
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert test_db_session.execute(select(AccountUserGroup)).scalars().all() == []
+    assert test_db_session.execute(select(AccountUserGroupMember)).scalars().all() == []
+
+
+@pytest.mark.timeout(10)
+def test_web_rbac_client_groups_only_accept_client_memberships(test_db_session, override_get_db):
+    seeded = _seed_owner(test_db_session)
+    account_id = seeded["account_id"]
+
+    client_user = AppUser(display_name="Client User", status="active")
+    member_user = AppUser(display_name="Staff User", status="active")
+    test_db_session.add_all([client_user, member_user])
+    test_db_session.flush()
+    client_membership = AccountMembership(
+        account_id=account_id,
+        user_id=client_user.id,
+        role="client",
+        status="active",
+        invited_by_user_id=seeded["owner_app_user_id"],
+    )
+    member_membership = AccountMembership(
+        account_id=account_id,
+        user_id=member_user.id,
+        role="member",
+        status="active",
+        invited_by_user_id=seeded["owner_app_user_id"],
+    )
+    test_db_session.add_all([client_membership, member_membership])
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        ok_resp = client.post(
+            f"/v2/web/accounts/{account_id}/user-groups",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+            json={"name": "Acme Clients", "kind": "client", "membership_ids": [client_membership.id]},
+        )
+        bad_resp = client.post(
+            f"/v2/web/accounts/{account_id}/user-groups",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+            json={"name": "Broken Clients", "kind": "client", "membership_ids": [member_membership.id]},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert ok_resp.status_code == 200, ok_resp.text
+    assert ok_resp.json()["group"]["kind"] == "client"
+    assert bad_resp.status_code == 400
+    assert bad_resp.json()["detail"] == "group_members_kind_mismatch"
 
 
 @pytest.mark.timeout(10)
@@ -538,6 +735,42 @@ def test_web_rbac_manual_user_create_update_delete(test_db_session, override_get
 
 
 @pytest.mark.timeout(10)
+def test_web_rbac_manual_user_can_be_created_as_client(test_db_session, override_get_db):
+    seeded = _seed_owner(test_db_session)
+    account_id = seeded["account_id"]
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        response = client.post(
+            f"/v2/web/accounts/{account_id}/users/manual",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+            json={
+                "display_name": "Client User",
+                "login": "client-user",
+                "email": "client@example.com",
+                "password": "client-secret",
+                "role": "client",
+            },
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    membership = test_db_session.execute(
+        select(AccountMembership).where(AccountMembership.id == int(payload["membership_id"]))
+    ).scalar_one()
+    perm = test_db_session.execute(
+        select(AccountPermission).where(AccountPermission.membership_id == int(membership.id))
+    ).scalar_one()
+    assert membership.role == "client"
+    assert perm.kb_access == "none"
+    assert perm.can_invite_users is False
+    assert perm.can_manage_settings is False
+    assert perm.can_view_finance is False
+
+
+@pytest.mark.timeout(10)
 def test_web_rbac_manual_user_respects_max_users_limit(test_db_session, override_get_db):
     seeded = _seed_owner(test_db_session)
     account_id = seeded["account_id"]
@@ -679,3 +912,50 @@ def test_web_rbac_invite_accept_and_revoke(test_db_session, override_get_db):
     assert web_user is not None
     assert int(web_user.portal_id or 0) > 0
     assert web_user.email_verified_at is not None
+
+
+@pytest.mark.timeout(10)
+def test_web_rbac_client_invite_accepts_with_client_defaults(test_db_session, override_get_db):
+    seeded = _seed_owner(test_db_session)
+    account_id = seeded["account_id"]
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        invite_response = client.post(
+            f"/v2/web/accounts/{account_id}/invites/email",
+            headers={"Authorization": f"Bearer {seeded['token']}"},
+            json={
+                "email": "client-invite@example.com",
+                "role": "client",
+                "expires_days": 7,
+            },
+        )
+        assert invite_response.status_code == 200, invite_response.text
+        invite_payload = invite_response.json()
+        token = parse_qs(urlparse(str(invite_payload["accept_url"])).query).get("token", [""])[0]
+        assert token
+
+        accept_response = client.post(
+            f"/v2/web/invites/{token}/accept",
+            json={
+                "login": "client-invite",
+                "password": "client-secret",
+                "display_name": "Client Invite",
+            },
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert accept_response.status_code == 200, accept_response.text
+    payload = accept_response.json()
+    membership = test_db_session.execute(
+        select(AccountMembership).where(AccountMembership.id == int(payload["membership_id"]))
+    ).scalar_one()
+    perm = test_db_session.execute(
+        select(AccountPermission).where(AccountPermission.membership_id == int(membership.id))
+    ).scalar_one()
+    assert membership.role == "client"
+    assert perm.kb_access == "none"
+    assert perm.can_invite_users is False
+    assert perm.can_manage_settings is False
+    assert perm.can_view_finance is False

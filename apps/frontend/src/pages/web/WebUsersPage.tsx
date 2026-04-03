@@ -3,6 +3,13 @@ import { PageIntro } from "../../components/PageIntro";
 import { fetchPortal, fetchWeb, getActiveAccountId, getWebPortalInfo } from "./auth";
 
 type WebUserItem = { id: string; name: string; telegram_username?: string | null };
+type AccountGroupItem = {
+  id: number;
+  name: string;
+  kind: "staff" | "client";
+  membership_ids: number[];
+  members?: { membership_id: number; user_id: number; role: string; status: string }[];
+};
 type LinkedIdentity = {
   id: number;
   external_id?: string | null;
@@ -13,7 +20,7 @@ type V2UserItem = {
   membership_id: number;
   user_id: number;
   display_name?: string | null;
-  role: "owner" | "admin" | "member";
+  role: "owner" | "admin" | "member" | "client";
   status: "active" | "invited" | "blocked" | "deleted";
   permissions: {
     kb_access: "none" | "read" | "write";
@@ -32,12 +39,13 @@ type V2UserItem = {
     bitrix_user_ids?: string[];
     telegram_username?: string | null;
   } | null;
+  groups?: { id: number; name: string; kind?: "staff" | "client" }[];
 };
 type V2InviteItem = { id: number; email?: string | null; role: string; status: string; expires_at?: string | null; accept_url?: string | null };
 type MeContext = {
   account?: { id?: number | null } | null;
   membership?: {
-    role?: "owner" | "admin" | "member";
+    role?: "owner" | "admin" | "member" | "client";
     kb_access?: "none" | "read" | "write";
     can_invite_users?: boolean;
     can_manage_settings?: boolean;
@@ -75,13 +83,22 @@ export function WebUsersPage() {
   const [v2Msg, setV2Msg] = useState("");
   const [invites, setInvites] = useState<V2InviteItem[]>([]);
   const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState<"admin" | "member">("member");
+  const [inviteRole, setInviteRole] = useState<"admin" | "member" | "client">("member");
   const [inviteMsg, setInviteMsg] = useState("");
 
   const [manualName, setManualName] = useState("");
   const [manualLogin, setManualLogin] = useState("");
   const [manualEmail, setManualEmail] = useState("");
   const [manualPass, setManualPass] = useState("");
+  const [manualRole, setManualRole] = useState<"member" | "admin" | "client">("member");
+  const [accountTelegramMap, setAccountTelegramMap] = useState<Record<number, string>>({});
+  const [savingTelegramMembershipId, setSavingTelegramMembershipId] = useState<number>(0);
+  const [accountGroups, setAccountGroups] = useState<AccountGroupItem[]>([]);
+  const [groupName, setGroupName] = useState("");
+  const [groupKind, setGroupKind] = useState<"staff" | "client">("staff");
+  const [groupMembershipIds, setGroupMembershipIds] = useState<number[]>([]);
+  const [groupMsg, setGroupMsg] = useState("");
+  const [editingGroupId, setEditingGroupId] = useState<number>(0);
 
   const patchCache = (patch: Partial<UsersCacheState>) => {
     if (!portalId) return;
@@ -121,6 +138,19 @@ export function WebUsersPage() {
       }
       const nextItems = Array.isArray(data?.items) ? data.items : [];
       setV2Users(nextItems);
+      setAccountGroups(
+        Array.isArray(data?.groups)
+          ? data.groups.map((group: any) => ({
+              id: Number(group?.id || 0),
+              name: String(group?.name || ""),
+              kind: String(group?.kind || "staff") === "client" ? "client" : "staff",
+              membership_ids: Array.isArray(group?.membership_ids)
+                ? group.membership_ids.map((value: any) => Number(value)).filter((value: number) => Number.isFinite(value))
+                : [],
+              members: Array.isArray(group?.members) ? group.members : [],
+            }))
+          : [],
+      );
       const nextSelected = nextItems.flatMap((it: V2UserItem) =>
         it.access_center?.bitrix_allowlist
           ? (it.access_center?.bitrix_user_ids || []).map((value) => Number(value)).filter((value) => Number.isFinite(value))
@@ -137,8 +167,16 @@ export function WebUsersPage() {
           }
         });
       });
+      const nextAccountTelegramMap: Record<number, string> = {};
+      nextItems.forEach((it: V2UserItem) => {
+        const username = Array.isArray(it.telegram) && it.telegram.length > 0
+          ? String(it.telegram[0]?.external_id || it.telegram[0]?.display_value || "").replace(/^@/, "")
+          : "";
+        if (username) nextAccountTelegramMap[it.membership_id] = username;
+      });
       setSelectedUsers(nextSelected);
       setTelegramMap(nextTelegramMap);
+      setAccountTelegramMap(nextAccountTelegramMap);
       if (Array.isArray(data?.legacy_web_users)) {
         const nextWebUsers = data.legacy_web_users.map((it: any) => ({
           id: String(it.user_id ?? it.id),
@@ -353,7 +391,7 @@ export function WebUsersPage() {
         login,
         email: manualEmail.trim() || null,
         password,
-        role: "member",
+        role: manualRole,
       }),
     });
     const data = await res.json().catch(() => null);
@@ -365,15 +403,127 @@ export function WebUsersPage() {
     setManualLogin("");
     setManualEmail("");
     setManualPass("");
+    setManualRole("member");
+    await loadV2Users(accountId);
+  };
+
+  const saveMembershipTelegram = async (membershipId: number) => {
+    if (!accountId) return;
+    if (!canInviteUsers) {
+      setV2Msg("Недостаточно прав для привязки Telegram.");
+      return;
+    }
+    setSavingTelegramMembershipId(membershipId);
+    setV2Msg("");
+    try {
+      const res = await fetchWeb(`/api/v2/web/accounts/${accountId}/memberships/${membershipId}/telegram`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ telegram_username: (accountTelegramMap[membershipId] || "").trim() || null }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        setV2Msg(data?.detail || data?.message || "Ошибка сохранения Telegram.");
+        return;
+      }
+      await loadV2Users(accountId);
+    } finally {
+      setSavingTelegramMembershipId(0);
+    }
+  };
+
+  const resetGroupEditor = () => {
+    setEditingGroupId(0);
+    setGroupName("");
+    setGroupKind("staff");
+    setGroupMembershipIds([]);
+  };
+
+  const toggleGroupMembership = (membershipId: number, checked: boolean) => {
+    setGroupMembershipIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(membershipId);
+      else next.delete(membershipId);
+      return Array.from(next).sort((a, b) => a - b);
+    });
+  };
+
+  const startEditGroup = (group: AccountGroupItem) => {
+    setEditingGroupId(group.id);
+    setGroupName(group.name);
+    setGroupKind(group.kind || "staff");
+    setGroupMembershipIds([...(group.membership_ids || [])].sort((a, b) => a - b));
+    setGroupMsg("");
+  };
+
+  const saveGroup = async () => {
+    if (!accountId || !canManageSettings) {
+      setGroupMsg("Недостаточно прав для управления группами.");
+      return;
+    }
+    const name = groupName.trim();
+    if (!name) {
+      setGroupMsg("Укажите название группы.");
+      return;
+    }
+    setGroupMsg("");
+    const method = editingGroupId ? "PATCH" : "POST";
+    const path = editingGroupId
+      ? `/api/v2/web/accounts/${accountId}/user-groups/${editingGroupId}`
+      : `/api/v2/web/accounts/${accountId}/user-groups`;
+    const res = await fetchWeb(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, kind: groupKind, membership_ids: groupMembershipIds }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      setGroupMsg(data?.detail || data?.message || "Ошибка сохранения группы.");
+      return;
+    }
+    resetGroupEditor();
+    setGroupMsg(editingGroupId ? "Группа обновлена." : "Группа создана.");
+    await loadV2Users(accountId);
+  };
+
+  const deleteGroup = async (groupId: number) => {
+    if (!accountId || !canManageSettings) {
+      setGroupMsg("Недостаточно прав для управления группами.");
+      return;
+    }
+    setGroupMsg("");
+    const res = await fetchWeb(`/api/v2/web/accounts/${accountId}/user-groups/${groupId}`, {
+      method: "DELETE",
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      setGroupMsg(data?.detail || data?.message || "Ошибка удаления группы.");
+      return;
+    }
+    if (editingGroupId === groupId) resetGroupEditor();
+    setGroupMsg("Группа удалена.");
     await loadV2Users(accountId);
   };
 
   const canInviteUsers = !!meCtx?.membership?.can_invite_users;
   const canManageSettings = !!meCtx?.membership?.can_manage_settings;
+  const activeUsers = v2Users.filter((u) => u.status === "active");
+  const clientUsersCount = activeUsers.filter((u) => u.role === "client").length;
+  const staffUsersCount = activeUsers.filter((u) => u.role !== "client").length;
+  const invitedUsersCount = v2Users.filter((u) => u.status === "invited").length;
+  const bitrixLinkedCount = v2Users.filter((u) => !!u.access_center?.bitrix_linked).length;
+  const clientTelegramLinkedCount = activeUsers.filter(
+    (u) => u.role === "client" && !!String(accountTelegramMap[u.membership_id] || "").trim(),
+  ).length;
+  const clientGroups = accountGroups.filter((group) => group.kind === "client");
+  const clientGroupCount = clientGroups.length;
+  const clientGroupedMembershipCount = new Set(clientGroups.flatMap((group) => group.membership_ids || [])).size;
+  const selectableGroupUsers = v2Users.filter((u) => (groupKind === "client" ? u.role === "client" : u.role !== "client"));
 
   const roleLabel = (role: string) => {
     if (role === "owner") return "Владелец";
     if (role === "admin") return "Администратор";
+    if (role === "client") return "Клиент";
     return "Сотрудник";
   };
   const kbAccessLabel = (mode: string) => {
@@ -485,13 +635,228 @@ export function WebUsersPage() {
       </div>
 
       <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900">Группы доступа</h2>
+            <p className="mt-1 text-xs text-slate-500">
+              Группы нужны для настройки доступа к папкам и файлам базы знаний по отделам и командам.
+            </p>
+          </div>
+          {editingGroupId > 0 && (
+            <button
+              className="rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+              onClick={resetGroupEditor}
+            >
+              Отменить редактирование
+            </button>
+          )}
+        </div>
+        {!canManageSettings && (
+          <div className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            Недостаточно прав для управления группами.
+          </div>
+        )}
+
+        <div className="mt-4 grid gap-6 xl:grid-cols-[minmax(0,360px)_1fr]">
+          <div className="space-y-3 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+            <div>
+              <label className="text-xs text-slate-600">Название группы</label>
+              <input
+                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm disabled:opacity-60"
+                placeholder="Например: Отдел продаж"
+                value={groupName}
+                onChange={(e) => setGroupName(e.target.value)}
+                disabled={!canManageSettings}
+              />
+            </div>
+            <div>
+              <label className="text-xs text-slate-600">Тип группы</label>
+              <select
+                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm disabled:opacity-60"
+                value={groupKind}
+                onChange={(e) => {
+                  const nextKind = e.target.value as "staff" | "client";
+                  setGroupKind(nextKind);
+                  setGroupMembershipIds((prev) =>
+                    prev.filter((membershipId) => {
+                      const user = v2Users.find((item) => item.membership_id === membershipId);
+                      return nextKind === "client" ? user?.role === "client" : user?.role !== "client";
+                    }),
+                  );
+                }}
+                disabled={!canManageSettings}
+              >
+                <option value="staff">Отдел / группа сотрудников</option>
+                <option value="client">Группа клиентов</option>
+              </select>
+            </div>
+            <div>
+              <div className="text-xs text-slate-600">Участники группы</div>
+              <div className="mt-2 max-h-64 space-y-2 overflow-auto rounded-xl border border-slate-200 bg-white p-3">
+                {selectableGroupUsers.length === 0 && <div className="text-xs text-slate-500">Нет подходящих участников для этого типа группы.</div>}
+                {selectableGroupUsers.map((u) => (
+                  <label key={u.membership_id} className="flex items-center justify-between gap-3 rounded-lg px-2 py-1 hover:bg-slate-50">
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm text-slate-800">{u.display_name || u.web?.email || "Без имени"}</span>
+                      <span className="text-[11px] text-slate-500">{roleLabel(u.role)}</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={groupMembershipIds.includes(u.membership_id)}
+                      disabled={!canManageSettings}
+                      onChange={(e) => toggleGroupMembership(u.membership_id, e.target.checked)}
+                    />
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50"
+                onClick={saveGroup}
+                disabled={!canManageSettings}
+              >
+                {editingGroupId ? "Сохранить группу" : "Создать группу"}
+              </button>
+              {groupMsg && <div className="text-xs text-slate-500">{groupMsg}</div>}
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {accountGroups.length === 0 && (
+              <div className="rounded-xl border border-slate-100 px-4 py-3 text-sm text-slate-500">
+                Групп пока нет.
+              </div>
+            )}
+            {accountGroups.map((group) => (
+              <div key={group.id} className="rounded-2xl border border-slate-100 bg-white p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">{group.name}</div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      {group.kind === "client" ? "Группа клиентов" : "Группа сотрудников"} · Участников: {group.membership_ids.length}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                      onClick={() => startEditGroup(group)}
+                      disabled={!canManageSettings}
+                    >
+                      Изменить
+                    </button>
+                    <button
+                      className="rounded-lg border border-rose-200 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+                      onClick={() => deleteGroup(group.id)}
+                      disabled={!canManageSettings}
+                    >
+                      Удалить
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {group.membership_ids.length === 0 && <span className="text-xs text-slate-500">Нет участников.</span>}
+                  {group.membership_ids.map((membershipId) => {
+                    const user = v2Users.find((item) => item.membership_id === membershipId);
+                    const label = user?.display_name || user?.web?.email || `Участник ${membershipId}`;
+                    return (
+                      <span key={membershipId} className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
+                        {label}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
         <h2 className="text-sm font-semibold text-slate-900">Пользователи аккаунта (RBAC v2)</h2>
-        <p className="mt-1 text-xs text-slate-500">Роли и права для web-аккаунта: база знаний, настройки, приглашения, финансы.</p>
+        <p className="mt-1 text-xs text-slate-500">
+          Роли и права для web-аккаунта: база знаний, настройки, приглашения, финансы. Роль
+          <span className="mx-1 font-medium text-slate-700">Клиент</span>
+          нужна для клиентского бота и доступа только к разрешенным материалам.
+        </p>
         {!canManageSettings && !canInviteUsers && (
           <div className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700">
             Недостаточно прав для управления пользователями.
           </div>
         )}
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+            <div className="text-[11px] uppercase tracking-wide text-slate-400">Сотрудники</div>
+            <div className="mt-1 text-2xl font-semibold text-slate-900">{staffUsersCount}</div>
+          </div>
+          <div className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+            <div className="text-[11px] uppercase tracking-wide text-slate-400">Клиенты</div>
+            <div className="mt-1 text-2xl font-semibold text-slate-900">{clientUsersCount}</div>
+          </div>
+          <div className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+            <div className="text-[11px] uppercase tracking-wide text-slate-400">Приглашены</div>
+            <div className="mt-1 text-2xl font-semibold text-slate-900">{invitedUsersCount}</div>
+          </div>
+          <div className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+            <div className="text-[11px] uppercase tracking-wide text-slate-400">Привязаны к Bitrix</div>
+            <div className="mt-1 text-2xl font-semibold text-slate-900">{bitrixLinkedCount}</div>
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-2xl border border-sky-100 bg-sky-50/70 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">Готовность клиентского бота</div>
+              <p className="mt-1 text-xs text-slate-600">
+                Чтобы клиентский бот отвечал только по разрешенным материалам, клиенту нужен аккаунт, Telegram username,
+                клиентская группа и доступ к папкам или файлам в базе знаний.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <a href="/app/settings/integrations" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 hover:bg-slate-50">
+                Интеграции
+              </a>
+              <a href="/app/kb" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 hover:bg-slate-50">
+                База знаний
+              </a>
+            </div>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-4">
+            <div className="rounded-xl border border-slate-100 bg-white px-3 py-3">
+              <div className="text-[11px] uppercase tracking-wide text-slate-400">Клиенты</div>
+              <div className="mt-1 text-lg font-semibold text-slate-900">{clientUsersCount}</div>
+              <div className="mt-1 text-xs text-slate-500">
+                {clientUsersCount > 0 ? "Аккаунты клиентов созданы." : "Создайте хотя бы одного клиента."}
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-100 bg-white px-3 py-3">
+              <div className="text-[11px] uppercase tracking-wide text-slate-400">Telegram username</div>
+              <div className="mt-1 text-lg font-semibold text-slate-900">{clientTelegramLinkedCount}</div>
+              <div className="mt-1 text-xs text-slate-500">
+                {clientTelegramLinkedCount > 0
+                  ? "Клиенты связаны с Telegram."
+                  : "Назначьте @telegram для клиентов в таблице ниже."}
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-100 bg-white px-3 py-3">
+              <div className="text-[11px] uppercase tracking-wide text-slate-400">Клиентские группы</div>
+              <div className="mt-1 text-lg font-semibold text-slate-900">{clientGroupCount}</div>
+              <div className="mt-1 text-xs text-slate-500">
+                {clientGroupCount > 0 ? "Группы можно использовать в правилах KB." : "Создайте группу клиентов для сегментации материалов."}
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-100 bg-white px-3 py-3">
+              <div className="text-[11px] uppercase tracking-wide text-slate-400">Клиентов в группах</div>
+              <div className="mt-1 text-lg font-semibold text-slate-900">{clientGroupedMembershipCount}</div>
+              <div className="mt-1 text-xs text-slate-500">
+                {clientGroupedMembershipCount > 0
+                  ? "Можно открывать материалы клиентским группам."
+                  : "Добавьте клиентов в одну или несколько групп."}
+              </div>
+            </div>
+          </div>
+        </div>
 
         <div className="mt-4 grid gap-3 lg:grid-cols-4">
           <input className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm disabled:opacity-60" placeholder="Имя" value={manualName} onChange={(e) => setManualName(e.target.value)} disabled={!canInviteUsers} />
@@ -499,6 +864,20 @@ export function WebUsersPage() {
           <input className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm disabled:opacity-60" placeholder="Email (опционально)" value={manualEmail} onChange={(e) => setManualEmail(e.target.value)} disabled={!canInviteUsers} />
           <input className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm disabled:opacity-60" placeholder="Пароль" type="password" value={manualPass} onChange={(e) => setManualPass(e.target.value)} disabled={!canInviteUsers} />
         </div>
+        <div className="mt-3 max-w-xs">
+          <select className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm disabled:opacity-60" value={manualRole} onChange={(e) => setManualRole(e.target.value as "member" | "admin" | "client")} disabled={!canInviteUsers}>
+            <option value="member">Сотрудник</option>
+            <option value="admin">Администратор</option>
+            <option value="client">Клиент</option>
+          </select>
+        </div>
+        {manualRole === "client" && (
+          <div className="mt-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-700">
+            Клиент не получает доступ к базе знаний по умолчанию. Доступ открывается через правила папок и файлов в разделе
+            <span className="mx-1 font-medium">База знаний</span>
+            и используется клиентским ботом.
+          </div>
+        )}
         <div className="mt-3">
           <button className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50" onClick={createManualUser} disabled={!canInviteUsers}>Создать пользователя</button>
         </div>
@@ -556,6 +935,12 @@ export function WebUsersPage() {
                           <span className="font-medium text-slate-600">Amo:</span> {renderIdentityValue(u.amo, "amo")}
                         </div>
                       )}
+                      {Array.isArray(u.groups) && u.groups.length > 0 && (
+                      <div>
+                        <span className="font-medium text-slate-600">Группы:</span>{" "}
+                          {u.groups.map((group) => `${group.name}${group.kind === "client" ? " (клиенты)" : ""}`).join(", ")}
+                      </div>
+                      )}
                       <div>
                         <span className="font-medium text-slate-600">Доступ:</span> {renderBitrixAccess(u)}
                       </div>
@@ -566,6 +951,7 @@ export function WebUsersPage() {
                       <option value="owner">Владелец</option>
                       <option value="admin">Администратор</option>
                       <option value="member">Сотрудник</option>
+                      <option value="client">Клиент</option>
                     </select>
                     <div className="mt-1 text-[11px] text-slate-500">{roleLabel(u.role)}</div>
                   </td>
@@ -617,17 +1003,37 @@ export function WebUsersPage() {
                   </td>
                   <td className="px-3 py-2 text-xs text-slate-600">{statusLabel(u.status)}</td>
                   <td className="px-3 py-2">
-                    {u.role !== "owner" && canManageSettings && (
-                      <button className="rounded-lg border border-rose-200 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50" onClick={async () => {
-                        const res = await fetchWeb(`/api/v2/web/accounts/${accountId}/users/${u.user_id}`, { method: "DELETE" });
-                        const data = await res.json().catch(() => null);
-                        if (!res.ok) {
-                          setV2Msg(data?.detail || data?.message || "Ошибка удаления пользователя.");
-                          return;
-                        }
-                        await loadV2Users(accountId);
-                      }}>Удалить</button>
-                    )}
+                    <div className="space-y-2">
+                      {u.role === "client" && (
+                        <div className="space-y-1">
+                          <input
+                            className="w-40 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs disabled:opacity-60"
+                            placeholder="@telegram"
+                            value={accountTelegramMap[u.membership_id] || ""}
+                            disabled={!canInviteUsers}
+                            onChange={(e) => setAccountTelegramMap((prev) => ({ ...prev, [u.membership_id]: e.target.value.replace(/^@+/, "") }))}
+                          />
+                          <button
+                            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                            disabled={!canInviteUsers || savingTelegramMembershipId === u.membership_id}
+                            onClick={() => saveMembershipTelegram(u.membership_id)}
+                          >
+                            {savingTelegramMembershipId === u.membership_id ? "Сохраняю..." : "Telegram"}
+                          </button>
+                        </div>
+                      )}
+                      {u.role !== "owner" && canManageSettings && (
+                        <button className="rounded-lg border border-rose-200 px-2 py-1 text-xs text-rose-600 hover:bg-rose-50" onClick={async () => {
+                          const res = await fetchWeb(`/api/v2/web/accounts/${accountId}/users/${u.user_id}`, { method: "DELETE" });
+                          const data = await res.json().catch(() => null);
+                          if (!res.ok) {
+                            setV2Msg(data?.detail || data?.message || "Ошибка удаления пользователя.");
+                            return;
+                          }
+                          await loadV2Users(accountId);
+                        }}>Удалить</button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -646,12 +1052,18 @@ export function WebUsersPage() {
         )}
         <div className="mt-4 grid gap-3 lg:grid-cols-4">
           <input className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm lg:col-span-2 disabled:opacity-60" placeholder="email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} disabled={!canInviteUsers} />
-          <select className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm disabled:opacity-60" value={inviteRole} onChange={(e) => setInviteRole(e.target.value as "admin" | "member")} disabled={!canInviteUsers}>
+          <select className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm disabled:opacity-60" value={inviteRole} onChange={(e) => setInviteRole(e.target.value as "admin" | "member" | "client")} disabled={!canInviteUsers}>
             <option value="member">Сотрудник</option>
             <option value="admin">Администратор</option>
+            <option value="client">Клиент</option>
           </select>
           <button className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50" onClick={createInvite} disabled={!canInviteUsers}>Отправить</button>
         </div>
+        {inviteRole === "client" && (
+          <div className="mt-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-700">
+            Приглашенный клиент будет видеть только те материалы, для которых в базе знаний открыт клиентский доступ.
+          </div>
+        )}
         {inviteMsg && <div className="mt-2 text-xs text-slate-500">{inviteMsg}</div>}
 
         <div className="mt-4 space-y-2">

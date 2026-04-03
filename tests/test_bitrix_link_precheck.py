@@ -514,3 +514,43 @@ def test_bitrix_embedded_session_returns_web_session_for_linked_account(test_db_
     assert data["portal_id"] == portal_a.id
     assert data["session_token"]
     assert data["accounts"][0]["id"] == account_a.id
+
+
+@pytest.mark.timeout(10)
+def test_bitrix_login_returns_link_required_instead_of_legacy_pending(test_db_session):
+    portal_a = Portal(domain="legacy-a.bitrix24.ru", status="active", admin_user_id=1)
+    portal_b = Portal(domain="legacy-b.bitrix24.ru", status="active", admin_user_id=1)
+    test_db_session.add_all([portal_a, portal_b])
+    test_db_session.flush()
+
+    web_user = WebUser(
+        email="legacy@example.com",
+        password_hash=get_password_hash("Secret123!"),
+        portal_id=portal_a.id,
+        email_verified_at=datetime.utcnow(),
+    )
+    test_db_session.add(web_user)
+    test_db_session.commit()
+
+    app.dependency_overrides[get_db] = _override_get_db(test_db_session)
+    app.dependency_overrides[bitrix_router.require_portal_access] = lambda: portal_b.id
+    original_require_admin = bitrix_router._require_portal_admin
+    bitrix_router._require_portal_admin = lambda db, portal_id, request: None
+    try:
+        resp = client.post(
+            f"/v1/bitrix/portals/{portal_b.id}/web/login",
+            json={"email": "legacy@example.com", "password": "Secret123!"},
+        )
+        legacy_resp = client.post(
+            f"/v1/bitrix/portals/{portal_b.id}/web/link/request",
+            json={"email": "legacy@example.com"},
+        )
+    finally:
+        bitrix_router._require_portal_admin = original_require_admin
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(bitrix_router.require_portal_access, None)
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "link_required"
+    assert legacy_resp.status_code == 410
+    assert legacy_resp.json()["detail"] == "legacy_link_flow_removed"

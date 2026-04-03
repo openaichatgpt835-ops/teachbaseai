@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from apps.backend.models.kb import KBSource, KBFile, KBJob
+from apps.backend.models.portal import Portal
 from apps.backend.services.kb_storage import ensure_portal_dir
 from apps.backend.services.kb_ingest import ingest_file
 
@@ -49,7 +50,9 @@ def create_url_source(
     if audience not in ("staff", "client"):
         audience = "staff"
     source_type = _detect_source_type(url)
+    portal = db.get(Portal, int(portal_id))
     src = KBSource(
+        account_id=int(portal.account_id) if portal and portal.account_id else None,
         portal_id=portal_id,
         source_type=source_type,
         audience=audience,
@@ -63,6 +66,7 @@ def create_url_source(
     db.commit()
     db.refresh(src)
     job = KBJob(
+        account_id=src.account_id,
         portal_id=portal_id,
         job_type="source",
         status="queued",
@@ -140,6 +144,7 @@ def process_url_source(db: Session, source_id: int) -> dict:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(text)
             rec = KBFile(
+                account_id=src.account_id,
                 portal_id=src.portal_id,
                 source_id=src.id,
                 filename=filename,
@@ -164,6 +169,7 @@ def process_url_source(db: Session, source_id: int) -> dict:
                 return {"ok": False, "error": "download_failed"}
             filename = os.path.basename(file_path)
             rec = KBFile(
+                account_id=src.account_id,
                 portal_id=src.portal_id,
                 source_id=src.id,
                 filename=filename,

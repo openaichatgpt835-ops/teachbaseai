@@ -13,7 +13,9 @@ from apps.backend.models.dialog import Dialog, Message
 from apps.backend.models.event import Event
 from apps.backend.models.outbox import Outbox
 from apps.backend.models.portal import PortalUsersAccess
-from apps.backend.models.kb import KBFile, KBJob
+from apps.backend.models.kb import KBFile, KBJob, KBFileAccess, KBFolderAccess
+from apps.backend.models.portal import Portal
+from apps.backend.models.account import AccountMembership, AppUserIdentity, AccountUserGroupMember
 from apps.backend.services.kb_rag import answer_from_kb
 from apps.backend.services.bot_flow_engine import execute_client_flow
 from apps.backend.services.billing import (
@@ -28,19 +30,52 @@ from apps.backend.services.telegram_settings import (
     get_portal_telegram_token_plain,
 )
 from apps.backend.services.kb_storage import ensure_portal_dir
+from apps.backend.services.kb_acl import default_kb_access_for_role, kb_acl_principals_for_membership, resolve_kb_acl_access
 from apps.backend.clients.telegram import telegram_get_file, telegram_download_file
 from apps.backend.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-MSG_MISSING_USERNAME = "Укажите username в Telegram и напишите боту снова."
-MSG_NO_ACCESS = "Нет доступа. Обратитесь к администратору портала."
-MSG_UPLOADS_DISABLED = "Загрузка файлов отключена в настройках."
-MSG_FILE_RECEIVED = "Файл получил, изучаю 🔍"
-MSG_FILE_QUEUED = "Файл получен и отправлен на индексацию."
-MSG_LIMIT_EXCEEDED = "Лимит запросов исчерпан. Обратитесь к администратору портала."
-MSG_KB_EMPTY = "База знаний пока пуста. Обратитесь к администратору портала."
-MSG_SERVICE_DOWN = "Сервис ответа временно недоступен. Попробуйте позже."
+MSG_MISSING_USERNAME = (
+    "\u0423\u043a\u0430\u0436\u0438\u0442\u0435 username \u0432 Telegram \u0438 "
+    "\u043d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u0431\u043e\u0442\u0443 \u0441\u043d\u043e\u0432\u0430."
+)
+MSG_NO_ACCESS = (
+    "\u041d\u0435\u0442 \u0434\u043e\u0441\u0442\u0443\u043f\u0430. "
+    "\u041e\u0431\u0440\u0430\u0442\u0438\u0442\u0435\u0441\u044c \u043a "
+    "\u0430\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440\u0443 \u043f\u043e\u0440\u0442\u0430\u043b\u0430."
+)
+MSG_UPLOADS_DISABLED = (
+    "\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430 \u0444\u0430\u0439\u043b\u043e\u0432 "
+    "\u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u0430 \u0432 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430\u0445."
+)
+MSG_FILE_RECEIVED = (
+    "\u0424\u0430\u0439\u043b \u043f\u043e\u043b\u0443\u0447\u0438\u043b, "
+    "\u0438\u0437\u0443\u0447\u0430\u044e \u0435\u0433\u043e."
+)
+MSG_FILE_QUEUED = (
+    "\u0424\u0430\u0439\u043b \u043f\u043e\u043b\u0443\u0447\u0435\u043d \u0438 "
+    "\u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d \u043d\u0430 \u0438\u043d\u0434\u0435\u043a\u0441\u0430\u0446\u0438\u044e."
+)
+MSG_LIMIT_EXCEEDED = (
+    "\u041b\u0438\u043c\u0438\u0442 \u0437\u0430\u043f\u0440\u043e\u0441\u043e\u0432 "
+    "\u0438\u0441\u0447\u0435\u0440\u043f\u0430\u043d. \u041e\u0431\u0440\u0430\u0442\u0438\u0442\u0435\u0441\u044c \u043a "
+    "\u0430\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440\u0443 \u043f\u043e\u0440\u0442\u0430\u043b\u0430."
+)
+MSG_KB_EMPTY = (
+    "\u0411\u0430\u0437\u0430 \u0437\u043d\u0430\u043d\u0438\u0439 \u043f\u043e\u043a\u0430 "
+    "\u043f\u0443\u0441\u0442\u0430. \u041e\u0431\u0440\u0430\u0442\u0438\u0442\u0435\u0441\u044c \u043a "
+    "\u0430\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440\u0443 \u043f\u043e\u0440\u0442\u0430\u043b\u0430."
+)
+MSG_SERVICE_DOWN = (
+    "\u0421\u0435\u0440\u0432\u0438\u0441 \u043e\u0442\u0432\u0435\u0442\u0430 "
+    "\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d. "
+    "\u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043f\u043e\u0437\u0436\u0435."
+)
+MSG_NO_CLIENT_MATERIALS = (
+    "\u0414\u043b\u044f \u0432\u0430\u0441 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442 "
+    "\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0445 \u043c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u043e\u0432."
+)
 
 
 def _dialog_id(chat_id: int | str) -> str:
@@ -60,6 +95,125 @@ def _find_allowed_user(db: Session, portal_id: int, username: str | None) -> Por
             PortalUsersAccess.telegram_username == uname,
         )
     ).scalar_one_or_none()
+
+
+def _account_scope_portal_ids(db: Session, portal_id: int) -> list[int]:
+    portal = db.get(Portal, int(portal_id))
+    if not portal or not portal.account_id:
+        return [int(portal_id)]
+    rows = db.execute(
+        select(Portal.id).where(Portal.account_id == int(portal.account_id)).order_by(Portal.id.asc())
+    ).scalars().all()
+    ids = [int(x) for x in rows if x is not None]
+    return ids or [int(portal_id)]
+
+
+def _telegram_client_acl_subject_ctx(db: Session, portal_id: int, username: str | None) -> dict[str, object] | None:
+    uname = normalize_telegram_username(username)
+    if not uname:
+        return None
+    portal = db.get(Portal, int(portal_id))
+    if not portal or not portal.account_id:
+        return None
+    membership = db.execute(
+        select(AccountMembership)
+        .join(AppUserIdentity, AppUserIdentity.user_id == AccountMembership.user_id)
+        .where(AccountMembership.account_id == int(portal.account_id))
+        .where(AccountMembership.status == "active")
+        .where(AppUserIdentity.provider == "telegram")
+        .where(AppUserIdentity.integration_id.is_(None))
+        .where(AppUserIdentity.external_id == uname)
+        .order_by(AccountMembership.id.asc())
+    ).scalar_one_or_none()
+    if not membership:
+        return None
+    group_ids = db.execute(
+        select(AccountUserGroupMember.group_id).where(AccountUserGroupMember.membership_id == int(membership.id))
+    ).scalars().all()
+    return {
+        "membership_id": int(membership.id),
+        "group_ids": [int(x) for x in group_ids if x is not None],
+        "role": str(membership.role or "client"),
+        "audience": "client",
+    }
+
+
+def _all_account_scope_file_ids(db: Session, *, portal_id: int, audience: str) -> set[int]:
+    portal = db.get(Portal, int(portal_id))
+    if portal and portal.account_id:
+        rows = db.execute(
+            select(KBFile.id)
+            .where(
+                ((KBFile.account_id == int(portal.account_id)) | ((KBFile.account_id.is_(None)) & (KBFile.portal_id.in_(_account_scope_portal_ids(db, portal_id)))))
+            )
+            .where(KBFile.audience == audience)
+            .where(KBFile.status == "ready")
+        ).scalars().all()
+    else:
+        rows = db.execute(
+            select(KBFile.id)
+            .where(KBFile.portal_id.in_(_account_scope_portal_ids(db, portal_id)))
+            .where(KBFile.audience == audience)
+            .where(KBFile.status == "ready")
+        ).scalars().all()
+    return {int(x) for x in rows if x is not None}
+
+
+def _filter_file_ids_by_kb_acl(
+    db: Session,
+    *,
+    file_ids: set[int],
+    membership_id: int | None,
+    group_ids: list[int] | None,
+    role: str | None,
+    audience: str | None,
+) -> set[int]:
+    if not file_ids:
+        return set()
+    rows = db.execute(select(KBFile.id, KBFile.folder_id).where(KBFile.id.in_(sorted(file_ids)))).all()
+    folder_ids = sorted({int(folder_id) for _fid, folder_id in rows if folder_id is not None})
+    file_acl_rows = db.execute(
+        select(KBFileAccess.file_id, KBFileAccess.principal_type, KBFileAccess.principal_id, KBFileAccess.access_level)
+        .where(KBFileAccess.file_id.in_(sorted(file_ids)))
+    ).all()
+    folder_acl_rows = []
+    if folder_ids:
+        folder_acl_rows = db.execute(
+            select(KBFolderAccess.folder_id, KBFolderAccess.principal_type, KBFolderAccess.principal_id, KBFolderAccess.access_level)
+            .where(KBFolderAccess.folder_id.in_(folder_ids))
+        ).all()
+    principals = kb_acl_principals_for_membership(membership_id, role, audience, group_ids)
+    file_acl_map: dict[int, list[tuple[str, str, str]]] = {}
+    for file_id, principal_type, principal_id, access_level in file_acl_rows:
+        file_acl_map.setdefault(int(file_id), []).append((str(principal_type), str(principal_id), str(access_level)))
+    folder_acl_map: dict[int, list[tuple[str, str, str]]] = {}
+    for folder_id, principal_type, principal_id, access_level in folder_acl_rows:
+        folder_acl_map.setdefault(int(folder_id), []).append((str(principal_type), str(principal_id), str(access_level)))
+    allowed: set[int] = set()
+    for file_id, folder_id in rows:
+        inherited = default_kb_access_for_role(role)
+        if folder_id is not None:
+            inherited = resolve_kb_acl_access(folder_acl_map.get(int(folder_id), []), principals, inherited)
+        effective = resolve_kb_acl_access(file_acl_map.get(int(file_id), []), principals, inherited)
+        if effective in {"read", "write", "admin"}:
+            allowed.add(int(file_id))
+    return allowed
+
+
+def _telegram_client_file_scope(db: Session, portal_id: int, username: str | None) -> tuple[dict[str, object] | None, list[int] | None]:
+    acl_ctx = _telegram_client_acl_subject_ctx(db, portal_id, username)
+    if not acl_ctx:
+        return None, None
+    account_scope_ids = _all_account_scope_file_ids(db, portal_id=portal_id, audience="client")
+    allowed_ids = _filter_file_ids_by_kb_acl(
+        db,
+        file_ids=account_scope_ids,
+        membership_id=int(acl_ctx.get("membership_id")) if acl_ctx.get("membership_id") else None,
+        group_ids=[int(x) for x in (acl_ctx.get("group_ids") or [])],
+        role=str(acl_ctx.get("role") or "client"),
+        audience="client",
+    )
+    return acl_ctx, sorted(allowed_ids)
 
 
 def process_telegram_update(
@@ -90,6 +244,8 @@ def process_telegram_update(
     sender = message.get("from") or {}
     sender_username = sender.get("username")
     sender_user_id = None
+    client_acl_ctx = None
+    client_file_ids_filter = None
 
     access_row = None
     if kind == "staff":
@@ -137,6 +293,25 @@ def process_telegram_update(
                 "chat_id": chat_id,
             }
         sender_user_id = access_row.user_id
+    elif kind == "client":
+        if not sender_username:
+            return {
+                "status": "blocked",
+                "reason": "acl",
+                "detail": "missing_username",
+                "reply": MSG_MISSING_USERNAME,
+                "chat_id": chat_id,
+            }
+        client_acl_ctx, client_file_ids_filter = _telegram_client_file_scope(db, portal_id, sender_username)
+        if not client_acl_ctx:
+            return {
+                "status": "blocked",
+                "reason": "acl",
+                "detail": "no_access",
+                "reply": MSG_NO_ACCESS,
+                "chat_id": chat_id,
+            }
+        sender_user_id = client_acl_ctx.get("membership_id")
 
     if has_media:
         settings = get_portal_telegram_settings(db, portal_id)
@@ -175,7 +350,9 @@ def process_telegram_update(
             return {"status": "error", "reason": "download_failed", "detail": derr, "chat_id": chat_id}
         size = os.path.getsize(dst_path) if os.path.exists(dst_path) else None
         aud = "client" if kind == "client" else "staff"
+        portal = db.get(Portal, int(portal_id))
         rec = KBFile(
+            account_id=int(portal.account_id) if portal and portal.account_id else None,
             portal_id=portal_id,
             filename=safe_name,
             audience=aud,
@@ -192,6 +369,7 @@ def process_telegram_update(
         db.commit()
         db.refresh(rec)
         job = KBJob(
+            account_id=rec.account_id,
             portal_id=rec.portal_id,
             job_type="ingest",
             status="queued",
@@ -303,20 +481,30 @@ def process_telegram_update(
             response_body = MSG_LIMIT_EXCEEDED
         else:
             if kind == "client":
-                try:
-                    response_body = execute_client_flow(db, portal_id, dialog.id, text)
-                    rag_answer = response_body
-                    rag_err = None
-                    usage = None
-                except Exception as e:
-                    logger.exception("client flow failed: %s", e)
-                    rag_answer, rag_err, usage = answer_from_kb(
-                        db,
-                        portal_id,
-                        text,
-                        dialog_id=dialog.id,
-                        audience="client",
-                    )
+                if client_file_ids_filter == []:
+                    rag_answer, rag_err, usage = None, "kb_empty", None
+                else:
+                    try:
+                        response_body = execute_client_flow(
+                            db,
+                            portal_id,
+                            dialog.id,
+                            text,
+                            file_ids_filter=client_file_ids_filter,
+                        )
+                        rag_answer = response_body
+                        rag_err = None
+                        usage = None
+                    except Exception as e:
+                        logger.exception("client flow failed: %s", e)
+                        rag_answer, rag_err, usage = answer_from_kb(
+                            db,
+                            portal_id,
+                            text,
+                            dialog_id=dialog.id,
+                            audience="client",
+                            file_ids_filter=client_file_ids_filter,
+                        )
             else:
                 rag_answer, rag_err, usage = answer_from_kb(
                     db,
@@ -328,7 +516,7 @@ def process_telegram_update(
             if rag_answer:
                 response_body = rag_answer
             elif rag_err == "kb_empty":
-                response_body = MSG_KB_EMPTY
+                response_body = MSG_NO_CLIENT_MATERIALS if kind == "client" else MSG_KB_EMPTY
             else:
                 logger.warning("kb_rag_error portal_id=%s err=%s", portal_id, rag_err)
                 response_body = MSG_SERVICE_DOWN

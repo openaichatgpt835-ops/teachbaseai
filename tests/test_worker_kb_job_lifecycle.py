@@ -29,6 +29,7 @@ def test_process_kb_job_marks_duplicate_as_done(test_db_session, monkeypatch):
     test_db_session.refresh(portal)
 
     other = KBJob(
+        account_id=42,
         portal_id=portal.id,
         job_type="ingest",
         status="queued",
@@ -36,6 +37,7 @@ def test_process_kb_job_marks_duplicate_as_done(test_db_session, monkeypatch):
         created_at=datetime.utcnow(),
     )
     current = KBJob(
+        account_id=42,
         portal_id=portal.id,
         job_type="ingest",
         status="queued",
@@ -56,6 +58,7 @@ def test_process_kb_job_marks_duplicate_as_done(test_db_session, monkeypatch):
     refreshed = test_db_session.get(KBJob, current.id)
     assert refreshed is not None
     assert refreshed.status == "done"
+    assert refreshed.account_id == 42
     assert (refreshed.error_message or "").startswith("duplicate_skipped:")
 
 
@@ -67,6 +70,7 @@ def test_process_kb_job_rate_limited_returns_to_queue(test_db_session, monkeypat
     test_db_session.refresh(portal)
 
     current = KBJob(
+        account_id=77,
         portal_id=portal.id,
         job_type="ingest",
         status="queued",
@@ -90,6 +94,7 @@ def test_process_kb_job_rate_limited_returns_to_queue(test_db_session, monkeypat
     refreshed = test_db_session.get(KBJob, current.id)
     assert refreshed is not None
     assert refreshed.status == "queued"
+    assert refreshed.account_id == 77
     assert refreshed.error_message == "rate_limited"
 
 
@@ -101,6 +106,7 @@ def test_process_kb_job_exception_sets_error_status(test_db_session, monkeypatch
     test_db_session.refresh(portal)
 
     current = KBJob(
+        account_id=99,
         portal_id=portal.id,
         job_type="ingest",
         status="queued",
@@ -125,5 +131,6 @@ def test_process_kb_job_exception_sets_error_status(test_db_session, monkeypatch
     refreshed = test_db_session.get(KBJob, current.id)
     assert refreshed is not None
     assert refreshed.status == "error"
+    assert refreshed.account_id == 99
     assert (refreshed.error_message or "").startswith("worker_exception:")
 

@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 from apps.backend.auth import require_portal_access
 from apps.backend.deps import get_db
 from apps.backend.models.bitrix_inbound_event import BitrixInboundEvent
-from apps.backend.models.account import AccountIntegration
 from apps.backend.models.dialog import Dialog, Message
 from apps.backend.models.topic_summary import PortalTopicSummary, AccountTopicSummary
 from apps.backend.models.portal import Portal
@@ -37,30 +36,11 @@ def _account_scope_portal_ids(db: Session, portal_id: int) -> list[int]:
     return ids or [int(portal_id)]
 
 
-def _primary_account_portal_id(db: Session, portal_id: int) -> int:
-    portal = db.get(Portal, int(portal_id))
-    if not portal or not portal.account_id:
-        return int(portal_id)
-    integrations = db.execute(
-        select(AccountIntegration)
-        .where(AccountIntegration.account_id == int(portal.account_id))
-        .where(AccountIntegration.provider == "bitrix")
-        .where(AccountIntegration.status == "active")
-        .order_by(AccountIntegration.id.asc())
-    ).scalars().all()
-    for integration in integrations:
-        meta = dict(integration.credentials_json or {})
-        if meta.get("is_primary") and integration.portal_id:
-            return int(integration.portal_id)
-    ids = _account_scope_portal_ids(db, int(portal_id))
-    return int(ids[0]) if ids else int(portal_id)
-
-
 def _summary_scope(db: Session, portal_id: int) -> tuple[str, int]:
     portal = db.get(Portal, int(portal_id))
     if portal and portal.account_id:
         return "account", int(portal.account_id)
-    return "portal", _primary_account_portal_id(db, int(portal_id))
+    return "portal", int(portal_id)
 
 
 def _trace_id(request: Request) -> str:

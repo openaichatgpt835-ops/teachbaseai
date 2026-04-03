@@ -15,12 +15,12 @@ const LABELS = {
   demoUntil: "\u0414\u0435\u043c\u043e \u0434\u043e",
 } as const;
 
-const EMBEDDED_PRIMARY = new Set(["overview", "chat", "kb", "sources", "users", "settings"]);
+const EMBEDDED_PRIMARY = new Set(["overview", "chat", "kb", "users", "settings"]);
 
 function resolveCabinetPath(pathname: string) {
   if (pathname.startsWith("/embedded/bitrix/chat")) return "/app/chat";
   if (pathname.startsWith("/embedded/bitrix/kb")) return "/app/kb";
-  if (pathname.startsWith("/embedded/bitrix/sources")) return "/app/sources";
+  if (pathname.startsWith("/embedded/bitrix/sources")) return "/app/kb";
   if (pathname.startsWith("/embedded/bitrix/users")) return "/app/users";
   if (pathname.startsWith("/embedded/bitrix/settings/telegram")) return "/app/settings/integrations";
   if (pathname.startsWith("/embedded/bitrix/settings")) return "/app/settings";

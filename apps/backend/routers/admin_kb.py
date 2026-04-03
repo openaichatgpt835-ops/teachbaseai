@@ -420,6 +420,7 @@ def kb_process_file(
         raise HTTPException(status_code=404, detail="Файл не найден")
     rec.status = "queued"
     job = KBJob(
+        account_id=rec.account_id,
         portal_id=rec.portal_id,
         job_type="ingest",
         status="queued",

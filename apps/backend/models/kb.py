@@ -11,6 +11,7 @@ class KBSource(Base):
     __tablename__ = "kb_sources"
 
     id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True, index=True)
     portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
     source_type = Column(String(32), nullable=False)  # file|web|youtube|vk|rutube
     audience = Column(String(16), nullable=False, default="staff")  # staff|client
@@ -28,8 +29,10 @@ class KBFile(Base):
     __tablename__ = "kb_files"
 
     id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True, index=True)
     portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
     source_id = Column(Integer, ForeignKey("kb_sources.id"), nullable=True, index=True)
+    folder_id = Column(Integer, ForeignKey("kb_folders.id"), nullable=True, index=True)
     filename = Column(String(256), nullable=False)
     audience = Column(String(16), nullable=False, default="staff")  # staff|client
     mime_type = Column(String(128), nullable=True)
@@ -50,6 +53,7 @@ class KBFile(Base):
 
     source = relationship("KBSource", back_populates="files")
     chunks = relationship("KBChunk", back_populates="file")
+    folder = relationship("KBFolder", back_populates="files")
 
     __table_args__ = (
         Index("ix_kb_files_portal_status", "portal_id", "status"),
@@ -60,6 +64,7 @@ class KBChunk(Base):
     __tablename__ = "kb_chunks"
 
     id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True, index=True)
     portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
     file_id = Column(Integer, ForeignKey("kb_files.id"), nullable=True, index=True)
     source_id = Column(Integer, ForeignKey("kb_sources.id"), nullable=True, index=True)
@@ -101,6 +106,7 @@ class KBJob(Base):
     __tablename__ = "kb_jobs"
 
     id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True, index=True)
     portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
     job_type = Column(String(32), nullable=False)  # ingest|embed|reindex
     status = Column(String(32), nullable=False, default="queued")
@@ -119,6 +125,7 @@ class KBCollection(Base):
     __tablename__ = "kb_collections"
 
     id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True, index=True)
     portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
     name = Column(String(128), nullable=False)
     color = Column(String(32), nullable=True)
@@ -141,8 +148,61 @@ class KBSmartFolder(Base):
     __tablename__ = "kb_smart_folders"
 
     id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True, index=True)
     portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
     name = Column(String(128), nullable=False)
     system_tag = Column(String(64), nullable=True)  # auto topic id if system
     rules_json = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class KBFolder(Base):
+    __tablename__ = "kb_folders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True, index=True)
+    portal_id = Column(Integer, ForeignKey("portals.id"), nullable=False, index=True)
+    parent_id = Column(Integer, ForeignKey("kb_folders.id"), nullable=True, index=True)
+    name = Column(String(128), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    parent = relationship("KBFolder", remote_side=[id], backref="children")
+    files = relationship("KBFile", back_populates="folder")
+
+    __table_args__ = (
+        Index("ix_kb_folders_account_parent", "account_id", "parent_id"),
+        Index("ix_kb_folders_portal_parent", "portal_id", "parent_id"),
+    )
+
+
+class KBFolderAccess(Base):
+    __tablename__ = "kb_folder_access"
+
+    id = Column(Integer, primary_key=True, index=True)
+    folder_id = Column(Integer, ForeignKey("kb_folders.id", ondelete="CASCADE"), nullable=False, index=True)
+    principal_type = Column(String(32), nullable=False)
+    principal_id = Column(String(128), nullable=False)
+    access_level = Column(String(16), nullable=False, default="read")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_kb_folder_access_folder_principal", "folder_id", "principal_type", "principal_id"),
+    )
+
+
+class KBFileAccess(Base):
+    __tablename__ = "kb_file_access"
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_id = Column(Integer, ForeignKey("kb_files.id", ondelete="CASCADE"), nullable=False, index=True)
+    principal_type = Column(String(32), nullable=False)
+    principal_id = Column(String(128), nullable=False)
+    access_level = Column(String(16), nullable=False, default="read")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_kb_file_access_file_principal", "file_id", "principal_type", "principal_id"),
+    )
