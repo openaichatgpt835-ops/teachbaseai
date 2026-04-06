@@ -95,8 +95,8 @@ def test_kb_acl_foundation_supports_folder_and_file_acl_rows(test_db_session):
 
 
 def test_kb_acl_foundation_role_defaults_and_principal_normalization():
-    assert default_kb_access_for_role("owner") == "admin"
-    assert default_kb_access_for_role("admin") == "write"
+    assert default_kb_access_for_role("owner") == "manage"
+    assert default_kb_access_for_role("admin") == "edit"
     assert default_kb_access_for_role("member") == "read"
     assert default_kb_access_for_role("client") == "none"
     assert normalize_kb_principal("role", "client") == ("role", "client")
@@ -107,12 +107,12 @@ def test_kb_acl_foundation_role_defaults_and_principal_normalization():
     access = resolve_kb_acl_access(
         [
             ("role", "member", "read"),
-            ("membership", "42", "write"),
+            ("membership", "42", "edit"),
             ("audience", "client", "none"),
         ],
         principals,
     )
-    assert access == "write"
+    assert access == "edit"
     restricted = resolve_kb_acl_access(
         [("membership", "99", "read")],
         principals,

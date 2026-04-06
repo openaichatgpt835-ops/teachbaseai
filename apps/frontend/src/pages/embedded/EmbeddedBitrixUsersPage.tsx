@@ -284,7 +284,7 @@ export function EmbeddedBitrixUsersPage() {
                     </td>
                     <td className="px-3 py-2">
                       <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-                        <input
+                        <input className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                           type="checkbox"
                           checked={checked}
                           onChange={(e) => toggleAccess(userId, e.target.checked)}

@@ -104,7 +104,7 @@ def _seed_owner(db):
 
     perm = AccountPermission(
         membership_id=membership.id,
-        kb_access="write",
+        kb_access="manage",
         can_invite_users=True,
         can_manage_settings=True,
         can_view_finance=True,
@@ -691,7 +691,7 @@ def test_web_rbac_manual_user_create_update_delete(test_db_session, override_get
             json={
                 "display_name": "Alice Admin",
                 "role": "admin",
-                "kb_access": "write",
+                "kb_access": "manage",
                 "can_manage_settings": True,
             },
         )

@@ -2195,7 +2195,7 @@ export function WebKbPage() {
               >
                 <div className="sticky top-0 z-10 grid grid-cols-[1.6fr_1fr_1fr_1fr_120px] gap-3 border-b border-slate-100 bg-white px-3 py-2 text-[11px] uppercase tracking-wide text-slate-400">
                   <label className="flex items-center gap-2">
-                    <input type="checkbox" checked={allVisibleSelected} onChange={toggleSelectAllVisible} />
+                    <input className="h-4 w-4 rounded border-slate-300 accent-sky-600" type="checkbox" checked={allVisibleSelected} onChange={toggleSelectAllVisible} />
                     Название
                   </label>
                   <div>Владелец</div>
@@ -2234,7 +2234,7 @@ export function WebKbPage() {
                         type="checkbox"
                         checked={selectedFileIds.includes(f.id)}
                         onChange={(e) => handleRowSelect(f.id, e)}
-                        className={`transition-opacity ${selectedFileIds.includes(f.id) ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+                        className={`h-4 w-4 rounded border-slate-300 accent-sky-600 transition-opacity ${selectedFileIds.includes(f.id) ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
                       />
                       <span
                         className="inline-flex h-6 w-6 items-center justify-center rounded-md text-[10px] font-semibold text-white"

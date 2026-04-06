@@ -26,6 +26,7 @@ import { WebOverviewPage } from "./pages/web/WebOverviewPage";
 import { WebStubPage } from "./pages/web/WebStubPage";
 import { WebKbPage } from "./pages/web/WebKbPage";
 import { WebUsersPage } from "./pages/web/WebUsersPage";
+import { WebUsersPageV2 } from "./pages/web/WebUsersPageV2";
 import { WebSettingsPage } from "./pages/web/WebSettingsPage";
 import { WebBillingPage } from "./pages/web/WebBillingPage";
 import { WebIntegrationsPage } from "./pages/web/WebIntegrationsPage";
@@ -59,7 +60,8 @@ export default function App() {
         <Route path="kb" element={<WebKbPageV2 />} />
         <Route path="kb-v2" element={<WebKbPageV2 />} />
         <Route path="sources" element={<Navigate to="/app/kb" replace />} />
-        <Route path="users" element={<WebUsersPage />} />
+        <Route path="users" element={<WebUsersPageV2 />} />
+        <Route path="users-legacy" element={<WebUsersPage />} />
         <Route path="analytics" element={<WebStubPage title="Аналитика" />} />
         <Route path="settings" element={<WebSettingsPage />} />
         <Route path="billing" element={<WebBillingPage />} />

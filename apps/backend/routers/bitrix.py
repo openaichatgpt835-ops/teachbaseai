@@ -74,8 +74,13 @@ from apps.backend.services.kb_sources import create_url_source
 from apps.backend.services.kb_acl import (
     KB_ACCESS_LEVELS,
     default_kb_access_for_role,
+    kb_access_allows_edit,
+    kb_access_allows_manage,
+    kb_access_allows_read,
+    kb_access_allows_upload,
     kb_acl_principals_for_membership,
     normalize_kb_principal,
+    normalize_kb_access_level,
     resolve_kb_acl_access,
 )
 from apps.backend.services.kb_rag import answer_from_kb
@@ -579,7 +584,7 @@ def _acl_items_payload(rows: list[Any]) -> list[dict[str, str]]:
         {
             "principal_type": str(getattr(row, "principal_type", "") or ""),
             "principal_id": str(getattr(row, "principal_id", "") or ""),
-            "access_level": str(getattr(row, "access_level", "none") or "none"),
+            "access_level": normalize_kb_access_level(str(getattr(row, "access_level", "none") or "none")),
         }
         for row in rows
     ]
@@ -591,8 +596,9 @@ def _replace_folder_acl(db: Session, folder_id: int, items: list[ACLItemBody]) -
     seen: set[tuple[str, str]] = set()
     for item in items:
         ptype, pid = normalize_kb_principal(item.principal_type, item.principal_id)
-        level = str(item.access_level or "read").strip().lower()
-        if level not in KB_ACCESS_LEVELS:
+        try:
+            level = normalize_kb_access_level(item.access_level or "read", strict=True)
+        except ValueError:
             raise ValueError("invalid_access_level")
         key = (ptype, pid)
         if key in seen:
@@ -609,8 +615,9 @@ def _replace_file_acl(db: Session, file_id: int, items: list[ACLItemBody]) -> li
     seen: set[tuple[str, str]] = set()
     for item in items:
         ptype, pid = normalize_kb_principal(item.principal_type, item.principal_id)
-        level = str(item.access_level or "read").strip().lower()
-        if level not in KB_ACCESS_LEVELS:
+        try:
+            level = normalize_kb_access_level(item.access_level or "read", strict=True)
+        except ValueError:
             raise ValueError("invalid_access_level")
         key = (ptype, pid)
         if key in seen:
@@ -2023,7 +2030,7 @@ def _filter_file_ids_by_kb_acl(
             principals,
             inherited,
         )
-        if effective in {"read", "write", "admin"}:
+        if kb_access_allows_read(effective):
             allowed.add(int(file_id))
     return allowed
 
@@ -2131,7 +2138,6 @@ def _kb_client_access_summary(db: Session, portal_id: int, folder_id: int | None
     for folder_id, principal_type, principal_id, access_level in folder_acl_rows:
         folder_acl_map.setdefault(int(folder_id), []).append((str(principal_type), str(principal_id), str(access_level or "none")))
 
-    allowed_levels = {"read", "write", "admin"}
     generic_principals = kb_acl_principals_for_membership(None, "client", "client", [])
     open_all_clients = 0
     open_client_groups = 0
@@ -2142,7 +2148,7 @@ def _kb_client_access_summary(db: Session, portal_id: int, folder_id: int | None
         if folder_id is not None:
             inherited_generic = resolve_kb_acl_access(folder_acl_map.get(int(folder_id), []), generic_principals, inherited_generic)
         generic_effective = resolve_kb_acl_access(file_acl_map.get(int(file_id), []), generic_principals, inherited_generic)
-        if generic_effective in allowed_levels:
+        if kb_access_allows_read(generic_effective):
             open_all_clients += 1
             continue
 
@@ -2153,7 +2159,7 @@ def _kb_client_access_summary(db: Session, portal_id: int, folder_id: int | None
             if folder_id is not None:
                 inherited_group = resolve_kb_acl_access(folder_acl_map.get(int(folder_id), []), group_principals, inherited_group)
             group_effective = resolve_kb_acl_access(file_acl_map.get(int(file_id), []), group_principals, inherited_group)
-            if group_effective in allowed_levels:
+            if kb_access_allows_read(group_effective):
                 group_allowed = True
                 break
 
@@ -2195,22 +2201,26 @@ def _kb_file_access_badges(db: Session, file_rec: KBFile) -> dict[str, str]:
     client_effective = resolve_kb_acl_access(file_rules, client_principals, client_base)
 
     client_group_only = False
-    if client_effective not in {"read", "write", "admin"}:
+    if not kb_access_allows_read(client_effective):
         has_client_group_rule = any(
-            principal_type == "group" and access_level in {"read", "write", "admin"}
+            principal_type == "group" and kb_access_allows_read(access_level)
             for principal_type, _principal_id, access_level in (folder_rules + file_rules)
         )
         if has_client_group_rule:
             client_group_only = True
 
-    if staff_effective in {"write", "admin"}:
-        staff_badge = "staff_admin"
+    if kb_access_allows_manage(staff_effective):
+        staff_badge = "staff_manage"
+    elif kb_access_allows_edit(staff_effective):
+        staff_badge = "staff_edit"
+    elif kb_access_allows_upload(staff_effective):
+        staff_badge = "staff_upload"
     elif staff_effective == "read":
         staff_badge = "staff_read"
     else:
         staff_badge = "staff_none"
 
-    if client_effective in {"read", "write", "admin"}:
+    if kb_access_allows_read(client_effective):
         client_badge = "client_all"
     elif client_group_only:
         client_badge = "client_groups"
@@ -2231,16 +2241,20 @@ def _kb_folder_access_badges(db: Session, folder_id: int) -> dict[str, str]:
     staff_effective = resolve_kb_acl_access(rules, staff_principals, default_kb_access_for_role("member"))
     client_effective = resolve_kb_acl_access(rules, client_principals, default_kb_access_for_role("client"))
     client_group_only = (
-        client_effective not in {"read", "write", "admin"}
-        and any(principal_type == "group" and access_level in {"read", "write", "admin"} for principal_type, _pid, access_level in rules)
+        not kb_access_allows_read(client_effective)
+        and any(principal_type == "group" and kb_access_allows_read(access_level) for principal_type, _pid, access_level in rules)
     )
-    if staff_effective in {"write", "admin"}:
-        staff_badge = "staff_admin"
+    if kb_access_allows_manage(staff_effective):
+        staff_badge = "staff_manage"
+    elif kb_access_allows_edit(staff_effective):
+        staff_badge = "staff_edit"
+    elif kb_access_allows_upload(staff_effective):
+        staff_badge = "staff_upload"
     elif staff_effective == "read":
         staff_badge = "staff_read"
     else:
         staff_badge = "staff_none"
-    if client_effective in {"read", "write", "admin"}:
+    if kb_access_allows_read(client_effective):
         client_badge = "client_all"
     elif client_group_only:
         client_badge = "client_groups"
@@ -2508,7 +2522,7 @@ async def create_account_for_bitrix_portal(
         user_id=int(app_user_id),
         role="owner",
         status="active",
-        kb_access="write",
+        kb_access="manage",
         can_invite_users=True,
         can_manage_settings=True,
         can_view_finance=True,

@@ -248,6 +248,7 @@ export function WebIntegrationsPage() {
               <label className="flex items-center gap-2 text-sm text-slate-700">
                 <input
                   type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                   checked={staffConfig.enabled}
                   onChange={(e) => setStaffConfig((prev) => ({ ...prev, enabled: e.target.checked }))}
                 />
@@ -256,6 +257,7 @@ export function WebIntegrationsPage() {
               <label className="flex items-center gap-2 text-sm text-slate-700">
                 <input
                   type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                   checked={staffConfig.allow_uploads}
                   onChange={(e) => setStaffConfig((prev) => ({ ...prev, allow_uploads: e.target.checked }))}
                 />
@@ -288,6 +290,7 @@ export function WebIntegrationsPage() {
                   <label className="flex items-center gap-2 text-sm text-slate-700">
                     <input
                       type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                       checked={clientConfig.enabled}
                       onChange={(e) => setClientConfig((prev) => ({ ...prev, enabled: e.target.checked }))}
                     />
@@ -296,6 +299,7 @@ export function WebIntegrationsPage() {
                   <label className="flex items-center gap-2 text-sm text-slate-700">
                     <input
                       type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                       checked={clientConfig.allow_uploads}
                       onChange={(e) => setClientConfig((prev) => ({ ...prev, allow_uploads: e.target.checked }))}
                     />
@@ -326,11 +330,11 @@ export function WebIntegrationsPage() {
                   <UpgradeNoticeBar {...UPGRADE_COPY.telegramClient} planName={planName} compact />
                   <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50/60 p-4 opacity-70">
                     <label className="flex items-center gap-2 text-sm text-slate-700">
-                      <input type="checkbox" checked={clientConfig.enabled} disabled onChange={() => null} />
+                      <input type="checkbox" className="h-4 w-4 rounded border-slate-300 accent-sky-600" checked={clientConfig.enabled} disabled onChange={() => null} />
                       Бот для клиентов (RAG: client)
                     </label>
                     <label className="flex items-center gap-2 text-sm text-slate-700">
-                      <input type="checkbox" checked={clientConfig.allow_uploads} disabled onChange={() => null} />
+                      <input type="checkbox" className="h-4 w-4 rounded border-slate-300 accent-sky-600" checked={clientConfig.allow_uploads} disabled onChange={() => null} />
                       Разрешить загрузку файлов
                     </label>
                     {clientConfig.token_masked && <div className="text-xs text-slate-500">Токен: {clientConfig.token_masked}</div>}

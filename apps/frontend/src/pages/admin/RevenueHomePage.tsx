@@ -214,7 +214,7 @@ export function RevenueHomePage() {
                 <input className="rounded-xl border border-slate-200 px-3 py-2" placeholder="price_month" value={planForm.price_month} onChange={(e) => setPlanForm({ ...planForm, price_month: e.target.value })} />
                 <input className="rounded-xl border border-slate-200 px-3 py-2" placeholder="currency" value={planForm.currency} onChange={(e) => setPlanForm({ ...planForm, currency: e.target.value })} />
               </div>
-              <label className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={planForm.is_active} onChange={(e) => setPlanForm({ ...planForm, is_active: e.target.checked })} />План активен</label>
+              <label className="flex items-center gap-2 text-sm text-slate-700"><input className="h-4 w-4 rounded border-slate-300 accent-sky-600" type="checkbox" checked={planForm.is_active} onChange={(e) => setPlanForm({ ...planForm, is_active: e.target.checked })} />План активен</label>
               <div className="grid gap-4 xl:grid-cols-2">
                 <textarea className="h-56 rounded-xl border border-slate-200 px-3 py-2 font-mono text-xs" value={planForm.limits} onChange={(e) => setPlanForm({ ...planForm, limits: e.target.value })} />
                 <textarea className="h-56 rounded-xl border border-slate-200 px-3 py-2 font-mono text-xs" value={planForm.features} onChange={(e) => setPlanForm({ ...planForm, features: e.target.value })} />

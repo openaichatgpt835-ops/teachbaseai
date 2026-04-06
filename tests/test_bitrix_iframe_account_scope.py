@@ -959,7 +959,7 @@ def test_bitrix_folder_and_file_acl_api_and_effective_preview(test_db_session):
         put_file = client.put(
             f"/v1/bitrix/portals/{portal_b.id}/kb/files/{file_rec.id}/access",
             headers={"Authorization": "Bearer tok"},
-            json={"items": [{"principal_type": "membership", "principal_id": "42", "access_level": "write"}]},
+            json={"items": [{"principal_type": "membership", "principal_id": "42", "access_level": "edit"}]},
         )
         get_folder = client.get(
             f"/v1/bitrix/portals/{portal_b.id}/kb/folders/{folder.id}/access",
@@ -986,7 +986,7 @@ def test_bitrix_folder_and_file_acl_api_and_effective_preview(test_db_session):
     assert test_db_session.query(KBFolderAccess).filter(KBFolderAccess.folder_id == folder.id).count() == 1
     assert test_db_session.query(KBFileAccess).filter(KBFileAccess.file_id == file_rec.id).count() == 1
     assert preview.json()["folder_access"] == "read"
-    assert preview.json()["effective_access"] == "write"
+    assert preview.json()["effective_access"] == "edit"
 
 
 @pytest.mark.timeout(10)

@@ -175,7 +175,7 @@ def test_bitrix_link_precheck_blocks_attach_by_plan_limit(test_db_session):
     test_db_session.add(
         AccountPermission(
             membership_id=membership.id,
-            kb_access="write",
+            kb_access="edit",
             can_invite_users=True,
             can_manage_settings=True,
             can_view_finance=True,
@@ -253,7 +253,7 @@ def test_bitrix_link_precheck_allows_attach_on_senior_plan(test_db_session):
     test_db_session.add(
         AccountPermission(
             membership_id=membership.id,
-            kb_access="write",
+            kb_access="edit",
             can_invite_users=True,
             can_manage_settings=True,
             can_view_finance=True,
@@ -387,7 +387,7 @@ def test_bitrix_attach_existing_action_links_second_portal_without_detach(test_d
     test_db_session.add(
         AccountPermission(
             membership_id=membership.id,
-            kb_access="write",
+            kb_access="edit",
             can_invite_users=True,
             can_manage_settings=True,
             can_view_finance=True,
@@ -475,7 +475,7 @@ def test_bitrix_embedded_session_returns_web_session_for_linked_account(test_db_
     test_db_session.add(
         AccountPermission(
             membership_id=membership.id,
-            kb_access="write",
+            kb_access="edit",
             can_invite_users=True,
             can_manage_settings=True,
             can_view_finance=True,

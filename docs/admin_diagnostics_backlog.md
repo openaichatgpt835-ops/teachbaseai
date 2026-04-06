@@ -1,256 +1,258 @@
 # Product Backlog (Unified)
 
-Дата обновления: 2026-03-10
-Владелец: Product + Engineering
+Updated: 2026-04-06
+Owner: Product + Engineering
 
-## Принципы приоритизации
+## Priority Rules
 
-1. `P0` — блокеры стабильности, безопасности и денег.
-2. `P1` — задачи с прямым влиянием на выручку/управляемость продукта.
-3. `P1.5` — архитектурные и UX-улучшения без критического влияния на текущую выручку.
-4. `P2` — важные, но отложенные инициативы.
-5. `P3` — исследовательские/отраслевые расширения.
+1. `P0` - blockers for stability, security, or money.
+2. `P1` - direct impact on revenue or product control.
+3. `P1.5` - architecture and UX improvements without immediate revenue impact.
+4. `P2` - important but deferrable initiatives.
+5. `P3` - exploratory or vertical expansions.
 
 ---
 
-## P0 (высший приоритет)
+## P0
 
-### 1) Security audit хоста и админ-периметра
-- Провести живой аудит: порты, firewall, SSH hardening, права на `.env`, изоляция postgres/redis, доступность admin только через localhost.
-- Подготовить отчет `current state + gaps + remediation plan`.
-- Ничего не менять до согласования remediation.
+### 1) Security audit of host and admin perimeter
+- Run a live audit: ports, firewall, SSH hardening, `.env` permissions, postgres/redis isolation, admin exposure only through localhost.
+- Produce `current state + gaps + remediation plan`.
+- Do not change production before remediation approval.
 
 ### 2) GigaChat auth/token reliability
-- Диагностика и фиксация процесса ротации ключа.
-- Проверка цепочки: `auth_key -> token refresh -> models/list -> kb/ask`.
-- Убрать “тихие” состояния, где `has_access_token=true`, но `auth_key` невалиден.
+- Diagnose and stabilize key rotation.
+- Verify the chain: `auth_key -> token refresh -> models/list -> kb/ask`.
+- Remove silent states where `has_access_token=true` but `auth_key` is no longer valid.
 
 ### 3) RAG quality stabilization (strict mode)
-- Убрать частичные/обрезанные ответы после фильтрации.
-- Стабилизировать логику доказательности, чтобы ответ был цельным и читабельным.
-- Снизить долю случаев, где модель уходит в нерелевантные формулировки при наличии валидного контекста.
+- Remove truncated answers after filtering.
+- Stabilize evidence-based response assembly so answers stay coherent and readable.
+- Reduce cases where the model drifts into irrelevant wording despite valid context.
 
 ---
 
-## P1 (прямое влияние на деньги и управляемость)
+## P1
 
-### 4) Admin IA foundation (updated 2026-03-20)
+### 4) Admin IA foundation
 - Target admin IA and migration order are fixed.
-- New document: `docs/admin_ia_foundation_v2.md`.
-- Next implementation slice: grouped admin shell with current pages moved into sections without behavior change.
+- Reference: `docs/admin_ia_foundation_v2.md`.
+- Next slice: grouped admin shell with current pages moved into sections without behavior change.
 
-### 4) Админка: аудит IA/UX + редизайн
-- Полный аудит текущей админ-панели: навигация, разрозненность инструментов, сценарии работы саппорта/оператора.
-- Новый IA: единый центр операций (трейсы, ошибки, очереди, порталы, биллинг, лимиты).
-- Современный UI-дизайн админки (единообразный с web-кабинетом).
+### 5) Tariffs and feature limits
+- Add tariffs to the landing page.
+- Tie tariffs to functional limits:
+  - request limits
+  - model access and model settings
+  - advanced feature access
+- Add tariff management in admin.
+- Support account-level overrides.
 
-### 5) Тарифы и ограничения функционала
-- Добавить тарифы на лендинг.
-- Связать тарифы с функциональными лимитами:
-- лимиты запросов;
-- доступ к моделям и настройкам моделей;
-- доступ к расширенным функциям (например, транскрибация/диаризация/интеграции).
-- Реализовать блок управления тарифами в админке.
-- Возможность индивидуальных override-лимитов на уровне аккаунта.
+### 6) Financial analytics and unit economics
+- Finish cost calculation by application and by account.
+- Add revenue and cost views by portal/account.
+- Add unit-economics metrics: revenue, cost-to-serve, gross margin, time dynamics.
 
-### 6) Финансовая аналитика и unit-экономика
-- Доделать расчет расходов по приложению и по аккаунтам (upgrade текущего “первого подхода”).
-- Добавить доходы/расходы по каждому порталу/аккаунту.
-- Метрики unit-экономики: выручка, cost-to-serve, валовая маржа, динамика по периодам.
-
-### 7) Analytics в продукте (ценность для HR и руководителей)
-- Доделать раздел “Аналитика” в web/iframe.
-- Сформировать полезные метрики:
-- экономия времени на поиск информации;
-- динамика обращений и скорость ответов;
-- доля закрытых запросов без эскалации;
-- прокси-метрики экономии ФОТ;
-- SLA по клиентским TG-ботам (время до ответа, доля закрытия).
+### 7) Product analytics section
+- Finish the `Analytics` section in web/iframe.
+- Define useful metrics:
+  - time saved when finding information
+  - request volume and response speed trends
+  - share of resolved requests without escalation
+  - proxy labor-cost savings metrics
+  - SLA for client Telegram bots
+- Make analytics useful for account owners and operators, not only admin/finance.
 
 ---
 
-## P1.5 (архитектура и консистентность)
+## P1.5
 
-### 8) Убрать “Конструктор” из frontend
-- Удалить пункт из web/iframe UI (без удаления backend-логики).
-- Зафиксировать как “paused/rework planned”.
+### 8) Remove `Constructor` from frontend
+- Remove the menu item from web/iframe UI without deleting backend logic.
+- Mark it as `paused / rework planned`.
 
-### 9) Привести iframe Bitrix24 к единому стеку с web
-- Миграция iframe на тот же frontend-стек, что и web, для единообразия.
-- Синхронизировать дизайн-систему, компоненты и контракты API.
-- План миграции поэтапно без деградации production.
+### 9) Bring Bitrix24 iframe to the same stack as web
+- Migrate iframe to the same frontend stack as web.
+- Converge design system, components, and API contracts.
+- Roll out in phases without degrading production.
 
-### 10) Admin diagnostics roadmap (ранее согласованный)
-- `Ошибки API` единым экраном.
-- Drill-down по `trace_id` и timeline.
-- Экспорт инцидентов (CSV/JSON).
-- KPI ошибок и latency.
-- Alerting (burst/spike).
+### 10) Admin diagnostics roadmap
+- Unified API errors screen.
+- Drill-down by `trace_id` and timeline.
+- Incident export.
+- Error and latency KPIs.
+- Alerting.
+
+### 11) KB structure and permission model
+- Real KB hierarchy:
+  - folders
+  - subfolders
+  - files in the tree
+- ACL on folders and files.
+- Department-isolated visibility.
+- `client` role / audience for client Telegram bot scenarios.
+- Retrieval must be permission-aware.
+- Deterministic sync after revoke access.
+
+### 12) KB permissions UI polish
+- Dedicated UI polish pass for `Web -> Knowledge Base` after ACL foundation is stable.
+- Check:
+  - button sizing
+  - overflow
+  - spacing
+  - action hierarchy
+  - desktop/mobile widths
+
+### 13) KB v2 redesign
+- Stop extending the old KB screen beyond critical fixes.
+- Build a new KB workspace as `KB v2`.
+- Core model:
+  - folder-first knowledge library
+  - policy-first access UX
+  - file inheritance by default
+  - file override as exception
+  - client-bot coverage as a first-class concept
+- References:
+  - `docs/kb_v2_design_spec_2026-04-01.md`
+  - `docs/kb_v2_visual_references_2026-04-01.md`
+  - `docs/kb_v2_layout_tokens_2026-04-01.md`
+
+### 14) Users & Access v2 redesign
+- Rebuild `Web -> Users & Access` as a v2 screen instead of patching the current monolith.
+- Use KB v2 style rules only as system guidance:
+  - calm header
+  - compact toolbars
+  - Russian-only UI
+  - no local scroll containers
+  - no inter-block banners
+- New IA:
+  - `People`
+  - `Groups`
+  - `Access Defaults`
+  - `Invites`
+- Make employee groups and client groups first-class sections.
+- Treat `Telegram` and `Bitrix` as user channel bindings, not separate user-creation flows.
+- Expose KB and client-bot impact clearly.
+
+### 15) KB permission model v2: visibility + editor rights
+- Extend the KB model beyond visibility ACL.
+- Split permissions into two layers:
+  - `visibility`: who can see, search, and ask over materials
+  - `editor rights`: who can add, replace, delete, organize, and change access
+- Introduce folder-first inherited editor capabilities for staff:
+  - `viewer`
+  - `contributor`
+  - `editor`
+  - `manager`
+- Support operations only where the user has rights:
+  - upload new files
+  - replace files with new versions
+  - delete files
+  - create subfolders
+  - change ACL
+- Keep client groups only for visibility, not for KB editing.
+- Reflect these rights in `Users & Access v2` as readable summaries.
+
+### 16) KB/account access defaults clarity
+- Make account-level KB defaults first-class and discoverable in UI.
+- Clearly separate:
+  - account default access
+  - membership-level access
+  - folder/file inherited visibility
+  - editor rights inherited from folder policies
+- Align product copy for:
+  - `All materials`
+  - `No folder`
+  - root spaces
+  - visibility/editor semantics
+
+### 17) Chat page redesign and UX polish
+- Audit the current `Web -> Chat` implementation before changing behavior.
+- Produce:
+  - current-state UX diagnosis
+  - target interaction model
+  - visual direction aligned with the new admin/web style
+- Redesign the chat page as a first-class product surface, not a raw message log.
+- Required focus:
+  - message hierarchy
+  - composer design
+  - empty state
+  - loading / thinking state
+  - animated feedback while the model is generating
+  - source/evidence presentation
+  - error and retry states
+- Do not add local scroll-container hacks or layout-shifting banners.
 
 ---
 
-## P2 (после P1/P1.5)
+## P2
 
-### 11) AI РОП (не в приоритете)
-- Доделка блока AI РОП.
-- Развитие подпунктов: AI Тренер / AI Аналитик.
-- Доступы и сценарии работы со сделками и аналитикой.
+### 18) Support widget with model-based chat
+- Add a support widget (`chat with the model`) for application clients.
+- The widget should answer questions using the application's own knowledge base.
+- Scope includes:
+  - widget entry point in product UI
+  - conversation surface
+  - safe fallback when the KB has no answer
+  - clear escalation path when confidence is low
+
+### 19) Application knowledge base and bot settings in admin
+- Add a separate application knowledge base in admin for product/support content.
+- Store support bot/widget settings in the same admin area.
+- Initial scope:
+  - application KB CRUD
+  - support bot settings
+  - prompt/policy/settings surface
+  - linkage between support widget and application KB
+- Backlog only for now.
+
+### 20) AI ROP
+- Continue the AI ROP block.
+- Extend AI Trainer / AI Analyst branches.
+- Define access and workflows for deals and analytics.
 
 ---
 
-## P3 (в конец списка)
+## P3
 
-### 12) Отраслевое решение для психологов
-- Отдельная регистрационная страница и позиционирование.
-- Отраслевые кейсы и контент.
-- Сценарий: запись сессии -> транскрибация -> аналитика и фидбек для психолога и ученика.
-
----
-
-## Что уже зафиксировано и не потерять
-
-- Baseline-checklist для Bitrix no-behavior-change:
-  - `docs/bitrix_no_behavior_change_checklist.md`
-- Операционные и onboarding-доки:
-  - `docs/ONBOARDING.md`
-  - `docs/AGENTS_ONBOARDING.md`
-  - `docs/OPERATIONS.md`
+### 21) Vertical solution for psychologists
+- Dedicated registration page and positioning.
+- Vertical use cases and content.
+- Flow: session recording -> transcription -> analytics and feedback.
 
 ---
 
-## Proposed execution order (next)
+## References to keep
 
-1. `P0.1` Security audit report (read-only).
+- `docs/bitrix_no_behavior_change_checklist.md`
+- `docs/ONBOARDING.md`
+- `docs/AGENTS_ONBOARDING.md`
+- `docs/OPERATIONS.md`
+- `docs/security_tech_debt_backlog.md`
+- `docs/next_execution_pool_2026-03-27.md`
+- `docs/account_native_runtime_cleanup_2026-03-27.md`
+- `docs/tech_debt_program_2026-03-27.md`
+
+---
+
+## Security Tech Debt
+
+- `SEC-R001` (P0): SSH hardening on prod with safe rollback plan.
+- `SEC-R004` (P0): Close or IP-restrict public `10050/tcp`.
+- `SEC-R002` (P1): Move deploy/runtime ops to a non-root technical user with minimal sudo.
+- `SEC-R005` (P1): Weekly automated security audit checks with report/alerts.
+- `SEC-R003` (Done): `.env` permissions fixed to `600` on prod.
+
+---
+
+## Recommended execution order
+
+1. `P0.1` Security audit report.
 2. `P0.2` GigaChat auth/token stabilization.
 3. `P0.3` RAG strict-quality stabilization.
 4. `P1.1` Admin IA/UX audit + target design.
 5. `P1.2` Tariff model + billing constraints + admin controls.
 6. `P1.3` Unit-economics dashboard and cost model finalization.
-7. `P1.4` Product analytics metrics implementation.
-8. `P1.5` Constructor hide + iframe stack migration plan/start.
-
----
-
-## Security Tech Debt (added 2026-03-11)
-
-- `SEC-R001` (P0): SSH hardening on prod (`PasswordAuthentication no`, `PermitRootLogin prohibit-password/no`) with safe rollback plan.
-- `SEC-R004` (P0): Close or IP-restrict public `10050/tcp` (zabbix-agent).
-- `SEC-R002` (P1): Move deploy/runtime ops to non-root technical user with minimal sudo.
-- `SEC-R005` (P1): Weekly automated security audit checks (ports/firewall/sshd/.env perms) with report/alerts.
-- `SEC-R003` (Done): `.env` permissions fixed to `600` on prod.
-
-Detailed checklist: `docs/security_tech_debt_backlog.md`.
-
-- [x] Admin Revenue Home: pricing, usage, top portals by recent cost, foundation under tariff model.
-
-
----
-
-## Added 2026-03-22
-
-### P1.2 Tariff system extensibility
-- Make tariff schema extensible for future features without DB redesign.
-- Keep limits/features as validated JSON with service-layer schema guard.
-- Support per-account overrides and staged rollout of new feature flags.
-- Add client-side `Тарифы и оплата` section in web UI:
-  - current plan
-  - included limits/features
-  - upgrade CTA
-  - payment/billing status hooks for future billing provider integration
-
-### P1.2 Product paywalls / locks
-- Add product-level feature gates (`locks`) driven by effective policy.
-- Support hide / disabled / teaser states per feature.
-- Cover web, admin, bots, and later iframe with the same gating contract.
-
-### P1.2 Upgrade nudges / lifecycle communication
-- Add in-product upgrade surfaces:
-  - banners
-  - side panels / drawers
-  - modal popups only where drawer is too heavy
-  - contextual CTA near locked features
-- Add onboarding / upsell chains configurable per tariff and per account segment.
-- Keep delivery logic centralized so PM can evolve flows without UI rewrites.
-- Add manual UX checks for all locked states:
-  - `1920x1080`
-  - `1440x900`
-  - `1280x720`
-  - `390x844`
-  - `360x800`
-- Rule: paywalls, drawers, tooltips, and popups must stay inside viewport on Full HD and mobile widths.
-
-### P1.5 Bitrix iframe redesign parity
-- Bring Bitrix iframe visual language to the same design system as web.
-- Converge layout, typography, cards, states, and navigation patterns.
-- Do this as phased UI migration, preserving existing iframe production flows.
-
-### P1.5 Account-first Bitrix architecture cleanup
-- Treat `Account` as the only business source of truth for product data and settings.
-- Treat Bitrix `Portal` only as an integration leaf under `Account`.
-- Treat `primary portal` only as a transitional technical carrier while KB/settings are still physically keyed by `portal_id`.
-- Plan the full detachment of KB/settings/runtime context from `portal_id` to native `account_id`.
-
-### 2026-03-27 execution pool
-- Current execution pool is fixed in `docs/next_execution_pool_2026-03-27.md`.
-- This pool supersedes ad-hoc iframe parity fixes and groups the next slices into:
-  - embedded parity hardening
-  - Bitrix-only users refinement
-  - billing parity completion
-  - account-native runtime cleanup
-  - iframe-vue removal (done)
-- Runtime cleanup inventory is fixed in:
-  - `docs/account_native_runtime_cleanup_2026-03-27.md`
-- Tech debt lane is fixed in:
-  - `docs/tech_debt_program_2026-03-27.md`
-
-### P1.5 KB structure and permission model
-- Add real KB hierarchy:
-  - folders
-  - subfolders
-  - files inside folder tree
-- Add access control on folder and file level.
-- Support department-isolated visibility:
-  - employee sees only files available to their department / role
-  - shared files remain visible where explicitly allowed
-- Add `client` role / audience for client-facing Telegram bot scenarios.
-- Retrieval must be permission-aware:
-  - search / ask only across files accessible to the current user
-  - removing access from a file must immediately remove that file from retrieval scope
-- Define runtime semantics for revoked access:
-  - no stale search hits from revoked files
-  - deterministic permission sync / cache invalidation / reindex behaviour
-
-### P1.5 KB permissions UI polish
-- After ACL foundation is stable, do a dedicated UI polish pass for `Web -> База знаний`:
-  - fix button sizing consistency
-  - fix layout overflow / elements leaving viewport
-  - align spacing and action hierarchy
-  - make folder/file access editor visually stable on desktop and mobile widths
-- Treat current ACL UI as functional foundation, not final UX.
-- Verify on:
-  - `1920x1080`
-  - `1440x900`
-  - `1280x720`
-  - `390x844`
-  - `360x800`
-
-### P1.5 KB v2 redesign
-- Stop extending the current KB screen beyond critical fixes.
-- Build a new KB workspace from scratch as `KB v2`.
-- Core direction:
-  - folder-first knowledge library
-  - policy-first access UX
-  - file inheritance by default
-  - file override as an exception
-  - client-bot coverage as a first-class concept
-- Include onboarding:
-  - first-open modal
-  - first access-edit modal
-  - client policy hint
-  - bulk change impact confirm
-- Design spec is fixed in:
-  - `docs/kb_v2_design_spec_2026-04-01.md`
-- KB v2 visual references and moodboard are fixed in:
-  - `docs/kb_v2_visual_references_2026-04-01.md`
-- KB v2 layout tokens are fixed in:
-  - `docs/kb_v2_layout_tokens_2026-04-01.md`
+7. `P1.4` Product analytics implementation.
+8. `P1.5` Users & Access v2 + KB permission model v2 scoping.
+9. `P1.6` Support widget and application KB admin scoping.

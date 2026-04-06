@@ -700,7 +700,7 @@ export function WebUsersPage() {
                       <span className="block truncate text-sm text-slate-800">{u.display_name || u.web?.email || "Без имени"}</span>
                       <span className="text-[11px] text-slate-500">{roleLabel(u.role)}</span>
                     </span>
-                    <input
+                    <input className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                       type="checkbox"
                       checked={groupMembershipIds.includes(u.membership_id)}
                       disabled={!canManageSettings}
@@ -965,16 +965,16 @@ export function WebUsersPage() {
                   </td>
                   <td className="px-3 py-2">
                     <div className="flex flex-wrap gap-3 text-xs text-slate-600">
-                      <label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!u.permissions.can_invite_users} disabled={u.role === "owner" || !canManageSettings} onChange={(e) => patchMembership(u.membership_id, { can_invite_users: e.target.checked })} /> Приглашения</label>
-                      <label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!u.permissions.can_manage_settings} disabled={u.role === "owner" || !canManageSettings} onChange={(e) => patchMembership(u.membership_id, { can_manage_settings: e.target.checked })} /> Настройки</label>
-                      <label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!u.permissions.can_view_finance} disabled={u.role === "owner" || !canManageSettings} onChange={(e) => patchMembership(u.membership_id, { can_view_finance: e.target.checked })} /> Финансы</label>
+                      <label className="inline-flex items-center gap-1"><input className="h-4 w-4 rounded border-slate-300 accent-sky-600" type="checkbox" checked={!!u.permissions.can_invite_users} disabled={u.role === "owner" || !canManageSettings} onChange={(e) => patchMembership(u.membership_id, { can_invite_users: e.target.checked })} /> Приглашения</label>
+                      <label className="inline-flex items-center gap-1"><input className="h-4 w-4 rounded border-slate-300 accent-sky-600" type="checkbox" checked={!!u.permissions.can_manage_settings} disabled={u.role === "owner" || !canManageSettings} onChange={(e) => patchMembership(u.membership_id, { can_manage_settings: e.target.checked })} /> Настройки</label>
+                      <label className="inline-flex items-center gap-1"><input className="h-4 w-4 rounded border-slate-300 accent-sky-600" type="checkbox" checked={!!u.permissions.can_view_finance} disabled={u.role === "owner" || !canManageSettings} onChange={(e) => patchMembership(u.membership_id, { can_view_finance: e.target.checked })} /> Финансы</label>
                     </div>
                   </td>
                   <td className="px-3 py-2">
                     {u.access_center?.bitrix_linked ? (
                       <div className="space-y-2 text-xs text-slate-600">
                         <label className="inline-flex items-center gap-2">
-                          <input
+                          <input className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                             type="checkbox"
                             checked={!!u.access_center?.bitrix_allowlist}
                             disabled={!canManageSettings}

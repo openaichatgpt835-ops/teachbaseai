@@ -20,6 +20,11 @@ from apps.backend.models.account import (
 from apps.backend.models.portal import Portal
 from apps.backend.models.web_user import WebUser
 from apps.backend.services.account_workspace import build_unique_account_slug
+from apps.backend.services.kb_acl import (
+    kb_access_allows_edit,
+    kb_access_allows_read,
+    normalize_kb_access_level,
+)
 
 
 @dataclass
@@ -175,7 +180,7 @@ def ensure_rbac_for_web_user(
     if not perm:
         perm = AccountPermission(
             membership_id=int(membership.id),
-            kb_access="write" if owner_mode else "read",
+            kb_access="manage" if owner_mode else "read",
             can_invite_users=bool(owner_mode),
             can_manage_settings=bool(owner_mode),
             can_view_finance=bool(owner_mode),
@@ -184,11 +189,11 @@ def ensure_rbac_for_web_user(
         db.add(perm)
     else:
         if owner_mode:
-            perm.kb_access = "write"
+            perm.kb_access = "manage"
             perm.can_invite_users = True
             perm.can_manage_settings = True
             perm.can_view_finance = True
-        elif perm.kb_access not in ("read", "write"):
+        elif normalize_kb_access_level(perm.kb_access) == "none":
             perm.kb_access = "read"
         perm.updated_at = now
         db.add(perm)
@@ -289,7 +294,7 @@ def ensure_account_member(
         db.add(
             AccountPermission(
                 membership_id=int(membership.id),
-                kb_access=(kb_access or "none").strip().lower() or "none",
+                kb_access=normalize_kb_access_level(kb_access),
                 can_invite_users=bool(can_invite_users),
                 can_manage_settings=bool(can_manage_settings),
                 can_view_finance=bool(can_view_finance),
@@ -331,7 +336,7 @@ def get_membership_ctx(db: Session, account_id: int, web_user: WebUser) -> Membe
         account_id=int(account_id),
         app_user_id=int(app_user_id),
         role=str(membership.role or "member"),
-        kb_access=str((perm.kb_access if perm else None) or "none"),
+        kb_access=normalize_kb_access_level(str((perm.kb_access if perm else None) or "none")),
         can_invite_users=bool(perm.can_invite_users) if perm else False,
         can_manage_settings=bool(perm.can_manage_settings) if perm else False,
         can_view_finance=bool(perm.can_view_finance) if perm else False,
@@ -368,12 +373,12 @@ def require_finance_permission(ctx: MembershipCtx) -> None:
 
 
 def require_kb_read_permission(ctx: MembershipCtx) -> None:
-    if ctx.kb_access in ("read", "write") or is_owner_or_admin(ctx):
+    if kb_access_allows_read(ctx.kb_access) or is_owner_or_admin(ctx):
         return
     raise HTTPException(status_code=403, detail="forbidden")
 
 
 def require_kb_write_permission(ctx: MembershipCtx) -> None:
-    if ctx.kb_access == "write" or is_owner_or_admin(ctx):
+    if kb_access_allows_edit(ctx.kb_access) or is_owner_or_admin(ctx):
         return
     raise HTTPException(status_code=403, detail="forbidden")

@@ -30,7 +30,12 @@ from apps.backend.services.telegram_settings import (
     get_portal_telegram_token_plain,
 )
 from apps.backend.services.kb_storage import ensure_portal_dir
-from apps.backend.services.kb_acl import default_kb_access_for_role, kb_acl_principals_for_membership, resolve_kb_acl_access
+from apps.backend.services.kb_acl import (
+    default_kb_access_for_role,
+    kb_access_allows_read,
+    kb_acl_principals_for_membership,
+    resolve_kb_acl_access,
+)
 from apps.backend.clients.telegram import telegram_get_file, telegram_download_file
 from apps.backend.config import get_settings
 
@@ -195,7 +200,7 @@ def _filter_file_ids_by_kb_acl(
         if folder_id is not None:
             inherited = resolve_kb_acl_access(folder_acl_map.get(int(folder_id), []), principals, inherited)
         effective = resolve_kb_acl_access(file_acl_map.get(int(file_id), []), principals, inherited)
-        if effective in {"read", "write", "admin"}:
+        if kb_access_allows_read(effective):
             allowed.add(int(file_id))
     return allowed
 

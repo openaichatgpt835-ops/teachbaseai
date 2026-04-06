@@ -335,6 +335,7 @@ export function WebSettingsPage() {
             <label className="flex items-center gap-2 text-sm text-slate-700">
               <input
                 type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                 checked={kbSettings.media_transcription_enabled}
                 onChange={(e) => setKbSettings((prev) => ({ ...prev, media_transcription_enabled: e.target.checked }))}
                 disabled={!kbSettings.media_transcription_available}
@@ -344,6 +345,7 @@ export function WebSettingsPage() {
             <label className="flex items-center gap-2 text-sm text-slate-700">
               <input
                 type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                 checked={kbSettings.speaker_diarization_enabled}
                 onChange={(e) => setKbSettings((prev) => ({ ...prev, speaker_diarization_enabled: e.target.checked }))}
                 disabled={!kbSettings.media_transcription_enabled || !kbSettings.speaker_diarization_available}
@@ -360,6 +362,7 @@ export function WebSettingsPage() {
             <label className="flex items-center gap-2 text-sm text-slate-700">
               <input
                 type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                 checked={kbSettings.collections_multi_assign}
                 onChange={(e) => setKbSettings((prev) => ({ ...prev, collections_multi_assign: e.target.checked }))}
               />
@@ -395,6 +398,7 @@ export function WebSettingsPage() {
           <label className="flex items-center gap-2 text-sm text-slate-700">
             <input
               type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-sky-600"
               checked={kbSettings.show_sources}
               onChange={(e) => setKbSettings((prev) => ({ ...prev, show_sources: e.target.checked }))}
             />
@@ -416,6 +420,7 @@ export function WebSettingsPage() {
           <label className="flex items-center gap-2 text-sm text-slate-700">
             <input
               type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-sky-600"
               checked={kbSettings.use_history}
               onChange={(e) => setKbSettings((prev) => ({ ...prev, use_history: e.target.checked }))}
             />
@@ -446,6 +451,7 @@ export function WebSettingsPage() {
           <label className="flex items-center gap-2 text-sm text-slate-700">
             <input
               type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-sky-600"
               checked={kbSettings.strict_mode}
               onChange={(e) => setKbSettings((prev) => ({ ...prev, strict_mode: e.target.checked }))}
             />
@@ -455,6 +461,7 @@ export function WebSettingsPage() {
           <label className="flex items-center gap-2 text-sm text-slate-700">
             <input
               type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-sky-600"
               checked={kbSettings.allow_general}
               onChange={(e) => setKbSettings((prev) => ({ ...prev, allow_general: e.target.checked }))}
             />
@@ -464,6 +471,7 @@ export function WebSettingsPage() {
           <label className="flex items-center gap-2 text-sm text-slate-700">
             <input
               type="checkbox"
+                className="h-4 w-4 rounded border-slate-300 accent-sky-600"
               checked={kbSettings.use_cache}
               onChange={(e) => setKbSettings((prev) => ({ ...prev, use_cache: e.target.checked }))}
             />

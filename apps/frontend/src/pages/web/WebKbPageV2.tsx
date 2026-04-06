@@ -14,8 +14,10 @@ import {
 } from "lucide-react";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
+import { HelpTriggerButton } from "../../components/ui/HelpTriggerButton";
 import { InspectorPanel } from "../../components/ui/InspectorPanel";
 import { Panel, PanelBody, PanelHeader } from "../../components/ui/Panel";
+import { ToastNotice } from "../../components/ui/ToastNotice";
 import { WorkspaceSplit } from "../../components/ui/WorkspaceSplit";
 import { fetchPortal, fetchWeb, getActiveAccountId, getWebPortalInfo } from "./auth";
 
@@ -332,7 +334,9 @@ function buildOfficeViewerUrl(rawUrl: string | null | undefined) {
 
 function accessBadgeMeta(kind: "staff" | "client", value?: string) {
   if (kind === "staff") {
-    if (value === "staff_admin") return { label: "Сотрудники: администрирование", shortLabel: "С: админ", tone: "emerald" as const };
+    if (value === "staff_manage") return { label: "Сотрудники: управление доступом", shortLabel: "С: доступ", tone: "emerald" as const };
+    if (value === "staff_edit") return { label: "Сотрудники: редактирование", shortLabel: "С: редакт.", tone: "amber" as const };
+    if (value === "staff_upload") return { label: "Сотрудники: загрузка", shortLabel: "С: загрузка", tone: "fuchsia" as const };
     if (value === "staff_read") return { label: "Сотрудники: чтение", shortLabel: "С: чтение", tone: "sky" as const };
     return { label: "Сотрудники: закрыто", shortLabel: "С: закрыто", tone: "rose" as const };
   }
@@ -353,15 +357,17 @@ function compactTone(tone: "neutral" | "sky" | "emerald" | "amber" | "rose" | "f
 }
 
 function effectiveAccessLabel(value: string) {
-  if (value === "admin") return "администрирование";
-  if (value === "write") return "изменение";
+  if (value === "manage") return "управление доступом";
+  if (value === "edit") return "редактирование";
+  if (value === "upload") return "загрузка";
   if (value === "read") return "чтение";
   return "нет";
 }
 
-function effectiveAccessTone(value: string): "neutral" | "sky" | "emerald" | "amber" | "rose" {
-  if (value === "admin") return "emerald";
-  if (value === "write") return "amber";
+function effectiveAccessTone(value: string): "neutral" | "sky" | "emerald" | "amber" | "rose" | "fuchsia" {
+  if (value === "manage") return "emerald";
+  if (value === "edit") return "amber";
+  if (value === "upload") return "fuchsia";
   if (value === "read") return "sky";
   return "rose";
 }
@@ -374,7 +380,7 @@ function folderPolicySummary(items: KbAclItem[], groups: KbAccountGroup[]) {
     .filter((group): group is KbAccountGroup => !!group && group.kind === "client");
   if (items.some((item) => item.principal_type === "audience" && item.principal_id === "client" && item.access_level !== "none")) return "Открыто всем клиентам";
   if (clientGroups.length) return `Только клиентская группа: ${clientGroups.map((group) => group.name).join(", ")}`;
-  if (items.some((item) => item.principal_type === "role" && item.principal_id === "member" && item.access_level === "read")) return "Открыто сотрудникам";
+  if (items.some((item) => item.principal_type === "role" && item.principal_id === "member" && item.access_level !== "none")) return "Открыто сотрудникам";
   return "Настроены явные ограничения";
 }
 
@@ -394,14 +400,14 @@ function clientVisibilityCategory(value?: string) {
 }
 
 function hasExplicitFileRules(file: KbFile) {
-  return file.access_badges?.client === "client_groups" || file.access_badges?.client === "client_all" || file.access_badges?.staff === "staff_admin";
+  return file.access_badges?.client === "client_groups" || file.access_badges?.client === "client_all" || ["staff_manage", "staff_edit", "staff_upload"].includes(String(file.access_badges?.staff || ""));
 }
 
 function kbAclTemplate(template: KbTemplate, options?: { groupId?: number | null }): KbAclDraftItem[] {
   if (template === "inherit") return [];
   const base: KbAclDraftItem[] = [
-    { principal_type: "role", principal_id: "owner", access_level: "admin" },
-    { principal_type: "role", principal_id: "admin", access_level: "admin" },
+    { principal_type: "role", principal_id: "owner", access_level: "manage" },
+    { principal_type: "role", principal_id: "admin", access_level: "edit" },
   ];
   if (template === "staff") {
     return [...base, { principal_type: "role", principal_id: "member", access_level: "read" }];
@@ -1117,6 +1123,41 @@ export function WebKbPageV2() {
     });
   };
 
+  const reindexFile = async (fileId: number) => {
+    if (!portalId || !portalToken) return;
+    setActionMessage("Переиндексирую материал...");
+    try {
+      const res = await fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${fileId}/reindex`, { method: "POST" });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(String(data?.error || data?.detail || "reindex_failed"));
+      await loadKbData();
+      refreshSelection();
+      if (selection?.kind === "file" && selection.id === fileId) {
+        const [accessRes, staffRes, clientRes] = await Promise.all([
+          fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${fileId}/access`),
+          fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${fileId}/access/effective?role=member&audience=staff`),
+          fetchPortal(`/api/v1/bitrix/portals/${portalId}/kb/files/${fileId}/access/effective?role=client&audience=client`),
+        ]);
+        const [accessData, staffData, clientData] = await Promise.all([
+          accessRes.json().catch(() => null),
+          staffRes.json().catch(() => null),
+          clientRes.json().catch(() => null),
+        ]);
+        setDetails({
+          loading: false,
+          folderAccess: [],
+          fileAccess: Array.isArray(accessData?.items) ? accessData.items : [],
+          folderCoverage: EMPTY_SUMMARY,
+          effectiveStaff: String(staffData?.effective_access || "read"),
+          effectiveClient: String(clientData?.effective_access || "none"),
+        });
+      }
+      setActionMessage("Материал отправлен на переиндексацию.");
+    } catch (error: any) {
+      setActionMessage(String(error?.message || "reindex_failed"));
+    }
+  };
+
   const confirmDelete = async () => {
     if (!portalId || !portalToken || !deleteDialog.open) return;
     setActionMessage(deleteDialog.kind === "folder" ? "Удаляю папку..." : "Удаляю материалы...");
@@ -1265,12 +1306,9 @@ export function WebKbPageV2() {
       />
       <PageShellHeader onOpenOnboarding={() => setOnboardingOpen(true)} onOpenInfo={() => setKnowledgeInfoOpen(true)} />
       {error ? <Panel tone="elevated" className="border-rose-200 bg-rose-50"><PanelBody className="mt-0 text-sm text-rose-700">{error}</PanelBody></Panel> : null}
-      {actionMessage ? (
-        <div className="pointer-events-none fixed right-8 top-20 z-40 flex max-w-[420px] items-start gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-[0_12px_30px_rgba(15,23,42,0.12)]">
-          <div className="min-w-0 flex-1 leading-6">{actionMessage}</div>
-          <button type="button" className="pointer-events-auto text-slate-400 transition hover:text-slate-700" onClick={() => setActionMessage("")}><X className="h-4 w-4" /></button>
-        </div>
-      ) : null}
+      <div className="pointer-events-none fixed right-8 top-20 z-40">
+        <ToastNotice message={actionMessage} onClose={() => setActionMessage("")} />
+      </div>
       <WorkspaceSplit
         className="gap-4 xl:grid-cols-[304px_minmax(0,1fr)_400px]"
         sidebar={<LibraryRail rootSpace={rootSpace} expandedRootSpace={expandedRootSpace} onRootSpaceChange={(value) => { setRootSpace(value); setExpandedRootSpace((current) => current === value ? null : value); setSelection(null); setRootFilesMode(false); setMode("overview"); }} folders={folders} folderMap={folderMap} childrenMap={childrenMap} expanded={expanded} selection={selection} rootFilesMode={rootFilesMode} onToggle={(id) => setExpanded((current) => ({ ...current, [id]: !current[id] }))} onSelectFolder={(id) => { const folder = folderMap.get(id); setRootFilesMode(false); setSelection({ kind: "folder", id }); setMode("overview"); if (folder) { const folderRootSpace = rootSpaceForFolder(folder, folderMap); setRootSpace(folderRootSpace); setExpandedRootSpace(folderRootSpace); } }} onSelectRootFiles={() => { setSelection(null); setRootFilesMode(true); setMode("overview"); setExpandedRootSpace(rootSpace); }} onOpenUploadDialog={openUploadDialog} onCreateFolder={createFolder} rootStats={rootStats} rootFileCounts={rootFileCounts} dragOverFolderId={dragOverFolderId} onDragEnterFolder={onDragEnterFolder} onDragLeaveFolder={onDragLeaveFolder} onDropToFolder={onDropToFolder} setActionMessage={setActionMessage} draggedFileId={draggedFileId} selectedFileIds={selectedFileIds} onRequestMoveFilesToFolder={requestMoveFilesToFolder} spaceRoots={spaceRoots} />}
@@ -1283,7 +1321,7 @@ export function WebKbPageV2() {
             mode={mode}
             modes={selection ? [{ value: "overview", label: "Обзор" }, { value: "access", label: "Доступ" }] : undefined}
             onModeChange={selection ? (value) => setMode(value as InspectorMode) : undefined}
-            actions={selection ? <div className="flex flex-wrap items-center gap-2">{selectedFolder ? <><Button size="sm" variant="secondary" onClick={() => void renameFolder(selectedFolder.id)}>Переименовать</Button><Button size="sm" variant="danger" onClick={() => void deleteFolder(selectedFolder.id)}>Удалить</Button></> : null}{selectedFile ? <Button size="sm" variant="danger" onClick={() => void deleteFiles([selectedFile.id])}>Удалить</Button> : null}<Button size="sm" variant="ghost" onClick={() => { setSelection(null); setMode("overview"); }}>Очистить</Button></div> : undefined}
+            actions={selection ? <div className="flex flex-wrap items-center gap-2">{selectedFolder ? <><Button size="sm" variant="secondary" onClick={() => void renameFolder(selectedFolder.id)}>Переименовать</Button><Button size="sm" variant="danger" onClick={() => void deleteFolder(selectedFolder.id)}>Удалить</Button></> : null}<Button size="sm" variant="ghost" onClick={() => { setSelection(null); setMode("overview"); }}>Очистить</Button></div> : undefined}
           >
             {bulkAccessOpen && selectedFileIds.length ? (<BulkAccessShell selectedCount={selectedFileIds.length} draft={bulkAccessDraft} groups={groups} staffGroups={staffGroups} clientGroups={clientGroups} templateStaffGroupId={templateStaffGroupId} templateClientGroupId={templateClientGroupId} onTemplateStaffGroupIdChange={setTemplateStaffGroupId} onTemplateClientGroupIdChange={setTemplateClientGroupId} onApplyTemplate={applyBulkTemplate} onSave={saveBulkAccessDraft} saving={detailsSaving} message={detailsMessage} />) : !selection ? (
               <EmptyInspector />
@@ -1310,7 +1348,7 @@ export function WebKbPageV2() {
               )
             ) : selectedFile ? (
               mode === "overview" ? (
-                <FileOverview file={selectedFile} folderMap={folderMap} access={details.fileAccess} effectiveStaff={details.effectiveStaff} effectiveClient={details.effectiveClient} loading={details.loading} groups={groups} />
+                <FileOverview file={selectedFile} folderMap={folderMap} access={details.fileAccess} effectiveStaff={details.effectiveStaff} effectiveClient={details.effectiveClient} loading={details.loading} groups={groups} onReindex={() => void reindexFile(selectedFile.id)} onDelete={() => void deleteFiles([selectedFile.id])} detailsSaving={detailsSaving} />
               ) : (
                 <FileAccessShell
                   file={selectedFile}
@@ -1351,7 +1389,7 @@ function PageShellHeader(props: { onOpenOnboarding: () => void; onOpenInfo: () =
             </button>
           </div>
         </div>
-        <Button size="sm" variant="secondary" onClick={props.onOpenOnboarding} className="shrink-0"><PlayCircle className="mr-2 h-4 w-4" /> Как это работает</Button>
+        <HelpTriggerButton onClick={props.onOpenOnboarding} className="shrink-0" />
       </div>
     </div>
   );
@@ -1664,8 +1702,8 @@ function FolderOverview(props: { folder: KbFolder; folderMap: Map<number, KbFold
   return <div className="space-y-4"><OverviewLabel title="Обзор папки" /><div className="space-y-3"><div><div className="text-xl font-semibold text-slate-950">{props.folder.name}</div><div className="mt-1 text-sm text-slate-500">{buildFolderPath(props.folder.id, props.folderMap)}</div></div><AccessBadges target={props.folder} /><div className="border-t border-slate-200 pt-3"><div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Сводка политики</div><div className="mt-2 text-sm font-medium text-slate-900">{folderPolicySummary(props.access, props.groups)}</div><div className="mt-2 text-sm leading-6 text-slate-500">{props.access.length ? "Папка задаёт доступ для всей ветки. Новые файлы наследуют эти правила, пока на них не создадут отдельное исключение." : "На папке нет собственных правил. Сейчас действует базовый доступ аккаунта."}</div></div><CoverageMiniList summary={props.coverage} loading={props.loading} /></div></div>;
 }
 
-function FileOverview(props: { file: KbFile; folderMap: Map<number, KbFolder>; access: KbAclItem[]; effectiveStaff: string; effectiveClient: string; loading: boolean; groups: KbAccountGroup[] }) {
-  return <div className="space-y-4"><OverviewLabel title="Обзор файла" /><div className="space-y-3"><div><div className="text-xl font-semibold text-slate-950">{props.file.filename}</div><div className="mt-1 text-sm text-slate-500">{buildFolderPath(props.file.folder_id ?? null, props.folderMap)}</div></div><AccessBadges target={props.file} /><div className="border-t border-slate-200 pt-3"><div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Режим файла</div><div className="mt-2 text-sm font-medium text-slate-900">{props.access.length ? "На файле задано исключение" : "Файл наследует политику папки"}</div><div className="mt-2 text-sm leading-6 text-slate-500">{props.access.length ? folderPolicySummary(props.access, props.groups) : "Рекомендуемый режим. Файл использует те же правила доступа, что и папка."}</div></div><div className="border-t border-slate-200 pt-3"><div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Эффективный доступ</div>{props.loading ? <div className="mt-3 text-sm text-slate-500">Пересчитываю права...</div> : <div className="mt-3 flex flex-wrap gap-2"><Badge tone={effectiveAccessTone(props.effectiveStaff)}>Сотрудники: {effectiveAccessLabel(props.effectiveStaff)}</Badge><Badge tone={effectiveAccessTone(props.effectiveClient)}>Клиенты: {effectiveAccessLabel(props.effectiveClient)}</Badge></div>}</div></div></div>;
+function FileOverview(props: { file: KbFile; folderMap: Map<number, KbFolder>; access: KbAclItem[]; effectiveStaff: string; effectiveClient: string; loading: boolean; groups: KbAccountGroup[]; onReindex: () => void; onDelete: () => void; detailsSaving: boolean }) {
+  return <div className="space-y-4"><OverviewLabel title="Обзор файла" /><div className="space-y-3"><div><div className="text-xl font-semibold text-slate-950">{props.file.filename}</div><div className="mt-1 text-sm text-slate-500">{buildFolderPath(props.file.folder_id ?? null, props.folderMap)}</div></div><AccessBadges target={props.file} /><div className="border-t border-slate-200 pt-3"><div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Режим файла</div><div className="mt-2 text-sm font-medium text-slate-900">{props.access.length ? "На файле задано исключение" : "Файл наследует политику папки"}</div><div className="mt-2 text-sm leading-6 text-slate-500">{props.access.length ? folderPolicySummary(props.access, props.groups) : "Рекомендуемый режим. Файл использует те же правила доступа, что и папка."}</div></div><div className="border-t border-slate-200 pt-3"><div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Эффективный доступ</div>{props.loading ? <div className="mt-3 text-sm text-slate-500">Пересчитываю права...</div> : <div className="mt-3 flex flex-wrap gap-2"><Badge tone={effectiveAccessTone(props.effectiveStaff)}>Сотрудники: {effectiveAccessLabel(props.effectiveStaff)}</Badge><Badge tone={effectiveAccessTone(props.effectiveClient)}>Клиенты: {effectiveAccessLabel(props.effectiveClient)}</Badge></div>}</div><div className="border-t border-slate-200 pt-3"><div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Действия файла</div><div className="mt-3 flex flex-wrap gap-2"><Button size="sm" variant="secondary" onClick={props.onReindex} disabled={props.detailsSaving}>Переиндексировать</Button><Button size="sm" variant="danger" onClick={props.onDelete}>Удалить</Button></div><div className="mt-2 text-sm leading-6 text-slate-500">Переиндексация обновит векторизацию и результаты поиска по этому материалу.</div></div></div></div>;
 }
 
 function FolderAccessShell(props: {

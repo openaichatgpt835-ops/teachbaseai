@@ -123,7 +123,7 @@ export function InboundEventsPage() {
         {!settingsLoading && settings && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-2xl">
             <label className="flex items-center gap-2">
-              <input
+              <input className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                 type="checkbox"
                 checked={form.enabled ?? false}
                 onChange={(e) => setEditForm((f) => ({ ...f, enabled: e.target.checked }))}
@@ -131,7 +131,7 @@ export function InboundEventsPage() {
               enabled
             </label>
             <label className="flex items-center gap-2">
-              <input
+              <input className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                 type="checkbox"
                 checked={form.auto_prune_on_write ?? false}
                 onChange={(e) => setEditForm((f) => ({ ...f, auto_prune_on_write: e.target.checked }))}

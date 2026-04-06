@@ -62,7 +62,7 @@ def test_register_flow_user_gets_owner_permissions(db):
     perm = db.execute(
         select(AccountPermission).where(AccountPermission.membership_id == membership.id)
     ).scalar_one()
-    assert perm.kb_access == "write"
+    assert perm.kb_access == "manage"
     assert perm.can_invite_users is True
     assert perm.can_manage_settings is True
     assert perm.can_view_finance is True
@@ -100,4 +100,4 @@ def test_existing_owner_email_gets_owner_role(db):
     perm = db.execute(
         select(AccountPermission).where(AccountPermission.membership_id == membership.id)
     ).scalar_one()
-    assert perm.kb_access == "write"
+    assert perm.kb_access == "manage"

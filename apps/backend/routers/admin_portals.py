@@ -111,7 +111,7 @@ def admin_rbac_owners_audit(
     for r in rows:
         is_owner = (r.get("role") == "owner")
         has_owner_perms = (
-            (r.get("kb_access") == "write")
+            (r.get("kb_access") == "manage")
             and bool(r.get("can_invite_users"))
             and bool(r.get("can_manage_settings"))
             and bool(r.get("can_view_finance"))

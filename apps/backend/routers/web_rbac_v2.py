@@ -36,6 +36,7 @@ from apps.backend.services.billing import (
     is_account_user_limit_reached,
     list_billing_plans,
 )
+from apps.backend.services.kb_acl import normalize_kb_access_level
 from apps.backend.services.rbac_service import (
     get_account_id_by_portal_id,
     get_membership_ctx,
@@ -49,13 +50,13 @@ security = HTTPBearer(auto_error=False)
 
 _ROLE_DEFAULTS: dict[str, dict[str, object]] = {
     "owner": {
-        "kb_access": "write",
+        "kb_access": "manage",
         "can_invite_users": True,
         "can_manage_settings": True,
         "can_view_finance": True,
     },
     "admin": {
-        "kb_access": "write",
+        "kb_access": "edit",
         "can_invite_users": True,
         "can_manage_settings": True,
         "can_view_finance": True,
@@ -122,7 +123,7 @@ def _get_current_web_session(
 class InviteEmailBody(BaseModel):
     email: EmailStr
     role: str = "member"  # owner|admin|member|client
-    kb_access: str | None = None  # none|read|write
+    kb_access: str | None = None  # none|read|upload|edit|manage
     can_invite_users: bool | None = None
     can_manage_settings: bool | None = None
     can_view_finance: bool | None = None
@@ -188,8 +189,9 @@ def _normalize_role(role: str | None, *, allow_owner: bool = False) -> str:
 def _normalize_kb_access(v: str | None) -> str | None:
     if v is None:
         return None
-    vv = v.strip().lower()
-    if vv not in {"none", "read", "write"}:
+    try:
+        vv = normalize_kb_access_level(v, strict=True)
+    except ValueError:
         raise HTTPException(status_code=400, detail="invalid_kb_access")
     return vv
 
@@ -421,7 +423,7 @@ def _build_account_users_items(db: Session, account_id: int) -> list[dict]:
                 "role": m.role,
                 "status": m.status,
                 "permissions": {
-                    "kb_access": (p.kb_access if p else "none"),
+                    "kb_access": normalize_kb_access_level(p.kb_access if p else "none"),
                     "can_invite_users": bool(p.can_invite_users) if p else False,
                     "can_manage_settings": bool(p.can_manage_settings) if p else False,
                     "can_view_finance": bool(p.can_view_finance) if p else False,
@@ -576,7 +578,7 @@ def web_v2_me(
         "membership": (
             {
                 "role": membership.role,
-                "kb_access": membership.kb_access,
+                "kb_access": normalize_kb_access_level(membership.kb_access),
                 "can_invite_users": membership.can_invite_users,
                 "can_manage_settings": membership.can_manage_settings,
                 "can_view_finance": membership.can_view_finance,
@@ -596,7 +598,7 @@ def web_v2_permissions_schema(
     require_membership_ctx(db, account_id, user)
     return {
         "role": ["owner", "admin", "member", "client"],
-        "kb_access": ["none", "read", "write"],
+        "kb_access": ["none", "read", "upload", "edit", "manage"],
         "flags": ["can_invite_users", "can_manage_settings", "can_view_finance"],
     }
 

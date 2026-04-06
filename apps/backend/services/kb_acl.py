@@ -1,17 +1,44 @@
 """KB folders and ACL foundation helpers."""
 from __future__ import annotations
 
-KB_ACCESS_LEVELS = {"none", "read", "write", "admin"}
+KB_ACCESS_LEVELS = {"none", "read", "upload", "edit", "manage"}
+KB_ACCESS_ALIASES = {"write": "edit", "admin": "manage"}
 KB_PRINCIPAL_TYPES = {"membership", "role", "audience", "group"}
-_KB_ACCESS_RANK = {"none": 0, "read": 1, "write": 2, "admin": 3}
+_KB_ACCESS_RANK = {"none": 0, "read": 1, "upload": 2, "edit": 3, "manage": 4}
+
+
+def normalize_kb_access_level(value: str | None, *, strict: bool = False) -> str:
+    normalized = str(value or "none").strip().lower()
+    normalized = KB_ACCESS_ALIASES.get(normalized, normalized)
+    if normalized in KB_ACCESS_LEVELS:
+        return normalized
+    if strict:
+        raise ValueError("invalid_kb_access")
+    return "none"
+
+
+def kb_access_allows_read(value: str | None) -> bool:
+    return _KB_ACCESS_RANK.get(normalize_kb_access_level(value), 0) >= _KB_ACCESS_RANK["read"]
+
+
+def kb_access_allows_upload(value: str | None) -> bool:
+    return _KB_ACCESS_RANK.get(normalize_kb_access_level(value), 0) >= _KB_ACCESS_RANK["upload"]
+
+
+def kb_access_allows_edit(value: str | None) -> bool:
+    return _KB_ACCESS_RANK.get(normalize_kb_access_level(value), 0) >= _KB_ACCESS_RANK["edit"]
+
+
+def kb_access_allows_manage(value: str | None) -> bool:
+    return _KB_ACCESS_RANK.get(normalize_kb_access_level(value), 0) >= _KB_ACCESS_RANK["manage"]
 
 
 def default_kb_access_for_role(role: str | None) -> str:
     role_norm = str(role or "").strip().lower()
     if role_norm == "owner":
-        return "admin"
+        return "manage"
     if role_norm == "admin":
-        return "write"
+        return "edit"
     if role_norm == "member":
         return "read"
     if role_norm == "client":
@@ -57,21 +84,17 @@ def resolve_kb_acl_access(
     *,
     inherit_when_empty: bool = True,
 ) -> str:
-    inherited = str(inherited_access or "none").strip().lower()
-    if inherited not in _KB_ACCESS_RANK:
-        inherited = "none"
+    inherited = normalize_kb_access_level(inherited_access)
     best = inherited if inherit_when_empty and not acl_rows else "none"
     for row in acl_rows:
         if isinstance(row, dict):
             principal_type = str(row.get("principal_type") or "").strip().lower()
             principal_id = str(row.get("principal_id") or "").strip()
-            access_level = str(row.get("access_level") or "none").strip().lower()
+            access_level = normalize_kb_access_level(str(row.get("access_level") or "none"))
         else:
             principal_type = str(row[0] or "").strip().lower()
             principal_id = str(row[1] or "").strip()
-            access_level = str(row[2] or "none").strip().lower()
-        if access_level not in _KB_ACCESS_RANK:
-            continue
+            access_level = normalize_kb_access_level(str(row[2] or "none"))
         if (principal_type, principal_id) not in principals:
             continue
         if _KB_ACCESS_RANK[access_level] > _KB_ACCESS_RANK[best]:

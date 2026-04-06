@@ -150,7 +150,7 @@ export function EmbeddedTelegramPage() {
           <div className="text-sm font-semibold text-slate-900">{LABELS.staffTitle}</div>
           <div className="mt-4 space-y-3">
             <label className="flex items-center gap-2 text-sm text-slate-700">
-              <input
+              <input className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                 type="checkbox"
                 checked={staffConfig.enabled}
                 onChange={(e) => setStaffConfig((prev) => ({ ...prev, enabled: e.target.checked }))}
@@ -158,7 +158,7 @@ export function EmbeddedTelegramPage() {
               Включить
             </label>
             <label className="flex items-center gap-2 text-sm text-slate-700">
-              <input
+              <input className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                 type="checkbox"
                 checked={staffConfig.allow_uploads}
                 onChange={(e) => setStaffConfig((prev) => ({ ...prev, allow_uploads: e.target.checked }))}
@@ -193,7 +193,7 @@ export function EmbeddedTelegramPage() {
             {clientBotAllowed ? (
               <>
                 <label className="flex items-center gap-2 text-sm text-slate-700">
-                  <input
+                  <input className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                     type="checkbox"
                     checked={clientConfig.enabled}
                     onChange={(e) => setClientConfig((prev) => ({ ...prev, enabled: e.target.checked }))}
@@ -201,7 +201,7 @@ export function EmbeddedTelegramPage() {
                   Включить
                 </label>
                 <label className="flex items-center gap-2 text-sm text-slate-700">
-                  <input
+                  <input className="h-4 w-4 rounded border-slate-300 accent-sky-600"
                     type="checkbox"
                     checked={clientConfig.allow_uploads}
                     onChange={(e) => setClientConfig((prev) => ({ ...prev, allow_uploads: e.target.checked }))}
@@ -233,11 +233,11 @@ export function EmbeddedTelegramPage() {
                 <UpgradeNoticeBar {...UPGRADE_COPY.telegramClient} planName={planName} compact />
                 <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50/60 p-4 opacity-70">
                   <label className="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" checked={clientConfig.enabled} disabled onChange={() => null} />
+                    <input className="h-4 w-4 rounded border-slate-300 accent-sky-600" type="checkbox" checked={clientConfig.enabled} disabled onChange={() => null} />
                     Включить
                   </label>
                   <label className="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" checked={clientConfig.allow_uploads} disabled onChange={() => null} />
+                    <input className="h-4 w-4 rounded border-slate-300 accent-sky-600" type="checkbox" checked={clientConfig.allow_uploads} disabled onChange={() => null} />
                     {LABELS.uploads}
                   </label>
                   <input
