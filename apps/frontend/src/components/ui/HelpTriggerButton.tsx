@@ -1,4 +1,4 @@
-import { PlayCircle } from "lucide-react";
+﻿import { PlayCircle } from "lucide-react";
 import { Button } from "./Button";
 
 export function HelpTriggerButton(props: { onClick: () => void; label?: string; className?: string }) {

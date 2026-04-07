@@ -17,6 +17,7 @@ from apps.backend.routers import health, admin_auth, admin_portals
 from apps.backend.routers import admin_dialogs, admin_events, admin_outbox
 from apps.backend.routers import admin_system, admin_logs, admin_traces, admin_debug
 from apps.backend.routers import admin_settings, admin_inbound_events, admin_billing, admin_registrations
+from apps.backend.routers import admin_revenue_v2
 from apps.backend.routers import admin_errors
 from apps.backend.routers import bitrix, bitrix_botflow, bitrix_dialogs, portal, debug, admin_kb, telegram, web_auth
 from apps.backend.routers import web_rbac_v2
@@ -121,6 +122,7 @@ app.include_router(admin_settings.router, prefix="/v1/admin/settings", tags=["Ad
 app.include_router(admin_inbound_events.router, prefix="/v1/admin", tags=["Admin Inbound Events"])
 app.include_router(admin_kb.router, prefix="/v1/admin/kb", tags=["Admin KB"])
 app.include_router(admin_billing.router, prefix="/v1/admin/billing", tags=["Admin Billing"])
+app.include_router(admin_revenue_v2.router, prefix="/v1/admin/revenue", tags=["Admin Revenue v2"])
 app.include_router(admin_registrations.router, prefix="/v1/admin", tags=["Admin Registrations"])
 app.include_router(admin_errors.router, prefix="/v1/admin", tags=["Admin Errors"])
 app.include_router(bitrix.router, prefix="/v1/bitrix", tags=["Bitrix"])

@@ -1,5 +1,10 @@
-﻿import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { PageIntro } from "../../components/PageIntro";
+﻿import * as Dialog from "@radix-ui/react-dialog";
+import { ArrowUp, FileText, Plus, Search, Sparkles } from "lucide-react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
+import { Button } from "../../components/ui/Button";
+import { HelpTriggerButton } from "../../components/ui/HelpTriggerButton";
+import { Panel, PanelBody } from "../../components/ui/Panel";
 import { coreSectionCopy } from "../../../../shared/ui/sections";
 import { sourceSurfaceCopy } from "../../../../shared/ui/sourceSurface";
 import { appStateCopy } from "../../../../shared/ui/stateCopy";
@@ -33,6 +38,24 @@ type ChatMsg = {
   line_refs?: Record<string, number[]>;
 };
 
+type ChatTurn = {
+  id: string;
+  user: ChatMsg | null;
+  assistant: ChatMsg | null;
+};
+
+type ChatThread = {
+  id: string;
+  title: string;
+  updatedAt: number;
+  messages: ChatMsg[];
+};
+
+type ChatThreadStore = {
+  activeThreadId: string;
+  threads: ChatThread[];
+};
+
 type FileChunk = {
   id: number;
   chunk_index: number;
@@ -55,9 +78,57 @@ function chatStorageKey(scopeId: number) {
   return `tb_web_chat_history:${scopeId}:${email}`;
 }
 
-function chatScrollKey(scopeId: number) {
-  const email = (getWebUser()?.email || "").trim().toLowerCase() || "anonymous";
-  return `tb_web_chat_scroll:${scopeId}:${email}`;
+function makeThreadId() {
+  return `thread_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function defaultThread(title = "Новый чат"): ChatThread {
+  return {
+    id: makeThreadId(),
+    title,
+    updatedAt: Date.now(),
+    messages: [],
+  };
+}
+
+function normalizeThreadTitle(messages: ChatMsg[]): string {
+  const firstQuestion = messages.find((item) => item.role === "user")?.text?.trim() || "";
+  if (!firstQuestion) return "Новый чат";
+  return firstQuestion.length > 42 ? `${firstQuestion.slice(0, 42).trim()}...` : firstQuestion;
+}
+
+function normalizeThreadStore(raw: unknown): ChatThreadStore {
+  if (Array.isArray(raw)) {
+    const legacyMessages = raw as ChatMsg[];
+    const thread = {
+      ...defaultThread(normalizeThreadTitle(legacyMessages)),
+      messages: legacyMessages,
+      updatedAt: legacyMessages[legacyMessages.length - 1]?.ts || Date.now(),
+    };
+    return { activeThreadId: thread.id, threads: [thread] };
+  }
+  const parsed = raw && typeof raw === "object" ? (raw as Partial<ChatThreadStore>) : {};
+  const threads = Array.isArray(parsed.threads)
+    ? parsed.threads
+        .map((thread) => {
+          const safeMessages = Array.isArray((thread as ChatThread)?.messages) ? (thread as ChatThread).messages : [];
+          return {
+            id: String((thread as ChatThread)?.id || makeThreadId()),
+            title: String((thread as ChatThread)?.title || normalizeThreadTitle(safeMessages)),
+            updatedAt: Number((thread as ChatThread)?.updatedAt || Date.now()),
+            messages: safeMessages,
+          } as ChatThread;
+        })
+        .filter((thread) => thread.id)
+    : [];
+  if (!threads.length) {
+    const thread = defaultThread();
+    return { activeThreadId: thread.id, threads: [thread] };
+  }
+  const activeThreadId = threads.some((thread) => thread.id === parsed.activeThreadId)
+    ? String(parsed.activeThreadId)
+    : threads[0].id;
+  return { activeThreadId, threads };
 }
 
 function fileExt(name: string | undefined) {
@@ -770,17 +841,21 @@ function PdfHighlightViewer({
 }
 
 export function WebChatPage() {
+  const location = useLocation();
   const sectionCopy = coreSectionCopy("chat");
   const sourceUi = sourceSurfaceCopy();
   const stateCopy = appStateCopy();
   const { portalId, portalToken } = getWebPortalInfo();
   const activeAccountId = getActiveAccountId();
   const chatScopeId = activeAccountId || portalId;
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const isEmbedded = location.pathname.startsWith("/embedded/bitrix/");
+  const [threads, setThreads] = useState<ChatThread[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState("");
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [queuedCount, setQueuedCount] = useState(0);
   const [error, setError] = useState("");
+  const [howItWorksOpen, setHowItWorksOpen] = useState(false);
 
   const [previewSource, setPreviewSource] = useState<ChatSource | null>(null);
   const [previewChunks, setPreviewChunks] = useState<FileChunk[]>([]);
@@ -801,21 +876,23 @@ export function WebChatPage() {
   const [transcriptRawCount, setTranscriptRawCount] = useState<number | null>(null);
   const [transcriptMergedCount, setTranscriptMergedCount] = useState<number | null>(null);
 
-  const listRef = useRef<HTMLDivElement | null>(null);
+  const timelineEndRef = useRef<HTMLDivElement | null>(null);
   const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
   const pendingSeekMsRef = useRef<number | null>(null);
   const pendingSeekRetryRef = useRef<number | null>(null);
-  const sendQueueRef = useRef<string[]>([]);
+  const sendQueueRef = useRef<Array<{ threadId: string; query: string }>>([]);
   const chunkRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const leftChunkRefs = useRef<Map<number, HTMLDivElement>>(new Map());
-  const scrollRestoredRef = useRef(false);
+  const activeThread = useMemo(
+    () => threads.find((thread) => thread.id === activeThreadId) || threads[0] || null,
+    [threads, activeThreadId],
+  );
+  const messages = activeThread?.messages || [];
 
   const scrollToBottomPersist = () => {
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
-        if (!listRef.current) return;
-        listRef.current.scrollTop = listRef.current.scrollHeight;
-        if (chatScopeId) localStorage.setItem(chatScrollKey(chatScopeId), String(listRef.current.scrollTop));
+        timelineEndRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
       });
     });
   };
@@ -824,13 +901,20 @@ export function WebChatPage() {
     if (!chatScopeId) return;
     try {
       const raw = localStorage.getItem(chatStorageKey(chatScopeId));
-      const parsed = raw ? JSON.parse(raw) : [];
-      setMessages(Array.isArray(parsed) ? parsed : []);
+      const parsed = normalizeThreadStore(raw ? JSON.parse(raw) : null);
+      setThreads(parsed.threads);
+      setActiveThreadId(parsed.activeThreadId);
     } catch {
-      setMessages([]);
+      const fallback = defaultThread();
+      setThreads([fallback]);
+      setActiveThreadId(fallback.id);
     }
-    scrollRestoredRef.current = false;
   }, [chatScopeId]);
+
+  useEffect(() => {
+    if (!messages.length) return;
+    scrollToBottomPersist();
+  }, [messages.length]);
 
   useEffect(() => {
     if (!previewSource) return;
@@ -868,26 +952,20 @@ export function WebChatPage() {
   useEffect(() => {
     if (!chatScopeId) return;
     try {
-      localStorage.setItem(chatStorageKey(chatScopeId), JSON.stringify(messages.slice(-200)));
+      localStorage.setItem(
+        chatStorageKey(chatScopeId),
+        JSON.stringify({
+          activeThreadId,
+          threads: threads.map((thread) => ({
+            ...thread,
+            messages: thread.messages.slice(-200),
+          })),
+        } satisfies ChatThreadStore),
+      );
     } catch {
       // ignore
     }
-  }, [chatScopeId, messages]);
-
-  useEffect(() => {
-    if (!chatScopeId || scrollRestoredRef.current) return;
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        if (!listRef.current) return;
-        const raw = localStorage.getItem(chatScrollKey(chatScopeId));
-        const pos = raw != null ? Number(raw) : NaN;
-        // If scroll position is unknown/invalid (or stale "0"), open chat at bottom.
-        if (Number.isFinite(pos) && pos > 4) listRef.current.scrollTop = pos;
-        else listRef.current.scrollTop = listRef.current.scrollHeight;
-        scrollRestoredRef.current = true;
-      });
-    });
-  }, [chatScopeId, messages.length]);
+  }, [chatScopeId, activeThreadId, threads]);
 
   useEffect(() => {
     return () => {
@@ -898,17 +976,45 @@ export function WebChatPage() {
     };
   }, []);
 
-  const canSend = useMemo(() => !!portalId && !!portalToken && !!input.trim(), [portalId, portalToken, input]);
+  const canSend = useMemo(() => !!portalId && !!portalToken && !!input.trim() && !!activeThread, [portalId, portalToken, input, activeThread]);
+  const turns = useMemo<ChatTurn[]>(() => {
+    const grouped: ChatTurn[] = [];
+    for (let idx = 0; idx < messages.length; idx += 1) {
+      const current = messages[idx];
+      if (current.role === "user") {
+        const next = messages[idx + 1];
+        const assistant = next?.role === "assistant" ? next : null;
+        grouped.push({ id: `${current.ts}-${idx}`, user: current, assistant });
+        if (assistant) idx += 1;
+        continue;
+      }
+      grouped.push({ id: `${current.ts}-${idx}`, user: null, assistant: current });
+    }
+    return grouped;
+  }, [messages]);
+  const visibleThreads = useMemo(
+    () => [...threads].sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0)).slice(0, 8),
+    [threads],
+  );
 
-  const pushMessage = (msg: ChatMsg) => {
-    setMessages((prev) => {
-      const next = [...prev, msg];
+  const pushMessage = (msg: ChatMsg, targetThreadId = activeThreadId) => {
+    setThreads((prev) => {
+      const next = prev.map((thread) => {
+        if (thread.id !== targetThreadId) return thread;
+        const nextMessages = [...thread.messages, msg];
+        return {
+          ...thread,
+          messages: nextMessages,
+          updatedAt: Date.now(),
+          title: normalizeThreadTitle(nextMessages),
+        };
+      });
       scrollToBottomPersist();
       return next;
     });
   };
 
-  const runQueuedQuery = async (q: string) => {
+  const runQueuedQuery = async (q: string, targetThreadId: string) => {
     if (!portalId) return;
     setSending(true);
     try {
@@ -921,7 +1027,7 @@ export function WebChatPage() {
       if (!res.ok) {
         const err = formatRuntimeError(data?.error || data?.detail || stateCopy.askError, stateCopy.askError);
         setError(err);
-        pushMessage({ role: "assistant", text: `Не удалось выполнить запрос: ${err}`, ts: Date.now() });
+        pushMessage({ role: "assistant", text: `Не удалось выполнить запрос: ${err}`, ts: Date.now() }, targetThreadId);
         return;
       }
       const payload = data?.data || data || {};
@@ -931,13 +1037,13 @@ export function WebChatPage() {
         ts: Date.now(),
         sources: Array.isArray(payload?.sources) ? payload.sources : [],
         line_refs: payload?.line_refs && typeof payload.line_refs === "object" ? payload.line_refs : {},
-      });
+      }, targetThreadId);
     } finally {
       const next = sendQueueRef.current.shift() || null;
       setQueuedCount(sendQueueRef.current.length);
       if (next) {
         scrollToBottomPersist();
-        void runQueuedQuery(next);
+        void runQueuedQuery(next.query, next.threadId);
         return;
       }
       setSending(false);
@@ -950,15 +1056,17 @@ export function WebChatPage() {
     if (!canSend || !portalId) return;
     const q = input.trim();
     if (!q) return;
+    const targetThreadId = activeThread?.id;
+    if (!targetThreadId) return;
     setInput("");
     setError("");
-    pushMessage({ role: "user", text: q, ts: Date.now() });
+    pushMessage({ role: "user", text: q, ts: Date.now() }, targetThreadId);
     if (sending) {
-      sendQueueRef.current.push(q);
+      sendQueueRef.current.push({ threadId: targetThreadId, query: q });
       setQueuedCount(sendQueueRef.current.length);
       return;
     }
-    void runQueuedQuery(q);
+    void runQueuedQuery(q, targetThreadId);
   };
 
   const onInputKeyDown = (evt: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -992,6 +1100,25 @@ export function WebChatPage() {
       pendingSeekRetryRef.current = null;
     }
     chunkRefs.current.clear();
+  };
+
+  const clearHistory = () => {
+    if (!activeThread) return;
+    setThreads((prev) =>
+      prev.map((thread) =>
+        thread.id === activeThread.id ? { ...thread, messages: [], updatedAt: Date.now(), title: "Новый чат" } : thread,
+      ),
+    );
+    setError("");
+  };
+
+  const createNewThread = () => {
+    const thread = defaultThread();
+    setThreads((prev) => [thread, ...prev].slice(0, 12));
+    setActiveThreadId(thread.id);
+    setInput("");
+    setError("");
+    setQueuedCount(0);
   };
 
   const openSourcePreview = async (src: ChatSource, focusText?: string) => {
@@ -1238,21 +1365,24 @@ export function WebChatPage() {
     };
 
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-6">
-        <div className="flex h-[86vh] w-[94vw] max-w-7xl flex-col rounded-2xl bg-white shadow-2xl">
-          <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-            <div className="truncate text-sm font-semibold text-slate-900">{src.filename || sourceUi.sourceListTitle}</div>
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-6 backdrop-blur-sm">
+        <div className="flex h-[88vh] w-[94vw] max-w-7xl flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_30px_100px_rgba(15,23,42,0.25)]">
+          <div className="flex items-center justify-between gap-4 border-b border-slate-200 bg-white/95 px-5 py-4 backdrop-blur">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-slate-900">{src.filename || sourceUi.sourceListTitle}</div>
+              <div className="mt-1 text-xs text-slate-500">{buildSourceMeta(src)}</div>
+            </div>
             <div className="flex items-center gap-2">
               {downloadUrl && (
-                <a className="rounded-lg border border-slate-200 px-3 py-1 text-sm text-slate-700" href={downloadUrl} target="_blank" rel="noreferrer">
+                <a className="rounded-xl border border-slate-200 px-3 py-1.5 text-sm text-slate-700" href={downloadUrl} target="_blank" rel="noreferrer">
                   {sourceUi.downloadAction}
                 </a>
               )}
-              <button className="rounded-lg border border-slate-200 px-3 py-1 text-sm" onClick={closePreview}>{sourceUi.closeAction}</button>
+              <button className="rounded-xl border border-slate-200 px-3 py-1.5 text-sm" onClick={closePreview}>{sourceUi.closeAction}</button>
             </div>
           </div>
           <div className="grid flex-1 grid-cols-[1.2fr_0.8fr] gap-0 overflow-hidden">
-            <div className="overflow-auto bg-slate-50 p-3">
+            <div className="overflow-auto bg-slate-50/80 p-4">
               {previewLoading ? (
                 <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">{sourceUi.loadingPreviewLabel}</div>
               ) : (isExternalSource && !!externalEmbedUrl) ? (
@@ -1378,8 +1508,8 @@ export function WebChatPage() {
               )}
             </div>
             <div className="border-l border-slate-200 bg-white">
-              <div className="border-b border-slate-200 px-4 py-2 text-sm font-semibold text-slate-800">{sourceUi.contextPanelTitle}</div>
-              <div className="h-[calc(86vh-94px)] overflow-auto p-3">
+              <div className="border-b border-slate-200 px-4 py-3 text-sm font-semibold text-slate-800">{sourceUi.contextPanelTitle}</div>
+              <div className="h-[calc(88vh-102px)] overflow-auto p-4">
                 {(isVideo || isAudio) && (
                   <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
                     {sourceUi.transcriptStatusLabel}: {transcriptStatus || "unknown"}
@@ -1448,121 +1578,349 @@ export function WebChatPage() {
     );
   };
 
-  return (
-    <div className="space-y-4">
-      <PageIntro
-        moduleId="chat"
-        fallbackTitle="Чат"
-        fallbackDescription="Диалог с моделью по базе знаний аккаунта."
-      />
+  const suggestedPrompts = [
+    "Как подключить Telegram-бота?",
+    "Где настраиваются права доступа к папкам?",
+    "Какие тарифы доступны?",
+  ];
 
-      <div className="rounded-2xl border border-slate-200 bg-white p-4">
-        <div
-          ref={listRef}
-          className="h-[56vh] overflow-y-auto rounded-xl border border-slate-100 bg-slate-50 p-4"
-          onScroll={() => {
-            if (!chatScopeId || !listRef.current || messages.length === 0) return;
-            localStorage.setItem(chatScrollKey(chatScopeId), String(listRef.current.scrollTop));
-          }}
-        >
+  return (
+    <div className={isEmbedded ? "space-y-3" : "space-y-4"}>
+      <HowItWorksDialog open={howItWorksOpen} onOpenChange={setHowItWorksOpen} />
+
+      <div className={`sticky ${isEmbedded ? "top-14" : "top-16"} z-[5]`}>
+        <Panel tone="elevated" className="border-slate-200/90 bg-white/95 shadow-[0_16px_45px_rgba(15,23,42,0.08)] backdrop-blur">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0 flex items-center gap-3">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Чат по базе знаний</div>
+              <div className="truncate text-[13px] text-slate-600">Задай вопрос и открой источники прямо из ответа.</div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {messages.length > 0 ? <Button size="sm" variant="ghost" onClick={clearHistory}>Очистить историю</Button> : null}
+              <HelpTriggerButton onClick={() => setHowItWorksOpen(true)} className="shrink-0" />
+            </div>
+          </div>
+          <div className={`flex flex-wrap items-center gap-2 border-t border-slate-100 ${isEmbedded ? "mt-2 pt-2" : "mt-3 pt-3"}`}>
+            {visibleThreads.map((thread) => (
+              <button
+                key={thread.id}
+                type="button"
+                onClick={() => {
+                  setActiveThreadId(thread.id);
+                  setError("");
+                }}
+                className={`max-w-[240px] rounded-full border px-3 py-1.5 text-[13px] transition ${
+                  thread.id === activeThreadId
+                    ? "border-sky-200 bg-sky-50 text-sky-700"
+                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
+                }`}
+              >
+                <span className="block truncate">{thread.title || "Новый чат"}</span>
+              </button>
+            ))}
+            <Button size="sm" variant="secondary" onClick={createNewThread} className="shrink-0">
+              <Plus className="mr-2 h-4 w-4" />
+              Новый чат
+            </Button>
+          </div>
+        </Panel>
+      </div>
+
+      <Panel tone="elevated" className="border-slate-200">
+        <PanelBody className={`mt-0 ${isEmbedded ? "space-y-2.5" : "space-y-3"}`}>
           {!messages.length ? (
-            <div className="text-sm text-slate-500">{sectionCopy.chatSubtitle}</div>
+            <ChatEmptyState prompts={suggestedPrompts} onPickPrompt={setInput} subtitle={sectionCopy.chatSubtitle} />
           ) : (
-            <div className="space-y-3">
-              {messages.map((m, idx) => (
-                <div key={`${m.ts}-${idx}`} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-                  {(() => {
-                    const hasBackendRefs = !!(m.line_refs && Object.keys(m.line_refs).length);
-                    const msgSources = m.role === "assistant" ? (hasBackendRefs ? (m.sources || []) : uniqueSources(m.sources)) : [];
-                    const refsByLine =
-                      m.role === "assistant" && msgSources.length
-                        ? (hasBackendRefs
-                            ? new Map<number, number[]>(
-                                Object.entries(m.line_refs || {})
-                                  .map(([k, v]) => [Number(k), Array.isArray(v) ? v : []] as [number, number[]])
-                                  .filter(([k]) => Number.isFinite(k))
-                              )
-                            : lineRefsMap(m.text, msgSources))
-                        : null;
-                    const usedSourceIdx = new Set<number>();
-                    refsByLine?.forEach((refs) => {
-                      refs.forEach((srcIdx) => {
-                        if (Number.isInteger(srcIdx) && srcIdx >= 0 && srcIdx < msgSources.length) usedSourceIdx.add(srcIdx);
-                      });
-                    });
-                    const sourceIndexMap = new Map<number, number>();
-                    const orderedUsed = Array.from(usedSourceIdx).sort((a, b) => a - b);
-                    if (orderedUsed.length > 0) {
-                      orderedUsed.forEach((origIdx, pos) => {
-                        const next = pos + 1;
-                        sourceIndexMap.set(origIdx, next);
-                      });
-                    } else {
-                      msgSources.forEach((_src, idx) => {
-                        sourceIndexMap.set(idx, idx + 1);
-                      });
-                    }
-                    return (
-                  <div className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-6 ${m.role === "user" ? "bg-sky-600 text-white" : "border border-slate-200 bg-white text-slate-800"}`}>
-                    {m.role !== "assistant" || !msgSources.length ? (
-                      m.text
-                    ) : (
-                      <div className="space-y-1">
-                        {String(m.text || "").split("\n").map((line, lineIdx) => {
-                          const refs = refsByLine?.get(lineIdx) || [];
-                          const mappedRefs = Array.from(
-                            new Set(
-                              refs.map((srcIdx) => sourceIndexMap.get(srcIdx) || srcIdx + 1)
-                            )
-                          );
-                          if (!line) return <div key={`${m.ts}-line-${lineIdx}`} className="h-4" />;
-                          return (
-                            <div key={`${m.ts}-line-${lineIdx}`} className="whitespace-pre-wrap">
-                              <span>{line}</span>
-                              {mappedRefs.map((displayIdx) => (
-                                <button
-                                  key={`${m.ts}-${lineIdx}-${displayIdx}`}
-                                  type="button"
-                                className="ml-1 text-sky-700 underline"
-                                onClick={() => {
-                                    const srcIdx = refs.find((r) => (sourceIndexMap.get(r) || r + 1) === displayIdx);
-                                    const s = srcIdx == null ? null : msgSources[srcIdx];
-                                    if (s) void openSourcePreview(s, line);
-                                  }}
-                                >
-                                  [{displayIdx}]
-                                </button>
-                              ))}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
+            <div className="space-y-5">
+              {turns.map((turn) => {
+                const assistantMsg = turn.assistant;
+                const hasBackendRefs = !!(assistantMsg?.line_refs && Object.keys(assistantMsg.line_refs).length);
+                const msgSources = assistantMsg ? (hasBackendRefs ? (assistantMsg.sources || []) : uniqueSources(assistantMsg.sources)) : [];
+                const refsByLine =
+                  assistantMsg && msgSources.length
+                    ? (hasBackendRefs
+                        ? new Map<number, number[]>(
+                            Object.entries(assistantMsg.line_refs || {})
+                              .map(([k, v]) => [Number(k), Array.isArray(v) ? v : []] as [number, number[]])
+                              .filter(([k]) => Number.isFinite(k))
+                          )
+                        : lineRefsMap(assistantMsg.text, msgSources))
+                    : null;
+                const usedSourceIdx = new Set<number>();
+                refsByLine?.forEach((refs) => {
+                  refs.forEach((srcIdx) => {
+                    if (Number.isInteger(srcIdx) && srcIdx >= 0 && srcIdx < msgSources.length) usedSourceIdx.add(srcIdx);
+                  });
+                });
+                const sourceIndexMap = new Map<number, number>();
+                const orderedUsed = Array.from(usedSourceIdx).sort((a, b) => a - b);
+                if (orderedUsed.length > 0) {
+                  orderedUsed.forEach((origIdx, pos) => sourceIndexMap.set(origIdx, pos + 1));
+                } else {
+                  msgSources.forEach((_src, srcIdx) => sourceIndexMap.set(srcIdx, srcIdx + 1));
+                }
+                const evidenceSources = (orderedUsed.length > 0
+                  ? orderedUsed.map((srcIdx) => ({ src: msgSources[srcIdx], displayIdx: sourceIndexMap.get(srcIdx) || srcIdx + 1 }))
+                  : msgSources.map((src, srcIdx) => ({ src, displayIdx: srcIdx + 1 }))).filter((entry) => !!entry.src);
+
+                return (
+                  <div key={turn.id} className="space-y-3">
+                    {turn.user ? <UserQuestionCard text={turn.user.text} ts={turn.user.ts} /> : null}
+                    {assistantMsg ? (
+                      <AssistantAnswerCard
+                        text={assistantMsg.text}
+                        ts={assistantMsg.ts}
+                        msgSources={msgSources}
+                        refsByLine={refsByLine}
+                        sourceIndexMap={sourceIndexMap}
+                        evidenceSources={evidenceSources}
+                        onOpenSource={openSourcePreview}
+                      />
+                    ) : null}
                   </div>
-                    );
-                  })()}
-                </div>
-              ))}
+                );
+              })}
+              {sending ? <ChatThinkingCard queuedCount={queuedCount} /> : null}
+              {error ? <ChatErrorCard message={error} onReuseLastQuestion={() => setInput((prev) => prev || messages.filter((m) => m.role === "user").slice(-1)[0]?.text || "")} /> : null}
+              <div ref={timelineEndRef} />
             </div>
           )}
-        </div>
+        </PanelBody>
+      </Panel>
 
-        <form className="mt-4 flex items-end gap-3" onSubmit={onSubmit}>
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={onInputKeyDown}
-            rows={3}
-            placeholder="Введите вопрос..."
-            className="min-h-[92px] flex-1 resize-y rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-sky-400"
-          />
-          <button type="submit" disabled={!canSend} className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">
-            {sending ? `Отправка...${queuedCount > 0 ? ` (+${queuedCount})` : ""}` : sectionCopy.sendAction}
-          </button>
-        </form>
-        {error && <div className="mt-2 text-sm text-rose-600">{error}</div>}
+      <div className={`sticky ${isEmbedded ? "bottom-3" : "bottom-4"} z-10`}>
+        <Panel tone="elevated" className="border-slate-200 shadow-[0_18px_45px_rgba(15,23,42,0.12)]">
+          <PanelBody className="mt-0">
+            <form className="space-y-3" onSubmit={onSubmit}>
+              <div className={`rounded-[22px] border border-slate-200 bg-white px-4 ${isEmbedded ? "py-2.5" : "py-3"} shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]`}>
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={onInputKeyDown}
+                  rows={2}
+                  placeholder="Например: как подключить Telegram-бота и где настраиваются права доступа?"
+                  className={`${isEmbedded ? "min-h-[56px]" : "min-h-[68px]"} w-full resize-none border-0 bg-transparent p-0 text-[14px] leading-6 text-slate-800 outline-none placeholder:text-slate-400`}
+                />
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="text-[11px] text-slate-500">Enter — отправить, Shift+Enter — новая строка</div>
+                <Button type="submit" variant="primary" disabled={!canSend} className="min-w-[132px]">
+                  <ArrowUp className="mr-2 h-4 w-4" />
+                  {sending ? `Отправка${queuedCount > 0 ? ` (+${queuedCount})` : ""}` : sectionCopy.sendAction}
+                </Button>
+              </div>
+            </form>
+          </PanelBody>
+        </Panel>
       </div>
       {renderPreview()}
     </div>
   );
+}
+
+
+
+function HowItWorksDialog(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  return (
+    <Dialog.Root open={props.open} onOpenChange={props.onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/35 backdrop-blur-sm" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(860px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-[28px] border border-slate-200 bg-white p-6 shadow-[0_24px_90px_rgba(15,23,42,0.22)]">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <Dialog.Title className="text-2xl font-semibold text-slate-950">Как устроен чат по базе знаний</Dialog.Title>
+              <Dialog.Description className="mt-2 text-sm leading-6 text-slate-600">Здесь вопрос, ответ и источники собраны в один рабочий поток. Чат не придумывает материалы сам: он опирается на документы и фрагменты, доступные в аккаунте.</Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <Button size="sm" variant="secondary">Закрыть</Button>
+            </Dialog.Close>
+          </div>
+          <div className="mt-6 grid gap-4 md:grid-cols-3">
+            <div className="rounded-3xl border border-slate-200 bg-slate-50 px-4 py-4">
+              <div className="text-sm font-semibold text-slate-900">Ответ</div>
+              <div className="mt-2 text-sm leading-6 text-slate-600">Модель собирает краткий ответ по материалам базы знаний и показывает его как отдельный результат, а не как обычный чат-пузырь.</div>
+            </div>
+            <div className="rounded-3xl border border-slate-200 bg-slate-50 px-4 py-4">
+              <div className="text-sm font-semibold text-slate-900">Источники</div>
+              <div className="mt-2 text-sm leading-6 text-slate-600">Под каждым ответом можно открыть документы и фрагменты, на которые он опирается. Это помогает быстро проверить вывод модели.</div>
+            </div>
+            <div className="rounded-3xl border border-slate-200 bg-slate-50 px-4 py-4">
+              <div className="text-sm font-semibold text-slate-900">Предпросмотр</div>
+              <div className="mt-2 text-sm leading-6 text-slate-600">Предпросмотр источников использует текущую логику PDF, текста, медиа и таймкодов. Мы меняем только интерфейс вокруг неё, а не сам движок.</div>
+            </div>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function ChatEmptyState(props: { prompts: string[]; onPickPrompt: (value: string) => void; subtitle: string }) {
+  return (
+    <div className="rounded-[28px] border border-dashed border-slate-200 bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.07),_transparent_38%),linear-gradient(180deg,_#ffffff,_#f8fafc)] px-6 py-9 text-center">
+      <div className="mx-auto inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-sky-200 bg-sky-50 text-sky-700">
+        <Search className="h-5 w-5" />
+      </div>
+      <div className="mt-4 text-[26px] font-semibold text-slate-950">Спроси базу знаний</div>
+      <div className="mx-auto mt-3 max-w-2xl text-[14px] leading-6 text-slate-600">Найду ответ по доступным материалам и покажу, на какие документы он опирается.</div>
+      <div className="mt-6 flex flex-wrap justify-center gap-2">
+        {props.prompts.map((prompt) => (
+          <button key={prompt} type="button" onClick={() => props.onPickPrompt(prompt)} className="rounded-full border border-slate-200 bg-white px-4 py-2 text-[13px] text-slate-700 transition hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700">
+            {prompt}
+          </button>
+        ))}
+      </div>
+      <div className="mx-auto mt-6 max-w-2xl rounded-2xl border border-slate-200 bg-white/80 px-4 py-3 text-[13px] leading-6 text-slate-500">{props.subtitle}</div>
+    </div>
+  );
+}
+
+function UserQuestionCard(props: { text: string; ts: number }) {
+  return (
+    <div className="flex justify-end">
+      <div className="max-w-[78%] rounded-[22px] border border-sky-200 bg-sky-50 px-5 py-3.5 text-slate-900 shadow-[0_8px_20px_rgba(14,165,233,0.08)]">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sky-600">Вопрос</div>
+        <div className="mt-2 whitespace-pre-wrap text-[14px] leading-6">{props.text}</div>
+        <div className="mt-2.5 text-xs text-slate-400">{new Date(props.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+      </div>
+    </div>
+  );
+}
+
+function ChatThinkingCard(props: { queuedCount: number }) {
+  const phases = [
+    "🛰 Отправляю запрос в рабочий контур",
+    "📚 Поднимаю документы и заметки по теме",
+    "🎬 Сверяю фрагменты из медиа и вложений",
+    "🧠 Собираю короткий ответ без лишнего шума",
+  ];
+  const [phaseIdx, setPhaseIdx] = useState(0);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setPhaseIdx((prev) => (prev + 1) % phases.length);
+    }, 1600);
+    return () => window.clearInterval(timer);
+  }, [phases.length]);
+
+  return (
+    <div className="rounded-[24px] border border-slate-200 bg-[linear-gradient(180deg,_#ffffff,_#f8fbff)] px-4 py-4 shadow-[0_8px_20px_rgba(15,23,42,0.05)]">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-sky-50 text-sky-600">
+          <Sparkles className="h-[18px] w-[18px] animate-pulse" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <div className="text-[13px] font-semibold text-slate-900">Готовлю ответ</div>
+            {props.queuedCount > 0 ? <div className="text-xs text-slate-500">В очереди: {props.queuedCount}</div> : null}
+          </div>
+          <div className="mt-1 text-[13px] text-slate-600">{phases[phaseIdx]}</div>
+        </div>
+      </div>
+      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-100">
+        <div key={phaseIdx} className="h-full w-1/2 animate-[pulse_1.6s_ease-in-out_infinite] rounded-full bg-sky-400/80" />
+      </div>
+    </div>
+  );
+}
+
+function ChatErrorCard(props: { message: string; onReuseLastQuestion: () => void }) {
+  return (
+    <div className="rounded-[28px] border border-rose-200 bg-rose-50/80 px-5 py-5 text-sm text-rose-700">
+      <div className="text-[13px] font-semibold text-rose-800">Не удалось получить ответ</div>
+      <div className="mt-2 text-[14px] leading-6">{props.message}</div>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Button size="sm" variant="secondary" onClick={props.onReuseLastQuestion}>Вернуть вопрос в поле</Button>
+      </div>
+    </div>
+  );
+}
+
+function AssistantAnswerCard(props: {
+  text: string;
+  ts: number;
+  msgSources: ChatSource[];
+  refsByLine: Map<number, number[]> | null;
+  sourceIndexMap: Map<number, number>;
+  evidenceSources: Array<{ src: ChatSource; displayIdx: number }>;
+  onOpenSource: (src: ChatSource, focusText?: string) => void | Promise<void>;
+}) {
+  return (
+    <div className="rounded-[24px] border border-slate-200 bg-white px-5 py-4.5 shadow-[0_10px_30px_rgba(15,23,42,0.06)]">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Ответ</div>
+          <div className="mt-1 text-[13px] text-slate-500">По материалам базы знаний</div>
+        </div>
+        <div className="text-xs text-slate-400">{new Date(props.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+      </div>
+      <div className="mt-3.5 space-y-2 text-[14px] leading-6 text-slate-800">
+        {String(props.text || "").split("\n").map((line, lineIdx) => {
+          const refs = props.refsByLine?.get(lineIdx) || [];
+          const mappedRefs = Array.from(new Set(refs.map((srcIdx) => props.sourceIndexMap.get(srcIdx) || srcIdx + 1)));
+          if (!line) return <div key={`line-${lineIdx}`} className="h-4" />;
+          const trimmed = line.trim();
+          const isBullet = /^([-*•]|\d+[.)])\s+/.test(trimmed);
+          const normalizedLine = isBullet ? trimmed.replace(/^([-*•]|\d+[.)])\s+/, "") : line;
+          return (
+            <div key={`line-${lineIdx}`} className={isBullet ? "flex items-start gap-3" : "whitespace-pre-wrap"}>
+              {isBullet ? <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-300" /> : null}
+              <div className="min-w-0">
+                <span>{normalizedLine}</span>
+                {mappedRefs.map((displayIdx) => (
+                  <button
+                    key={`${lineIdx}-${displayIdx}`}
+                    type="button"
+                    className="ml-1 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full border border-sky-200 bg-sky-100 px-1.5 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-200"
+                    onClick={() => {
+                      const srcIdx = refs.find((r) => (props.sourceIndexMap.get(r) || r + 1) === displayIdx);
+                      const s = srcIdx == null ? null : props.msgSources[srcIdx];
+                      if (s) void props.onOpenSource(s, line);
+                    }}
+                  >
+                    {displayIdx}
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {props.evidenceSources.length > 0 ? (
+        <div className="mt-4 border-t border-slate-100 pt-4">
+          <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+            <FileText className="h-4 w-4 text-slate-400" />
+            Источники
+          </div>
+          <div className="mt-3 space-y-2.5">
+            {props.evidenceSources.map(({ src, displayIdx }) => (
+              <button key={`${sourceKey(src)}-${displayIdx}`} type="button" onClick={() => void props.onOpenSource(src)} className="flex w-full items-start justify-between gap-3 rounded-[18px] border border-slate-200 bg-slate-50/85 px-4 py-3 text-left transition hover:border-sky-200 hover:bg-sky-50">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start gap-2">
+                    <span className="mt-0.5 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-sky-100 px-1.5 text-[11px] font-semibold text-sky-700">
+                      {displayIdx}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="line-clamp-1 text-[13px] font-medium text-slate-900">{src.filename || "Источник без названия"}</div>
+                      <div className="mt-1 text-[11px] text-slate-500">{buildSourceMeta(src)}</div>
+                    </div>
+                  </div>
+                </div>
+                <span className="shrink-0 text-xs font-medium text-sky-700">Открыть</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function buildSourceMeta(src: ChatSource) {
+  const parts: string[] = [];
+  const type = String(src.source_type || src.mime_type || "").trim();
+  if (type) parts.push(type);
+  if (src.page_num) parts.push(`стр. ${src.page_num}`);
+  if (src.start_ms != null) parts.push(fmtMs(src.start_ms));
+  return parts.join(" · ") || "Фрагмент из базы знаний";
 }

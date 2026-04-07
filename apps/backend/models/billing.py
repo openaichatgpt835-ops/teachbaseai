@@ -76,7 +76,9 @@ class AccountSubscription(Base):
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
     plan_id = Column(Integer, ForeignKey("billing_plans.id", ondelete="RESTRICT"), nullable=False, index=True)
+    plan_version_id = Column(Integer, ForeignKey("billing_plan_versions.id", ondelete="RESTRICT"), nullable=True, index=True)
     status = Column(String(32), nullable=False, default="trial")
+    billing_cycle = Column(String(32), nullable=False, default="monthly")
     trial_until = Column(DateTime, nullable=True)
     started_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
@@ -91,6 +93,83 @@ class AccountPlanOverride(Base):
     account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
     limits_json = Column(JSONB, nullable=True)
     features_json = Column(JSONB, nullable=True)
+    valid_from = Column(DateTime, nullable=True)
+    valid_to = Column(DateTime, nullable=True)
+    reason = Column(String(255), nullable=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class BillingPlanVersion(Base):
+    __tablename__ = "billing_plan_versions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    plan_id = Column(Integer, ForeignKey("billing_plans.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_code = Column(String(64), nullable=False, unique=True, index=True)
+    name = Column(String(128), nullable=False)
+    price_month = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(16), nullable=False, default="RUB")
+    limits_json = Column(JSONB, nullable=True)
+    features_json = Column(JSONB, nullable=True)
+    valid_from = Column(DateTime, nullable=True)
+    valid_to = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    is_default_for_new_accounts = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class BillingCohort(Base):
+    __tablename__ = "billing_cohorts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(64), nullable=False, unique=True, index=True)
+    name = Column(String(128), nullable=False)
+    description = Column(Text, nullable=True)
+    rule_json = Column(JSONB, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class BillingCohortAssignment(Base):
+    __tablename__ = "billing_cohort_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    cohort_id = Column(Integer, ForeignKey("billing_cohorts.id", ondelete="CASCADE"), nullable=False, index=True)
+    source = Column(String(32), nullable=False, default="manual")
+    reason = Column(String(255), nullable=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class BillingCohortPolicy(Base):
+    __tablename__ = "billing_cohort_policies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    cohort_id = Column(Integer, ForeignKey("billing_cohorts.id", ondelete="CASCADE"), nullable=False, index=True)
+    plan_version_id = Column(Integer, ForeignKey("billing_plan_versions.id", ondelete="RESTRICT"), nullable=False, index=True)
+    discount_type = Column(String(32), nullable=False, default="none")
+    discount_value = Column(Numeric(12, 2), nullable=True)
+    feature_adjustments_json = Column(JSONB, nullable=True)
+    limit_adjustments_json = Column(JSONB, nullable=True)
+    valid_from = Column(DateTime, nullable=True)
+    valid_to = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class BillingAccountAdjustment(Base):
+    __tablename__ = "billing_account_adjustments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind = Column(String(64), nullable=False, index=True)
+    target_key = Column(String(128), nullable=True)
+    value_json = Column(JSONB, nullable=True)
     valid_from = Column(DateTime, nullable=True)
     valid_to = Column(DateTime, nullable=True)
     reason = Column(String(255), nullable=True)

@@ -22,9 +22,6 @@ import { B24AppPage } from "./pages/b24/B24AppPage";
 import { RegisterPage } from "./pages/web/RegisterPage";
 import { WebLoginPage } from "./pages/web/WebLoginPage";
 import { WebLayout } from "./pages/web/WebLayout";
-import { WebOverviewPage } from "./pages/web/WebOverviewPage";
-import { WebStubPage } from "./pages/web/WebStubPage";
-import { WebKbPage } from "./pages/web/WebKbPage";
 import { WebUsersPage } from "./pages/web/WebUsersPage";
 import { WebUsersPageV2 } from "./pages/web/WebUsersPageV2";
 import { WebSettingsPage } from "./pages/web/WebSettingsPage";
@@ -34,8 +31,6 @@ import { ConfirmEmailPage } from "./pages/web/ConfirmEmailPage";
 import { AcceptInvitePage } from "./pages/web/AcceptInvitePage";
 import { WebForgotPasswordPage } from "./pages/web/WebForgotPasswordPage";
 import { WebResetPasswordPage } from "./pages/web/WebResetPasswordPage";
-import { WebAiRopPage } from "./pages/web/WebAiRopPage";
-import { WebAiRopAccessPage } from "./pages/web/WebAiRopAccessPage";
 import { WebChatPage } from "./pages/web/WebChatPage";
 import { WebKbPageV2 } from "./pages/web/WebKbPageV2";
 import { EmbeddedBitrixGate } from "./pages/embedded/EmbeddedBitrixGate";
@@ -54,29 +49,29 @@ export default function App() {
       <Route path="/confirm" element={<ConfirmEmailPage />} />
       <Route path="/invite/accept" element={<AcceptInvitePage />} />
       <Route path="/app" element={<WebLayout />}>
-        <Route index element={<Navigate to="/app/overview" replace />} />
-        <Route path="overview" element={<WebOverviewPage />} />
+        <Route index element={<Navigate to="/app/chat" replace />} />
+        <Route path="overview" element={<Navigate to="/app/chat" replace />} />
         <Route path="chat" element={<WebChatPage />} />
         <Route path="kb" element={<WebKbPageV2 />} />
         <Route path="kb-v2" element={<WebKbPageV2 />} />
         <Route path="sources" element={<Navigate to="/app/kb" replace />} />
         <Route path="users" element={<WebUsersPageV2 />} />
         <Route path="users-legacy" element={<WebUsersPage />} />
-        <Route path="analytics" element={<WebStubPage title="Аналитика" />} />
+        <Route path="analytics" element={<Navigate to="/app/chat" replace />} />
         <Route path="settings" element={<WebSettingsPage />} />
         <Route path="billing" element={<WebBillingPage />} />
         <Route path="settings/integrations" element={<WebIntegrationsPage />} />
-        <Route path="ai-rop" element={<WebAiRopPage />} />
-        <Route path="ai-rop/access" element={<WebAiRopAccessPage />} />
-        <Route path="ai-rop/trainer" element={<WebStubPage title="AI Тренер" />} />
-        <Route path="ai-rop/analyst" element={<WebStubPage title="AI Аналитик" />} />
+        <Route path="ai-rop" element={<Navigate to="/app/chat" replace />} />
+        <Route path="ai-rop/access" element={<Navigate to="/app/chat" replace />} />
+        <Route path="ai-rop/trainer" element={<Navigate to="/app/chat" replace />} />
+        <Route path="ai-rop/analyst" element={<Navigate to="/app/chat" replace />} />
       </Route>
       <Route path="/embedded/bitrix" element={<EmbeddedBitrixGate />}>
         <Route element={<EmbeddedBitrixLayout />}>
-          <Route index element={<Navigate to="/embedded/bitrix/overview" replace />} />
-          <Route path="overview" element={<WebOverviewPage />} />
+          <Route index element={<Navigate to="/embedded/bitrix/chat" replace />} />
+          <Route path="overview" element={<Navigate to="/embedded/bitrix/chat" replace />} />
           <Route path="chat" element={<WebChatPage />} />
-          <Route path="kb" element={<WebKbPage />} />
+          <Route path="kb" element={<WebKbPageV2 />} />
           <Route path="sources" element={<Navigate to="/embedded/bitrix/kb" replace />} />
           <Route path="users" element={<EmbeddedBitrixUsersPage />} />
           <Route path="settings" element={<WebSettingsPage />} />

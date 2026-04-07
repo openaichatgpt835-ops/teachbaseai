@@ -31,7 +31,9 @@ const LABELS = {
   logout: "\u0412\u044b\u0439\u0442\u0438",
 } as const;
 
-const primaryModules = coreModulesByGroup("web", "primary").filter((item) => item.id !== "sources");
+const primaryModules = coreModulesByGroup("web", "primary").filter(
+  (item) => item.id !== "overview" && item.id !== "sources" && item.id !== "analytics" && item.id !== "settings",
+);
 const settingsModules = coreModulesByGroup("web", "settings");
 
 const userFacingPathMatch = (pathname: string, modulePath?: string) => {
@@ -50,7 +52,6 @@ export function WebLayout() {
   const [switchingAccount, setSwitchingAccount] = useState(false);
   const [demoUntil, setDemoUntil] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [aiRopOpen, setAiRopOpen] = useState(false);
   const userLabel = useMemo(() => user?.email || LABELS.user, [user]);
   const activeAccount = useMemo(
     () => accounts.find((item) => Number(item.id) === Number(activeAccountId)) || null,
@@ -120,7 +121,6 @@ export function WebLayout() {
 
   useEffect(() => {
     setSettingsOpen(location.pathname.includes("/settings"));
-    setAiRopOpen(location.pathname.includes("/ai-rop"));
   }, [location.pathname]);
 
   if (!user || !portalId || !portalToken) {
@@ -169,7 +169,6 @@ export function WebLayout() {
                 to={item.webPath || "/app/overview"}
                 onClick={() => {
                   setSettingsOpen(false);
-                  setAiRopOpen(false);
                 }}
               >
                 {label}
@@ -181,7 +180,6 @@ export function WebLayout() {
             to="/app/billing"
             onClick={() => {
               setSettingsOpen(false);
-              setAiRopOpen(false);
             }}
           >
             {LABELS.billing}
@@ -190,7 +188,6 @@ export function WebLayout() {
             type="button"
             className={`w-full text-left rounded-xl px-3 py-2 ${location.pathname.includes("/settings") ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-50"}`}
             onClick={() => {
-              setAiRopOpen(false);
               setSettingsOpen((prev) => !prev);
               navigate("/app/settings");
             }}
@@ -213,22 +210,6 @@ export function WebLayout() {
                 {item.label}
               </Link>
             ))}
-          </div>
-          <button
-            className={`w-full text-left rounded-xl px-3 py-2 ${location.pathname.includes("/ai-rop") ? "bg-sky-50 text-sky-700" : "text-slate-600 hover:bg-slate-50"}`}
-            onClick={() => {
-              setSettingsOpen(false);
-              setAiRopOpen((prev) => !prev);
-              navigate("/app/ai-rop");
-            }}
-          >
-            {LABELS.aiRop}
-          </button>
-          <div className="ml-4 mt-1 space-y-1 overflow-hidden transition-all" style={{ maxHeight: aiRopOpen ? 140 : 0, opacity: aiRopOpen ? 1 : 0.4 }}>
-            <Link className={`block rounded-lg px-3 py-2 text-xs ${location.pathname === "/app/ai-rop" ? "text-sky-700" : "text-slate-500 hover:bg-slate-50"}`} to="/app/ai-rop">{LABELS.basics}</Link>
-            <Link className={`block rounded-lg px-3 py-2 text-xs ${location.pathname.includes("/ai-rop/access") ? "text-sky-700" : "text-slate-500 hover:bg-slate-50"}`} to="/app/ai-rop/access">{LABELS.access}</Link>
-            <Link className={`block rounded-lg px-3 py-2 text-xs ${location.pathname.includes("/ai-rop/trainer") ? "text-sky-700" : "text-slate-500 hover:bg-slate-50"}`} to="/app/ai-rop/trainer">{LABELS.trainer}</Link>
-            <Link className={`block rounded-lg px-3 py-2 text-xs ${location.pathname.includes("/ai-rop/analyst") ? "text-sky-700" : "text-slate-500 hover:bg-slate-50"}`} to="/app/ai-rop/analyst">{LABELS.analyst}</Link>
           </div>
         </nav>
       </aside>

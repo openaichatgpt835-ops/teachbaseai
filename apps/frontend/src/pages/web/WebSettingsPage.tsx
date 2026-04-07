@@ -568,15 +568,6 @@ export function WebSettingsPage() {
               />
             </Field>
           </div>
-          <div className="mt-4 flex items-center gap-3">
-            <button
-              className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700"
-              onClick={saveSettings}
-            >
-              Сохранить
-            </button>
-            {settingsMessage && <div className="text-xs text-slate-500">{settingsMessage}</div>}
-          </div>
         </details>
       ) : (
         <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
@@ -613,6 +604,21 @@ export function WebSettingsPage() {
             </div>
         </div>
       )}
+
+      <div className="sticky bottom-4 z-10">
+        <div className="flex justify-end">
+          <div className="flex flex-col items-end gap-2">
+            <button
+              className="shrink-0 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-[0_12px_28px_rgba(14,165,233,0.28)] hover:bg-sky-700"
+              onClick={saveSettings}
+            >
+              Сохранить
+            </button>
+            {settingsMessage ? <div className="text-xs text-slate-500">{settingsMessage}</div> : null}
+          </div>
+        </div>
+      </div>
+
     </div>
   );
 }

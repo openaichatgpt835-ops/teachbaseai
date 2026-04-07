@@ -15,7 +15,7 @@ const LABELS = {
   demoUntil: "\u0414\u0435\u043c\u043e \u0434\u043e",
 } as const;
 
-const EMBEDDED_PRIMARY = new Set(["overview", "chat", "kb", "users", "settings"]);
+const EMBEDDED_PRIMARY = new Set(["chat", "kb", "users", "settings"]);
 
 function resolveCabinetPath(pathname: string) {
   if (pathname.startsWith("/embedded/bitrix/chat")) return "/app/chat";
@@ -25,7 +25,7 @@ function resolveCabinetPath(pathname: string) {
   if (pathname.startsWith("/embedded/bitrix/settings/telegram")) return "/app/settings/integrations";
   if (pathname.startsWith("/embedded/bitrix/settings")) return "/app/settings";
   if (pathname.startsWith("/embedded/bitrix/billing")) return "/app/billing";
-  return "/app/overview";
+  return "/app/chat";
 }
 
 function isActive(pathname: string, route: string | undefined) {
@@ -131,7 +131,7 @@ export function EmbeddedBitrixLayout() {
             </div>
           </div>
         </header>
-        <main className="px-8 py-8">
+        <main className="px-8 py-4">
           <Outlet context={ctx} />
         </main>
       </div>
