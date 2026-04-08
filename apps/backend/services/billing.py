@@ -469,6 +469,272 @@ def delete_account_adjustment_v2(db: Session, *, adjustment_id: int) -> dict[str
     return payload
 
 
+def _cohort_policy_payload(row: BillingCohortPolicy | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "id": int(row.id),
+        "cohort_id": int(row.cohort_id),
+        "plan_version_id": int(row.plan_version_id),
+        "discount_type": row.discount_type,
+        "discount_value": float(row.discount_value or 0),
+        "feature_adjustments_json": dict(row.feature_adjustments_json or {}),
+        "limit_adjustments_json": dict(row.limit_adjustments_json or {}),
+        "valid_from": row.valid_from.isoformat() if row.valid_from else None,
+        "valid_to": row.valid_to.isoformat() if row.valid_to else None,
+        "is_active": bool(row.is_active),
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _cohort_payload(db: Session, row: BillingCohort | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    policies = db.execute(
+        select(BillingCohortPolicy)
+        .where(BillingCohortPolicy.cohort_id == row.id)
+        .order_by(desc(BillingCohortPolicy.created_at), desc(BillingCohortPolicy.id))
+    ).scalars().all()
+    active_policies = [item for item in policies if _is_active_window(item.valid_from, item.valid_to)]
+    account_count = int(
+        db.execute(
+            select(func.count(BillingCohortAssignment.id)).where(BillingCohortAssignment.cohort_id == row.id)
+        ).scalar()
+        or 0
+    )
+    return {
+        "id": int(row.id),
+        "code": row.code,
+        "name": row.name,
+        "description": row.description,
+        "rule_json": dict(row.rule_json or {}),
+        "is_active": bool(row.is_active),
+        "accounts_count": account_count,
+        "policies": [_cohort_policy_payload(item) for item in active_policies],
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def list_revenue_cohorts_v2(db: Session) -> list[dict[str, Any]]:
+    rows = db.execute(select(BillingCohort).order_by(BillingCohort.id.asc())).scalars().all()
+    return [_cohort_payload(db, row) for row in rows if row]
+
+
+def _normalize_cohort_rule(rule_json: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(rule_json or {})
+    unknown = sorted(set(payload) - ALLOWED_COHORT_RULE_KEYS)
+    if unknown:
+        raise ValueError("invalid_cohort_rule_keys")
+    normalized: dict[str, Any] = {}
+    if "account_created_before" in payload:
+        normalized["account_created_before"] = str(payload["account_created_before"])
+    if "account_created_after" in payload:
+        normalized["account_created_after"] = str(payload["account_created_after"])
+    if "channel" in payload:
+        normalized["channel"] = str(payload["channel"]).strip().lower()
+    if "manual_tag" in payload:
+        normalized["manual_tag"] = str(payload["manual_tag"]).strip()
+    return normalized
+
+
+def create_revenue_cohort_v2(
+    db: Session,
+    *,
+    code: str,
+    name: str,
+    description: str | None = None,
+    rule_json: dict[str, Any] | None = None,
+    is_active: bool = True,
+) -> dict[str, Any]:
+    normalized_code = (code or "").strip().lower()
+    if not normalized_code:
+        raise ValueError("cohort_code_required")
+    if db.execute(select(BillingCohort).where(BillingCohort.code == normalized_code)).scalars().first():
+        raise ValueError("cohort_code_exists")
+    row = BillingCohort(
+        code=normalized_code,
+        name=(name or "").strip() or normalized_code,
+        description=(description or "").strip() or None,
+        rule_json=_normalize_cohort_rule(rule_json),
+        is_active=bool(is_active),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _cohort_payload(db, row)
+
+
+def update_revenue_cohort_v2(
+    db: Session,
+    *,
+    cohort_id: int,
+    name: str | None = None,
+    description: str | None = None,
+    rule_json: dict[str, Any] | None = None,
+    is_active: bool | None = None,
+) -> dict[str, Any]:
+    row = db.get(BillingCohort, cohort_id)
+    if not row:
+        raise ValueError("cohort_not_found")
+    if name is not None:
+        row.name = name.strip() or row.name
+    if description is not None:
+        row.description = description.strip() or None
+    if rule_json is not None:
+        row.rule_json = _normalize_cohort_rule(rule_json)
+    if is_active is not None:
+        row.is_active = bool(is_active)
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return _cohort_payload(db, row)
+
+
+def list_revenue_cohort_accounts_v2(db: Session, cohort_id: int, *, limit: int = 200) -> list[dict[str, Any]]:
+    cohort = db.get(BillingCohort, cohort_id)
+    if not cohort:
+        raise ValueError("cohort_not_found")
+    rows = db.execute(select(Account).order_by(Account.account_no.asc().nullslast(), Account.id.asc())).scalars().all()
+    items: list[dict[str, Any]] = []
+    manual_assignments = db.execute(
+        select(BillingCohortAssignment).where(BillingCohortAssignment.cohort_id == cohort_id)
+    ).scalars().all()
+    manual_ids = {int(item.account_id) for item in manual_assignments}
+    for account in rows:
+        source = None
+        if int(account.id) in manual_ids:
+            source = "manual"
+        elif cohort.is_active and _match_cohort_rule(db, account, cohort):
+            source = "auto"
+        if not source:
+            continue
+        items.append(
+            {
+                "id": int(account.id),
+                "account_no": int(account.account_no) if account.account_no is not None else None,
+                "name": account.name or f"Account #{account.id}",
+                "slug": account.slug,
+                "status": account.status,
+                "source": source,
+            }
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def upsert_revenue_cohort_policy_v2(
+    db: Session,
+    *,
+    cohort_id: int,
+    plan_version_id: int,
+    discount_type: str | None = None,
+    discount_value: float | None = None,
+    feature_adjustments_json: dict[str, Any] | None = None,
+    limit_adjustments_json: dict[str, Any] | None = None,
+    valid_from: datetime | None = None,
+    valid_to: datetime | None = None,
+    is_active: bool = True,
+) -> dict[str, Any]:
+    cohort = db.get(BillingCohort, cohort_id)
+    if not cohort:
+        raise ValueError("cohort_not_found")
+    version = db.get(BillingPlanVersion, plan_version_id)
+    if not version:
+        raise ValueError("plan_version_not_found")
+    dtype = (discount_type or "none").strip().lower()
+    if dtype not in {"none", "percent", "fixed"}:
+        raise ValueError("invalid_discount_type")
+    dvalue = float(discount_value or 0)
+    if dvalue < 0:
+        raise ValueError("discount_value_negative")
+    row = db.execute(
+        select(BillingCohortPolicy)
+        .where(BillingCohortPolicy.cohort_id == cohort_id)
+        .order_by(desc(BillingCohortPolicy.created_at), desc(BillingCohortPolicy.id))
+        .limit(1)
+    ).scalars().first()
+    if row is None:
+        row = BillingCohortPolicy(cohort_id=cohort_id, plan_version_id=plan_version_id)
+        db.add(row)
+    row.plan_version_id = plan_version_id
+    row.discount_type = dtype
+    row.discount_value = Decimal(str(dvalue))
+    row.feature_adjustments_json = _normalize_features_payload(feature_adjustments_json)
+    row.limit_adjustments_json = _normalize_limits_payload(limit_adjustments_json)
+    row.valid_from = valid_from
+    row.valid_to = valid_to
+    row.is_active = bool(is_active)
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return _cohort_policy_payload(row)
+
+
+def assign_account_to_cohort_v2(
+    db: Session,
+    *,
+    cohort_id: int,
+    account_id: int,
+    reason: str | None = None,
+    created_by: str | None = None,
+) -> dict[str, Any]:
+    cohort = db.get(BillingCohort, cohort_id)
+    account = db.get(Account, account_id)
+    if not cohort:
+        raise ValueError("cohort_not_found")
+    if not account:
+        raise ValueError("account_not_found")
+    existing = db.execute(
+        select(BillingCohortAssignment)
+        .where(BillingCohortAssignment.cohort_id == cohort_id)
+        .where(BillingCohortAssignment.account_id == account_id)
+        .limit(1)
+    ).scalars().first()
+    if existing:
+        return {
+            "id": int(existing.id),
+            "cohort_id": int(existing.cohort_id),
+            "account_id": int(existing.account_id),
+            "source": existing.source,
+            "reason": existing.reason,
+        }
+    row = BillingCohortAssignment(
+        cohort_id=cohort_id,
+        account_id=account_id,
+        source="manual",
+        reason=(reason or "").strip() or None,
+        created_by=(created_by or "").strip() or None,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {
+        "id": int(row.id),
+        "cohort_id": int(row.cohort_id),
+        "account_id": int(row.account_id),
+        "source": row.source,
+        "reason": row.reason,
+    }
+
+
+def unassign_account_from_cohort_v2(db: Session, *, cohort_id: int, account_id: int) -> dict[str, Any]:
+    row = db.execute(
+        select(BillingCohortAssignment)
+        .where(BillingCohortAssignment.cohort_id == cohort_id)
+        .where(BillingCohortAssignment.account_id == account_id)
+        .limit(1)
+    ).scalars().first()
+    if not row:
+        raise ValueError("cohort_assignment_not_found")
+    payload = {"deleted": True, "cohort_id": int(cohort_id), "account_id": int(account_id)}
+    db.delete(row)
+    db.commit()
+    return payload
+
+
 def get_active_subscription(db: Session, account_id: int) -> AccountSubscription | None:
     q = (
         select(AccountSubscription)

@@ -176,3 +176,32 @@ class BillingAccountAdjustment(Base):
     created_by = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class BillingPaymentAttempt(Base):
+    __tablename__ = "billing_payment_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    subscription_id = Column(Integer, ForeignKey("account_subscriptions.id", ondelete="SET NULL"), nullable=True, index=True)
+    plan_id = Column(Integer, ForeignKey("billing_plans.id", ondelete="SET NULL"), nullable=True, index=True)
+    plan_version_id = Column(Integer, ForeignKey("billing_plan_versions.id", ondelete="SET NULL"), nullable=True, index=True)
+    provider = Column(String(32), nullable=False, default="yookassa")
+    idempotence_key = Column(String(128), nullable=False, unique=True, index=True)
+    provider_payment_id = Column(String(128), nullable=True, unique=True, index=True)
+    status = Column(String(32), nullable=False, default="pending")
+    amount = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(16), nullable=False, default="RUB")
+    description = Column(Text, nullable=True)
+    confirmation_url = Column(Text, nullable=True)
+    return_url = Column(Text, nullable=True)
+    paid = Column(Boolean, nullable=False, default=False)
+    test = Column(Boolean, nullable=False, default=False)
+    error_message = Column(Text, nullable=True)
+    provider_payload_json = Column(JSONB, nullable=True)
+    metadata_json = Column(JSONB, nullable=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    succeeded_at = Column(DateTime, nullable=True)
+    canceled_at = Column(DateTime, nullable=True)

@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { PageIntro } from "../../components/PageIntro";
+﻿import { useEffect, useMemo, useState } from "react";
+import { HelpTriggerButton } from "../../components/ui/HelpTriggerButton";
 import { fetchWeb, getActiveAccountId } from "./auth";
 
 type BillingPlan = {
@@ -56,7 +56,7 @@ const FEATURE_LABELS: Record<string, string> = {
   allow_model_selection: "Выбор моделей",
   allow_advanced_model_tuning: "Тонкая настройка модели",
   allow_media_transcription: "Транскрибация медиа",
-  allow_speaker_diarization: "Диаризация / спикеры",
+  allow_speaker_diarization: "Разделение спикеров",
   allow_client_bot: "Клиентский бот",
   allow_bitrix_integration: "Интеграция с Bitrix24",
   allow_amocrm_integration: "Интеграция с AmoCRM",
@@ -64,51 +64,38 @@ const FEATURE_LABELS: Record<string, string> = {
 };
 
 const LIMIT_LABELS: Record<string, string> = {
-  requests_per_month: "Запросов в месяц",
-  media_minutes_per_month: "Минут медиа в месяц",
-  max_users: "Пользователей",
+  requests_per_month: "Запросы в месяц",
+  media_minutes_per_month: "Минуты медиа",
+  max_users: "Пользователи",
   max_storage_gb: "Хранилище, ГБ",
-  max_bitrix_portals: "Bitrix24-порталов",
+  max_bitrix_portals: "Bitrix24-порталы",
 };
 
-function formatMoneyRub(value: number | null | undefined) {
-  const amount = Number(value || 0);
-  return `${amount.toLocaleString("ru-RU")} ₽/мес`;
+function formatMoney(value: number | null | undefined, currency = "RUB") {
+  if (value == null) return "—";
+  return `${Number(value).toLocaleString("ru-RU")} ${currency}`;
 }
 
 function percentOf(used: number, limit: number) {
   if (!limit || limit <= 0) return 0;
-  return Math.min(100, Math.round((used / limit) * 100));
+  return Math.max(0, Math.min(100, Math.round((used / limit) * 100)));
 }
 
-function UsageCard({
-  title,
-  used,
-  limit,
-  suffix = "",
-}: {
-  title: string;
-  used: number | string;
-  limit: number | string;
-  suffix?: string;
-}) {
-  const usedNum = Number(used || 0);
-  const limitNum = Number(limit || 0);
-  const pct = percentOf(usedNum, limitNum);
-
+function usageItem(label: string, used: number, limit: number, suffix = "") {
+  const pct = percentOf(used, limit);
   return (
-    <div className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm">
-      <div className="text-sm text-slate-500">{title}</div>
-      <div className="mt-2 text-2xl font-semibold text-slate-900">
-        {usedNum.toLocaleString("ru-RU")}
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="text-xs font-medium uppercase tracking-[0.12em] text-slate-400">{label}</div>
+      <div className="mt-2 text-2xl font-semibold text-slate-950">
+        {used.toLocaleString("ru-RU")}
         {suffix}
       </div>
       <div className="mt-1 text-sm text-slate-500">
-        из {limitNum.toLocaleString("ru-RU")}
+        из {limit.toLocaleString("ru-RU")}
         {suffix}
       </div>
       <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
-        <div className="h-full rounded-full bg-sky-600" style={{ width: `${pct}%` }} />
+        <div className="h-full rounded-full bg-sky-500" style={{ width: `${pct}%` }} />
       </div>
       <div className="mt-2 text-xs text-slate-500">{pct}% лимита</div>
     </div>
@@ -121,6 +108,7 @@ export function WebBillingPage() {
   const [overview, setOverview] = useState<BillingOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [helpOpen, setHelpOpen] = useState(false);
 
   useEffect(() => {
     if (!accountId) return;
@@ -159,131 +147,141 @@ export function WebBillingPage() {
   }, [accountId]);
 
   const currentPlanCode = overview?.subscription?.plan?.code || overview?.effective_policy?.plan_code || "";
+  const currentPlan = overview?.subscription?.plan || null;
+
+  const visiblePlans = useMemo(() => plans.filter((plan) => plan.is_active), [plans]);
 
   return (
-    <div className="space-y-6">
-      <PageIntro
-        moduleId="billing"
-        fallbackTitle="Тарифы и оплата"
-        fallbackDescription="Текущий тариф, лимиты и доступные функции вашего аккаунта."
-      />
+    <div className="space-y-6 pb-8">
+      <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">Тарифы и оплата</div>
+            <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">Текущий тариф и лимиты</h1>
+            <p className="mt-2 max-w-3xl text-sm text-slate-600">
+              Текущий план, использование и доступные улучшения для вашего аккаунта.
+            </p>
+          </div>
+          <HelpTriggerButton onClick={() => setHelpOpen(true)} />
+        </div>
+      </section>
 
-      {loading && <div className="rounded-2xl border border-slate-100 bg-white p-6 text-sm text-slate-500 shadow-sm">Загрузка...</div>}
-      {error && <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">{error}</div>}
+      {loading ? <div className="rounded-3xl border border-slate-200 bg-white p-6 text-sm text-slate-500 shadow-sm">Загрузка тарифов...</div> : null}
+      {error ? <div className="rounded-3xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">{error}</div> : null}
 
-      {overview && !loading && (
+      {overview && !loading ? (
         <>
-          <section className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-            <div className="flex flex-wrap items-start justify-between gap-4">
+          <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-5">
               <div>
                 <div className="text-sm text-slate-500">Текущий тариф</div>
-                <div className="mt-1 text-2xl font-semibold text-slate-900">
-                  {overview.subscription?.plan?.name || "Default"}
-                </div>
-                <div className="mt-1 text-sm text-slate-500">
+                <div className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">{currentPlan?.name || "Индивидуальные условия"}</div>
+                <div className="mt-2 text-sm text-slate-500">
                   {overview.account.name || `Аккаунт ${overview.account.id}`}
                   {overview.account.account_no ? ` · №${overview.account.account_no}` : ""}
                 </div>
               </div>
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-                <div>
-                  Статус: <span className="font-semibold">{overview.subscription?.status || "default"}</span>
-                </div>
-                <div>
-                  Источник policy: <span className="font-semibold">{overview.effective_policy.source}</span>
-                </div>
-                <div className="mt-1 text-slate-500">
-                  {overview.subscription?.plan ? formatMoneyRub(overview.subscription.plan.price_month) : "Индивидуальные условия"}
+              <div className="min-w-[260px] rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-xs font-medium uppercase tracking-[0.12em] text-slate-400">Стоимость</div>
+                <div className="mt-2 text-2xl font-semibold text-slate-950">{currentPlan ? formatMoney(currentPlan.price_month, currentPlan.currency) : "Индивидуально"}</div>
+                <div className="mt-2 space-y-1 text-sm text-slate-600">
+                  <div>Статус: <span className="font-medium text-slate-900">{overview.subscription?.status || "default"}</span></div>
+                  <div>Роль: <span className="font-medium text-slate-900">{overview.membership.role}</span></div>
                 </div>
               </div>
             </div>
+            {overview.effective_policy.source !== "plan" ? (
+              <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                Для аккаунта действуют индивидуальные условия. Итоговые лимиты и функции могут отличаться от базового тарифа.
+              </div>
+            ) : null}
           </section>
 
           <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-            <UsageCard title="Запросы" used={overview.usage.requests_used} limit={overview.usage.requests_limit} />
-            <UsageCard title="Минуты медиа" used={overview.usage.media_minutes_used} limit={overview.usage.media_minutes_limit} />
-            <UsageCard title="Пользователи" used={overview.usage.users_used} limit={overview.usage.users_limit} />
-            <UsageCard title="Хранилище" used={overview.usage.storage_used_gb} limit={overview.usage.storage_limit_gb} suffix=" ГБ" />
-            <UsageCard title="Bitrix24-порталы" used={overview.usage.bitrix_portals_used || 0} limit={overview.usage.bitrix_portals_limit || 0} />
+            {usageItem("Запросы", overview.usage.requests_used, overview.usage.requests_limit)}
+            {usageItem("Минуты медиа", overview.usage.media_minutes_used, overview.usage.media_minutes_limit)}
+            {usageItem("Пользователи", overview.usage.users_used, overview.usage.users_limit)}
+            {usageItem("Хранилище", overview.usage.storage_used_gb, overview.usage.storage_limit_gb, " ГБ")}
+            {usageItem("Bitrix24-порталы", overview.usage.bitrix_portals_used || 0, overview.usage.bitrix_portals_limit || 0)}
           </section>
 
           <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-            <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-              <h2 className="text-sm font-semibold text-slate-900">Что входит в ваш тариф</h2>
+            <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-base font-semibold text-slate-900">Что входит</h2>
               <div className="mt-4 grid gap-3 md:grid-cols-2">
                 {Object.entries(FEATURE_LABELS).map(([key, label]) => {
                   const enabled = !!overview.effective_policy.features?.[key];
                   return (
                     <div
                       key={key}
-                      className={`rounded-xl border px-4 py-3 text-sm ${
-                        enabled ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-slate-50 text-slate-500"
-                      }`}
+                      className={[
+                        "rounded-2xl border px-4 py-3 text-sm",
+                        enabled ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-slate-50 text-slate-500",
+                      ].join(" ")}
                     >
                       <div className="font-medium">{label}</div>
-                      <div className="mt-1 text-xs">{enabled ? "Доступно" : "Недоступно на текущем тарифе"}</div>
+                      <div className="mt-1 text-xs">{enabled ? "Доступно" : "Недоступно на текущих условиях"}</div>
                     </div>
                   );
                 })}
               </div>
             </div>
 
-            <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-              <h2 className="text-sm font-semibold text-slate-900">Лимиты</h2>
+            <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-base font-semibold text-slate-900">Лимиты</h2>
               <div className="mt-4 space-y-3">
                 {Object.entries(LIMIT_LABELS).map(([key, label]) => (
-                  <div key={key} className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3 text-sm">
+                  <div key={key} className="flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-3 text-sm">
                     <span className="text-slate-600">{label}</span>
-                    <span className="font-semibold text-slate-900">
-                      {Number(overview.effective_policy.limits?.[key] || 0).toLocaleString("ru-RU")}
-                    </span>
+                    <span className="font-semibold text-slate-900">{Number(overview.effective_policy.limits?.[key] || 0).toLocaleString("ru-RU")}</span>
                   </div>
                 ))}
               </div>
-              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
-                За текущий период: {overview.usage.tokens_total.toLocaleString("ru-RU")} токенов,{" "}
-                {Number(overview.usage.cost_rub || 0).toLocaleString("ru-RU")} ₽ расходов.
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+                За период: {overview.usage.tokens_total.toLocaleString("ru-RU")} токенов · {Number(overview.usage.cost_rub || 0).toLocaleString("ru-RU")} ₽ расходов.
               </div>
             </div>
           </section>
 
-          <section className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-            <div className="flex items-start justify-between gap-4">
+          <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <h2 className="text-sm font-semibold text-slate-900">Доступные тарифы</h2>
-                <p className="mt-1 text-sm text-slate-500">Сравнение планов и функций. Смена тарифа пока через администратора.</p>
+                <h2 className="text-base font-semibold text-slate-900">Доступные тарифы</h2>
+                <p className="mt-1 text-sm text-slate-500">Сравнение текущего плана и возможных улучшений.</p>
               </div>
-              <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-700">
-                Чтобы повысить тариф, перейдите к администратору аккаунта или в поддержку.
+              <div className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-700">
+                Смена тарифа пока проводится через администратора или поддержку.
               </div>
             </div>
             <div className="mt-4 grid gap-4 lg:grid-cols-3">
-              {plans.map((plan) => {
+              {visiblePlans.map((plan) => {
                 const active = plan.code === currentPlanCode;
                 return (
-                  <div key={plan.id} className={`rounded-2xl border p-5 ${active ? "border-sky-300 bg-sky-50" : "border-slate-200 bg-white"}`}>
+                  <div key={plan.id} className={["rounded-3xl border p-5", active ? "border-sky-300 bg-sky-50" : "border-slate-200 bg-white"].join(" ")}>
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="text-lg font-semibold text-slate-900">{plan.name}</div>
-                        <div className="mt-1 text-sm text-slate-500">{formatMoneyRub(plan.price_month)}</div>
+                        <div className="mt-1 text-sm text-slate-500">{formatMoney(plan.price_month, plan.currency)} / месяц</div>
                       </div>
-                      {active && <span className="rounded-full bg-sky-600 px-2.5 py-1 text-xs font-semibold text-white">Текущий</span>}
+                      {active ? <span className="rounded-full bg-sky-600 px-2.5 py-1 text-xs font-semibold text-white">Текущий</span> : null}
                     </div>
                     <div className="mt-4 space-y-2 text-sm text-slate-600">
                       {Object.entries(LIMIT_LABELS).map(([key, label]) => (
-                        <div key={key} className="flex items-center justify-between">
+                        <div key={key} className="flex items-center justify-between gap-3">
                           <span>{label}</span>
                           <span className="font-medium text-slate-900">{Number(plan.limits?.[key] || 0).toLocaleString("ru-RU")}</span>
                         </div>
                       ))}
                     </div>
-                    <div className="mt-4 space-y-2 border-t border-slate-200 pt-4 text-sm">
-                      {Object.entries(FEATURE_LABELS).map(([key, label]) => (
-                        <div key={key} className={`flex items-center justify-between ${plan.features?.[key] ? "text-slate-700" : "text-slate-400"}`}>
-                          <span>{label}</span>
-                          <span>{plan.features?.[key] ? "Да" : "Нет"}</span>
-                        </div>
-                      ))}
+                    <div className="mt-4 border-t border-slate-200 pt-4">
+                      <div className="space-y-2 text-sm">
+                        {Object.entries(FEATURE_LABELS).slice(0, 4).map(([key, label]) => (
+                          <div key={key} className="flex items-center justify-between gap-3">
+                            <span className={plan.features?.[key] ? "text-slate-700" : "text-slate-400"}>{label}</span>
+                            <span className={plan.features?.[key] ? "text-slate-900" : "text-slate-400"}>{plan.features?.[key] ? "Да" : "Нет"}</span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 );
@@ -291,7 +289,37 @@ export function WebBillingPage() {
             </div>
           </section>
         </>
-      )}
+      ) : null}
+
+      {helpOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/25 px-4">
+          <div className="w-full max-w-2xl rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-semibold text-slate-950">Как это работает</h2>
+                <p className="mt-1 text-sm text-slate-500">Тариф определяет базовые лимиты и функции, а индивидуальные условия могут их менять.</p>
+              </div>
+              <button type="button" className="rounded-xl px-3 py-2 text-sm text-slate-600 hover:bg-slate-100" onClick={() => setHelpOpen(false)}>
+                Закрыть
+              </button>
+            </div>
+            <div className="mt-5 space-y-4 text-sm text-slate-600">
+              <div>
+                <div className="font-medium text-slate-900">Текущий тариф</div>
+                <div className="mt-1">Показывает базовую цену и набор возможностей, закреплённых за вашим аккаунтом.</div>
+              </div>
+              <div>
+                <div className="font-medium text-slate-900">Лимиты</div>
+                <div className="mt-1">Использование считается в рамках текущего расчётного периода.</div>
+              </div>
+              <div>
+                <div className="font-medium text-slate-900">Индивидуальные условия</div>
+                <div className="mt-1">Если для аккаунта действуют исключения, итоговые лимиты и функции могут отличаться от базового тарифа.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

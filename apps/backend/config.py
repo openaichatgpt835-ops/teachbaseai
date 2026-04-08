@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     rq_ingest_queue_name: str = "ingest"
     rq_outbox_queue_name: str = "outbox"
     kb_pgvector_enabled: bool = False
+    yookassa_shop_id: str = ""
+    yookassa_secret_key: str = ""
+    yookassa_return_url: str | None = None
 
 
 @lru_cache

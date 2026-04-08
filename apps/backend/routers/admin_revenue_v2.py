@@ -9,23 +9,37 @@ from sqlalchemy.orm import Session
 from apps.backend.auth import get_current_admin
 from apps.backend.deps import get_db
 from apps.backend.services.billing import (
+    assign_account_to_cohort_v2,
     create_account_adjustment_v2,
     create_billing_plan,
     create_billing_plan_version,
+    create_revenue_cohort_v2,
     delete_account_adjustment_v2,
     get_account_effective_commercial_policy_v2,
     get_account_effective_runtime_policy_v2,
     get_account_revenue_detail_v2,
+    list_revenue_cohort_accounts_v2,
+    list_revenue_cohorts_v2,
     list_billing_plan_versions,
     list_billing_plans_v2,
     list_account_adjustments_v2,
     list_revenue_accounts_v2,
     set_billing_plan_version_active,
     set_billing_plan_version_default,
+    unassign_account_from_cohort_v2,
     update_billing_plan,
     update_billing_plan_version,
     update_account_adjustment_v2,
+    update_revenue_cohort_v2,
     upsert_account_subscription,
+    upsert_revenue_cohort_policy_v2,
+)
+from apps.backend.services.billing_payments import (
+    create_yookassa_payment_attempt,
+    get_payment_attempt_detail,
+    get_yookassa_config_health,
+    list_payment_attempts,
+    refresh_yookassa_payment_attempt,
 )
 
 router = APIRouter()
@@ -188,6 +202,128 @@ def revenue_set_plan_version_default(
         _bad_request(exc)
 
 
+@router.get("/cohorts")
+def revenue_list_cohorts(
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_admin),
+):
+    return {"items": list_revenue_cohorts_v2(db)}
+
+
+@router.post("/cohorts")
+def revenue_create_cohort(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_admin),
+):
+    try:
+        return create_revenue_cohort_v2(
+            db,
+            code=str(payload.get("code") or ""),
+            name=str(payload.get("name") or ""),
+            description=payload.get("description"),
+            rule_json=payload.get("rule_json") if "rule_json" in payload else payload.get("rule"),
+            is_active=bool(payload.get("is_active", True)),
+        )
+    except ValueError as exc:
+        _bad_request(exc)
+
+
+@router.put("/cohorts/{cohort_id}")
+def revenue_update_cohort(
+    cohort_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_admin),
+):
+    try:
+        return update_revenue_cohort_v2(
+            db,
+            cohort_id=cohort_id,
+            name=payload.get("name"),
+            description=payload.get("description"),
+            rule_json=payload.get("rule_json") if "rule_json" in payload else payload.get("rule"),
+            is_active=payload.get("is_active"),
+        )
+    except ValueError as exc:
+        _bad_request(exc)
+
+
+@router.get("/cohorts/{cohort_id}/accounts")
+def revenue_list_cohort_accounts(
+    cohort_id: int,
+    limit: int = Query(200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_admin),
+):
+    try:
+        return {"items": list_revenue_cohort_accounts_v2(db, cohort_id, limit=limit)}
+    except ValueError as exc:
+        _bad_request(exc)
+
+
+@router.put("/cohorts/{cohort_id}/policy")
+def revenue_upsert_cohort_policy(
+    cohort_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_admin),
+):
+    try:
+        return upsert_revenue_cohort_policy_v2(
+            db,
+            cohort_id=cohort_id,
+            plan_version_id=int(payload.get("plan_version_id")),
+            discount_type=payload.get("discount_type"),
+            discount_value=payload.get("discount_value"),
+            feature_adjustments_json=payload.get("feature_adjustments_json")
+            if "feature_adjustments_json" in payload
+            else payload.get("features"),
+            limit_adjustments_json=payload.get("limit_adjustments_json")
+            if "limit_adjustments_json" in payload
+            else payload.get("limits"),
+            valid_from=_parse_dt(payload.get("valid_from")),
+            valid_to=_parse_dt(payload.get("valid_to")),
+            is_active=bool(payload.get("is_active", True)),
+        )
+    except ValueError as exc:
+        _bad_request(exc)
+
+
+@router.post("/cohorts/{cohort_id}/accounts/{account_id}")
+def revenue_assign_account_to_cohort(
+    cohort_id: int,
+    account_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(get_current_admin),
+):
+    try:
+        created_by = admin.get("sub") if isinstance(admin, dict) else None
+        return assign_account_to_cohort_v2(
+            db,
+            cohort_id=cohort_id,
+            account_id=account_id,
+            reason=payload.get("reason"),
+            created_by=created_by,
+        )
+    except ValueError as exc:
+        _bad_request(exc)
+
+
+@router.delete("/cohorts/{cohort_id}/accounts/{account_id}")
+def revenue_unassign_account_from_cohort(
+    cohort_id: int,
+    account_id: int,
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_admin),
+):
+    try:
+        return unassign_account_from_cohort_v2(db, cohort_id=cohort_id, account_id=account_id)
+    except ValueError as exc:
+        _bad_request(exc)
+
+
 @router.get("/accounts")
 def revenue_list_accounts(
     limit: int = Query(200, ge=1, le=1000),
@@ -322,5 +458,70 @@ def revenue_delete_account_adjustment(
     del account_id
     try:
         return delete_account_adjustment_v2(db, adjustment_id=adjustment_id)
+    except ValueError as exc:
+        _bad_request(exc)
+
+
+@router.get("/payments/health")
+def revenue_payments_health(
+    _: dict = Depends(get_current_admin),
+):
+    return get_yookassa_config_health()
+
+
+@router.get("/payments")
+def revenue_list_payment_attempts(
+    account_id: int | None = Query(default=None),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_admin),
+):
+    return {"items": list_payment_attempts(db, account_id=account_id, limit=limit)}
+
+
+@router.get("/payments/{attempt_id}")
+def revenue_get_payment_attempt(
+    attempt_id: int,
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_admin),
+):
+    try:
+        return get_payment_attempt_detail(db, attempt_id)
+    except ValueError as exc:
+        _bad_request(exc)
+
+
+@router.post("/accounts/{account_id}/payments")
+def revenue_create_payment_attempt(
+    account_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+    admin: dict = Depends(get_current_admin),
+):
+    try:
+        created_by = admin.get("sub") if isinstance(admin, dict) else None
+        return create_yookassa_payment_attempt(
+            db,
+            account_id=account_id,
+            plan_id=int(payload["plan_id"]) if payload.get("plan_id") is not None else None,
+            plan_version_id=int(payload["plan_version_id"]) if payload.get("plan_version_id") is not None else None,
+            amount=float(payload["amount"]) if payload.get("amount") is not None else None,
+            currency=payload.get("currency"),
+            description=payload.get("description"),
+            return_url=payload.get("return_url"),
+            created_by=created_by,
+        )
+    except ValueError as exc:
+        _bad_request(exc)
+
+
+@router.post("/payments/{attempt_id}/refresh")
+def revenue_refresh_payment_attempt(
+    attempt_id: int,
+    db: Session = Depends(get_db),
+    _: dict = Depends(get_current_admin),
+):
+    try:
+        return refresh_yookassa_payment_attempt(db, attempt_id=attempt_id)
     except ValueError as exc:
         _bad_request(exc)

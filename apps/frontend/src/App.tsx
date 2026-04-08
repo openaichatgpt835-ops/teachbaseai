@@ -1,4 +1,4 @@
-﻿import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate } from "react-router-dom";
 import { AdminLayout } from "./layouts/AdminLayout";
 import { LoginPage } from "./pages/admin/LoginPage";
 import { PortalsPage } from "./pages/admin/PortalsPage";
@@ -17,7 +17,7 @@ import { ErrorsPage } from "./pages/admin/ErrorsPage";
 import { RbacOwnersAuditPage } from "./pages/admin/RbacOwnersAuditPage";
 import { OperationsHomePage } from "./pages/admin/OperationsHomePage";
 import { AccountsHomePage } from "./pages/admin/AccountsHomePage";
-import { RevenueHomePage } from "./pages/admin/RevenueHomePage";
+import { RevenueConsoleV2 } from "./pages/admin/RevenueConsoleV2";
 import { B24AppPage } from "./pages/b24/B24AppPage";
 import { RegisterPage } from "./pages/web/RegisterPage";
 import { WebLoginPage } from "./pages/web/WebLoginPage";
@@ -83,7 +83,7 @@ export default function App() {
       <Route path="/admin" element={<AdminLayout />}>
         <Route path="operations" element={<OperationsHomePage />} />
         <Route path="accounts" element={<AccountsHomePage />} />
-        <Route path="revenue" element={<RevenueHomePage />} />
+        <Route path="revenue" element={<RevenueConsoleV2 />} />
         <Route path="portals" element={<PortalsPage />} />
         <Route path="portals/:id" element={<PortalDetailPage />} />
         <Route path="dialogs" element={<DialogsPage />} />
